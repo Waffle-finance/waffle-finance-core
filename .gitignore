@@ -80,6 +80,8 @@ temp/
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 wafflefinance.db
 coordinator/oversync.db
 
