@@ -23,6 +23,8 @@
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
     "@nomicfoundation/hardhat-verify": "^1.1.0",
     "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.0",
+    "chai": "^4.2.0",
     "hardhat": "^2.19.0",
     "hardhat-gas-reporter": "^1.0.9",
     "solhint": "^4.1.0",

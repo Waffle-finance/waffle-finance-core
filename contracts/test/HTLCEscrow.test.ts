@@ -19,6 +19,21 @@ async function deployToken() {
   return (await Token.deploy("MockToken", "MOCK", ethers.parseEther("1000000"))) as unknown as TestERC20;
 }
 
+// Receiver-mock modes (mirrors HTLCReceiverMock.Mode).
+const MODE_ACCEPT = 0;
+const MODE_REJECT = 1;
+const MODE_GUZZLE = 2;
+
+async function deployReceiver() {
+  const F = await ethers.getContractFactory("HTLCReceiverMock");
+  return await F.deploy();
+}
+
+async function deployNoFallbackReceiver() {
+  const F = await ethers.getContractFactory("NoFallbackReceiver");
+  return await F.deploy();
+}
+
 function randomBytes32() {
   return ethers.hexlify(ethers.randomBytes(32));
 }
@@ -368,8 +383,18 @@ describe("HTLCEscrow v2", () => {
       // None of the dangerous admin functions exist on the v2 contract.
       expect(escrowContract.emergencyWithdraw).to.be.undefined;
       expect(escrowContract.pause).to.be.undefined;
-      expect(escrowContract.withdraw).to.be.undefined;
       expect(escrowContract.transferOwnership).to.be.undefined;
+    });
+
+    it("withdraw() is a self-service pull, not a drain — reverts with no pending balance", async () => {
+      // The pull-payment `withdraw()` only ever returns a caller's OWN
+      // credited balance; it cannot move locked order funds. A caller with
+      // nothing credited gets nothing.
+      const [, , stranger] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      await expect(
+        escrow.connect(stranger).withdraw()
+      ).to.be.revertedWithCustomError(escrow, "NoPendingWithdrawal");
     });
 
     it("receive() rejects stray ETH", async () => {
@@ -378,6 +403,152 @@ describe("HTLCEscrow v2", () => {
       await expect(
         sender.sendTransaction({ to: await escrow.getAddress(), value: 1n })
       ).to.be.reverted;
+    });
+  });
+
+  describe("native payout failure handling", () => {
+    async function setupOrder(beneficiary: string) {
+      const [sender] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      await escrow.connect(sender).createOrder(
+        beneficiary,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      return { escrow, preimage, sender };
+    }
+
+    it("pushes directly to EOA beneficiaries — no deferral", async () => {
+      const [, beneficiary, relayer] = await ethers.getSigners();
+      const { escrow, preimage } = await setupOrder(beneficiary.address);
+      const escrowAddr = await escrow.getAddress();
+
+      const tx = await escrow.connect(relayer).claimOrder(1, preimage);
+      await expect(tx).to.not.emit(escrow, "PayoutDeferred");
+      expect(await escrow.pendingWithdrawals(beneficiary.address)).to.equal(0);
+      // Both legs left the contract: amount → beneficiary, deposit → relayer.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0);
+    });
+
+    it("claim defers the amount when the beneficiary reverts on receive, then funds are recoverable", async () => {
+      const [, , relayer] = await ethers.getSigners();
+      const receiver = await deployReceiver();
+      await receiver.setMode(MODE_REJECT);
+      const recvAddr = await receiver.getAddress();
+      const { escrow, preimage } = await setupOrder(recvAddr);
+      const escrowAddr = await escrow.getAddress();
+
+      // The claim succeeds (preimage revealed, order finalised) even though
+      // the beneficiary cannot accept the push; the amount is deferred.
+      await expect(escrow.connect(relayer).claimOrder(1, preimage))
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(1, recvAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderClaimed");
+
+      expect((await escrow.getOrder(1)).status).to.equal(1); // Claimed
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+      // The safety deposit still reached the relayer EOA directly.
+      expect(await escrow.pendingWithdrawals(relayer.address)).to.equal(0);
+      // Only the deferred amount remains in the contract.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
+
+      // While the beneficiary legitimately rejects ETH, withdraw reverts and
+      // the credited balance is preserved — nothing is lost.
+      await expect(receiver.pull(escrowAddr)).to.be.revertedWithCustomError(
+        escrow,
+        "NativeTransferFailed"
+      );
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+
+      // Once the beneficiary can accept ETH, it pulls the funds.
+      await receiver.setMode(MODE_ACCEPT);
+      await expect(receiver.pull(escrowAddr))
+        .to.emit(escrow, "Withdrawn")
+        .withArgs(recvAddr, AMOUNT);
+      expect(await ethers.provider.getBalance(recvAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(0);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0);
+    });
+
+    it("claim defers when the receive hook exceeds the gas stipend, then withdraw (full gas) succeeds", async () => {
+      const [, , relayer] = await ethers.getSigners();
+      const receiver = await deployReceiver();
+      await receiver.setMode(MODE_GUZZLE);
+      const recvAddr = await receiver.getAddress();
+      const { escrow, preimage } = await setupOrder(recvAddr);
+      const escrowAddr = await escrow.getAddress();
+
+      await expect(escrow.connect(relayer).claimOrder(1, preimage))
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(1, recvAddr, AMOUNT);
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+
+      // withdraw forwards all remaining gas, so the heavy receive completes.
+      await receiver.pull(escrowAddr);
+      expect(await ethers.provider.getBalance(recvAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(0);
+    });
+
+    it("refund defers when the refund address reverts on receive, then funds are recoverable", async () => {
+      const [sender, , cleaner] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const receiver = await deployReceiver();
+      await receiver.setMode(MODE_REJECT);
+      const recvAddr = await receiver.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      // refundAddress is the reverting contract.
+      await escrow.connect(sender).createOrder(
+        sender.address,
+        recvAddr,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      await time.increase(TIMELOCK + 1);
+
+      await expect(escrow.connect(cleaner).refundOrder(1))
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(1, recvAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderRefunded");
+
+      expect((await escrow.getOrder(1)).status).to.equal(2); // Refunded
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+
+      await receiver.setMode(MODE_ACCEPT);
+      await receiver.pull(await escrow.getAddress());
+      expect(await ethers.provider.getBalance(recvAddr)).to.equal(AMOUNT);
+    });
+
+    it("a beneficiary that can never accept ETH keeps the amount safely credited (nothing lost)", async () => {
+      const [, , relayer] = await ethers.getSigners();
+      const receiver = await deployNoFallbackReceiver();
+      const recvAddr = await receiver.getAddress();
+      const { escrow, preimage } = await setupOrder(recvAddr);
+      const escrowAddr = await escrow.getAddress();
+
+      await escrow.connect(relayer).claimOrder(1, preimage); // succeeds via deferral
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+
+      // The contract legitimately rejects the payment: withdraw reverts and
+      // the funds stay credited and held by the escrow.
+      await expect(receiver.pull(escrowAddr)).to.be.revertedWithCustomError(
+        escrow,
+        "NativeTransferFailed"
+      );
+      expect(await escrow.pendingWithdrawals(recvAddr)).to.equal(AMOUNT);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
     });
   });
 });

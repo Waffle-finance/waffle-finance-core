@@ -58,6 +58,8 @@ Funds move under exactly two conditions:
 1. A caller submits a preimage where `sha256(preimage) == hashlock` before `timelock` — funds go to `beneficiary`
 2. `timelock` has expired — anyone calls `refundOrder` and funds return to `refundAddress` (always the original user)
 
+**Robust native-ETH payout.** A `beneficiary` / `refundAddress` that is a smart contract may revert on receipt or exhaust the bounded gas stipend. Rather than letting that block a settlement backed by a valid preimage or an expired timelock, `HTLCEscrow` attempts a direct push and, if it fails, **credits the amount to the recipient's pull-payment balance** instead of reverting. The claim/refund still finalises (the preimage is revealed on-chain either way), and the recipient — and *only* that recipient — recovers the funds permissionlessly via `withdraw()`. This adds no custodial surface: credited funds are never pooled or operator-movable, and `withdraw()` can only return a caller's own balance, never locked order funds.
+
 The coordinator is a metadata service that never signs transactions touching user funds. Resolvers stake into `ResolverRegistry`; misbehaviour is slashable on-chain.
 
 | Attack vector | Validator-set bridge | WaffleFinance |

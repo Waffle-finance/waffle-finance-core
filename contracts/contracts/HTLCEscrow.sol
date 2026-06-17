@@ -52,6 +52,19 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     ///         locking funds for unreasonably long periods.
     uint64 public constant MAX_TIMELOCK = 24 * 60 * 60; // 24 hours
 
+    /// @notice Gas stipend forwarded when pushing a native-ETH payout to a
+    ///         recipient during claim/refund. Chosen to comfortably cover a
+    ///         plain EOA receipt and the receive hooks of common smart-contract
+    ///         wallets, while remaining bounded so that a recipient with
+    ///         expensive or adversarial receive logic cannot consume the gas
+    ///         the transaction needs to finalise the order. Any push that
+    ///         exceeds this stipend (or reverts) falls back to the
+    ///         pull-payment path — see {_payoutNative} and {withdraw}.
+    /// @dev    The stipend is *not* a safety-critical parameter: because the
+    ///         pull fallback always preserves the funds, a recipient that
+    ///         needs more gas than this simply withdraws in a second step.
+    uint256 public constant PAYOUT_GAS_STIPEND = 30_000;
+
     // ---------------------------------------------------------------
     // Storage
     // ---------------------------------------------------------------
@@ -75,6 +88,15 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     /// @notice Order data, keyed by order id.
     mapping(uint256 => Order) private _orders;
 
+    /// @notice Native ETH credited to an address whose push payout failed
+    ///         during a claim/refund, awaiting collection via {withdraw}.
+    /// @dev    This is a strictly per-recipient accounting of funds the
+    ///         contract already holds — it is NOT a pooled, operator-movable
+    ///         escrow. Only the credited address can pull its own balance, so
+    ///         the contract remains non-custodial: no one (including the
+    ///         deployer) can redirect or seize a credited payout.
+    mapping(address => uint256) private _pendingWithdrawals;
+
     // ---------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------
@@ -92,6 +114,7 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     error SafetyDepositTooSmall();
     error ResolverNotAuthorised();
     error NativeTransferFailed();
+    error NoPendingWithdrawal();
 
     // ---------------------------------------------------------------
     // Construction
@@ -199,10 +222,10 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
         uint256 safetyDeposit = order.safetyDeposit;
 
         // Locked amount → beneficiary.
-        _payout(order.token, order.beneficiary, amount);
+        _payout(order.token, order.beneficiary, amount, orderId);
         // Safety deposit → whoever submitted the claim.
         if (safetyDeposit > 0) {
-            _payout(address(0), msg.sender, safetyDeposit);
+            _payout(address(0), msg.sender, safetyDeposit, orderId);
         }
 
         emit OrderClaimed(orderId, msg.sender, _bytesToBytes32(preimage), amount, safetyDeposit);
@@ -223,12 +246,46 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
         uint256 amount = order.amount;
         uint256 safetyDeposit = order.safetyDeposit;
 
-        _payout(order.token, order.refundAddress, amount);
+        _payout(order.token, order.refundAddress, amount, orderId);
         if (safetyDeposit > 0) {
-            _payout(address(0), msg.sender, safetyDeposit);
+            _payout(address(0), msg.sender, safetyDeposit, orderId);
         }
 
         emit OrderRefunded(orderId, msg.sender, amount, safetyDeposit);
+    }
+
+    // ---------------------------------------------------------------
+    // Pull-payment recovery
+    // ---------------------------------------------------------------
+
+    /// @inheritdoc IHTLCEscrow
+    /// @dev Pull-payment counterpart to the push performed during
+    ///      claim/refund. Follows checks-effects-interactions and is
+    ///      `nonReentrant`: the credited balance is zeroed before the
+    ///      transfer, so a reentrant call sees nothing to withdraw. The
+    ///      transfer here forwards all remaining gas (unlike the bounded
+    ///      stipend used on the push path), so a contract recipient with
+    ///      legitimate receive logic can collect its funds and pay for that
+    ///      cost itself. If the transfer still fails the credit is restored
+    ///      and the call reverts, leaving funds recoverable on a later retry.
+    function withdraw() external nonReentrant returns (uint256 amount) {
+        amount = _pendingWithdrawals[msg.sender];
+        if (amount == 0) revert NoPendingWithdrawal();
+
+        _pendingWithdrawals[msg.sender] = 0;
+
+        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        if (!ok) {
+            _pendingWithdrawals[msg.sender] = amount;
+            revert NativeTransferFailed();
+        }
+
+        emit Withdrawn(msg.sender, amount);
+    }
+
+    /// @inheritdoc IHTLCEscrow
+    function pendingWithdrawals(address account) external view returns (uint256) {
+        return _pendingWithdrawals[account];
     }
 
     // ---------------------------------------------------------------
@@ -253,13 +310,39 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // Internals
     // ---------------------------------------------------------------
 
-    function _payout(address token, address to, uint256 amount) private {
+    /// @dev Routes a payout to its recipient. ERC20 transfers use SafeERC20
+    ///      and revert on failure as before (a failing token transfer is not
+    ///      a recoverable condition this contract can paper over). Native ETH
+    ///      payouts go through {_payoutNative}, which never reverts so that a
+    ///      valid claim/refund always settles.
+    function _payout(address token, address to, uint256 amount, uint256 orderId) private {
         if (token == address(0)) {
-            // Native ETH transfer.
-            (bool ok, ) = payable(to).call{value: amount}("");
-            if (!ok) revert NativeTransferFailed();
+            _payoutNative(to, amount, orderId);
         } else {
             IERC20(token).safeTransfer(to, amount);
+        }
+    }
+
+    /// @dev Pushes native ETH to `to` with a bounded gas stipend. If the push
+    ///      fails for any reason — the recipient reverts, has no payable
+    ///      fallback, or its receive hook exceeds {PAYOUT_GAS_STIPEND} — the
+    ///      amount is credited to the recipient's pull-payment balance and a
+    ///      {PayoutDeferred} event is emitted instead of reverting. This keeps
+    ///      the claim/refund atomic (the preimage is still revealed on-chain,
+    ///      the order is still finalised) while guaranteeing the funds remain
+    ///      recoverable by, and only by, the intended recipient via {withdraw}.
+    ///
+    ///      Reentrancy is not a concern here: every external entry point that
+    ///      moves funds ({claimOrder}, {refundOrder}, {withdraw}) is
+    ///      `nonReentrant` and all order state is finalised before this call,
+    ///      so the bounded stipend cannot be leveraged to re-enter and double
+    ///      spend. The contract holds the ETH throughout — a deferred payout
+    ///      is a bookkeeping credit, not an outbound transfer.
+    function _payoutNative(address to, uint256 amount, uint256 orderId) private {
+        (bool ok, ) = payable(to).call{value: amount, gas: PAYOUT_GAS_STIPEND}("");
+        if (!ok) {
+            _pendingWithdrawals[to] += amount;
+            emit PayoutDeferred(orderId, to, amount);
         }
     }
 

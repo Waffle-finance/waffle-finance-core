@@ -255,14 +255,27 @@ contract HTLCEscrowInvariantTest is Test {
     HTLCEscrow  htlc;
     HTLCHandler handler;
 
+    // The deterministic payout targets the handler uses; cached here because
+    // makeAddr labels (state-modifying) and cannot run in a view invariant.
+    address benAddr;
+    address refundAddr;
+
     function setUp() public {
         htlc    = new HTLCEscrow(IResolverRegistry(address(0)), 1e15);
         handler = new HTLCHandler(htlc);
+        benAddr    = makeAddr("beneficiary");
+        refundAddr = makeAddr("refund");
         targetContract(address(handler));
     }
 
-    /// @notice The contract's ETH balance must equal the sum of all
-    ///         Funded orders' (amount + safetyDeposit).
+    /// @notice Solvency invariant. The contract's ETH balance must equal the
+    ///         funds it still owes: the sum of all Funded orders'
+    ///         (amount + safetyDeposit), PLUS any native payouts that could
+    ///         not be pushed during a claim/refund and are now credited to a
+    ///         recipient's pull-payment balance. The handler claims/refunds as
+    ///         itself and has no `receive`, so its safety-deposit payouts
+    ///         defer — this invariant proves those deferred funds are retained
+    ///         and accounted for exactly, never lost or double-counted.
     function invariant_balanceMatchesFundedOrders() public view {
         uint256 nextId = htlc.nextOrderId();
         uint256 expected;
@@ -273,7 +286,19 @@ contract HTLCEscrowInvariantTest is Test {
                 }
             } catch {}
         }
-        assertEq(address(htlc).balance, expected, "balance != funded orders");
+
+        // The only addresses the handler can credit are itself (safety
+        // deposits, since it claims/refunds as msg.sender with no receive) and
+        // the EOA beneficiary/refund targets (which accept ETH, so defer to 0).
+        uint256 pending = htlc.pendingWithdrawals(address(handler))
+            + htlc.pendingWithdrawals(benAddr)
+            + htlc.pendingWithdrawals(refundAddr);
+
+        assertEq(
+            address(htlc).balance,
+            expected + pending,
+            "balance != funded orders + pending withdrawals"
+        );
     }
 
     /// @notice An order that has been claimed must never also be refundable
