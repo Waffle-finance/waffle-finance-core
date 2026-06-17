@@ -47,7 +47,7 @@ function serialiseOrder(order: OrderRow | null) {
 function makeRateLimiter(windowMs: number, limit: number) {
   const hits = new Map<string, { count: number; resetAt: number }>();
   return function rateLimiter(req: Request, res: Response, next: NextFunction): void {
-    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0].trim()
+    const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
       ?? req.socket.remoteAddress
       ?? "unknown";
     const now = Date.now();

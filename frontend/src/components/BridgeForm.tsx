@@ -33,13 +33,6 @@ const DIRECTION_MAP: Record<BridgeDirection, { from: typeof ETH_TOKEN; to: typeo
   sol_to_xlm:  { from: SOL_TOKEN,  to: XLM_TOKEN },
 };
 
-const SOLANA_ROUTE_LABELS: Record<string, string> = {
-  eth_to_sol: 'ETH → SOL',
-  sol_to_eth: 'SOL → ETH',
-  xlm_to_sol: 'XLM → SOL',
-  sol_to_xlm: 'SOL → XLM',
-};
-
 const ETH_TO_XLM_RATE = 10000;
 const MAINNET_CHAIN_ID = '0x1';
 
@@ -400,7 +393,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       console.log('🔗 Checking network...');
       console.log('🔗 Expected network info:', networkInfo);
       
-      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+      const chainId = await window.ethereum?.request({ method: 'eth_chainId' });
       console.log('🔗 Current chain ID:', chainId);
       console.log('🔗 Expected chain ID:', networkInfo.expectedChainId);
       
@@ -409,7 +402,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
         console.log(`🔗 Switching to ${networkName}...`);
         
         try {
-          await window.ethereum.request({
+          await window.ethereum?.request({
             method: 'wallet_switchEthereumChain',
             params: [{ chainId: networkInfo.expectedChainId }],
           });
@@ -440,7 +433,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               }
             };
             
-            await window.ethereum.request({
+            await window.ethereum?.request({
               method: 'wallet_addEthereumChain',
               params: [networkConfig],
             });
@@ -559,7 +552,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           });
           
           // Check user balance first
-          const balance = await window.ethereum.request({
+          const balance = await window.ethereum?.request({
             method: 'eth_getBalance',
             params: [ethAddress, 'latest']
           });
@@ -582,7 +575,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           let gasLimit = transactionData.gas;
           if (!gasLimit) {
             try {
-              const estimatedGas = await window.ethereum.request({
+              const estimatedGas = await window.ethereum?.request({
                 method: 'eth_estimateGas',
                 params: [{
                   ...transactionData,
@@ -605,7 +598,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             gas: gasLimit
           });
           
-          const txHash = await window.ethereum.request({
+          const txHash = await window.ethereum?.request({
             method: 'eth_sendTransaction',
             params: [{
               ...transactionData,
@@ -634,7 +627,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           while (!receipt && attempts < maxAttempts) {
             try {
               // First try to get transaction status
-              const txStatus = await window.ethereum.request({
+              const txStatus = await window.ethereum?.request({
                 method: 'eth_getTransactionByHash',
                 params: [txHash]
               });
@@ -646,7 +639,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               }
               
               // Then try to get receipt
-              receipt = await window.ethereum.request({
+              receipt = await window.ethereum?.request({
                 method: 'eth_getTransactionReceipt',
                 params: [txHash]
               });
@@ -674,11 +667,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             console.log('🔄 Receipt not found, trying alternative confirmation method...');
             
             try {
-              const txStatus = await window.ethereum.request({
+              const txStatus = await window.ethereum?.request({
                 method: 'eth_getTransactionByHash',
                 params: [txHash]
               });
-              
+
               if (txStatus && txStatus.blockNumber) {
                 console.log('✅ Transaction confirmed via alternative method!');
                 receipt = { status: '0x1' }; // Assume success if confirmed
