@@ -54,45 +54,52 @@ export class PostgresStatement {
   constructor(private pool: Pool, private sql: string) {}
 
   private convertSqliteToPostgres(sql: string, params: any[]): { sql: string; params: any[] } {
-    let index = 1;
+    // Convert strftime expressions first
     let converted = sql.replace(
       /CAST\(strftime\('%s','now'\) AS INTEGER\)/g,
       "CAST(EXTRACT(EPOCH FROM NOW()) AS INTEGER)"
     );
-    const paramMap: { [key: string]: any } = {};
 
-    // Extract named parameters
-    const namedParams = converted.match(/:(\w+)/g) || [];
-    namedParams.forEach((param) => {
-      const name = param.slice(1);
+    // Handle named parameters
+    const namedParams = Array.from(converted.matchAll(/:(\w+)/g));
+    
+    if (namedParams.length > 0) {
+      // Build parameter map from first parameter object
+      const paramMap: { [key: string]: any } = {};
       if (params.length > 0 && typeof params[0] === 'object' && params[0] !== null && !(params[0] instanceof Array)) {
-        paramMap[name] = params[0][name];
+        Object.assign(paramMap, params[0]);
       }
-    });
 
-    // Handle named parameters like :publicId, :direction, etc.
-    converted = converted.replace(/:(\w+)/g, () => {
-      return `$${index++}`;
-    });
-
-    // Also handle ? placeholders
-    const questionMarks = converted.match(/\?/g)?.length ?? 0;
-    if (questionMarks > 0) {
-      index = 1;
-      converted = converted.replace(/\?/g, () => {
-        return `$${index++}`;
+      // Track parameter order and build positional array
+      const positionalParams: any[] = [];
+      const paramIndexMap: { [key: string]: number } = {};
+      
+      // Replace named parameters in order of appearance
+      converted = converted.replace(/:(\w+)/g, (match, paramName) => {
+        // If we've seen this parameter before, reuse its index
+        if (paramIndexMap.hasOwnProperty(paramName)) {
+          return `$${paramIndexMap[paramName]}`;
+        }
+        
+        // New parameter - add to positional array
+        const index = positionalParams.length + 1;
+        paramIndexMap[paramName] = index;
+        positionalParams.push(paramMap[paramName]);
+        return `$${index}`;
       });
+
+      return { sql: converted, params: positionalParams };
+    }
+
+    // Handle positional ? parameters
+    const questionMarks = Array.from(converted.matchAll(/\?/g));
+    if (questionMarks.length > 0) {
+      let index = 1;
+      converted = converted.replace(/\?/g, () => `$${index++}`);
       return { sql: converted, params };
     }
 
-    // Convert paramMap to positional array
-    const positionalParams: any[] = [];
-    namedParams.forEach((param) => {
-      const name = param.slice(1);
-      positionalParams.push(paramMap[name]);
-    });
-
-    return { sql: converted, params: positionalParams.length > 0 ? positionalParams : params };
+    return { sql: converted, params };
   }
 
   run(...params: any[]): { changes: number; lastInsertRowid: number } {
@@ -171,12 +178,26 @@ async function openPostgresDatabase(url: string): Promise<PostgresDatabase> {
   const migrationFiles = [
     // Add migrations in order.
     "001_initial.sql",
-    "002_solana_support.sql"
+    // Use PostgreSQL-specific Solana migration if available, otherwise fallback
+    "002_solana_support_postgres.sql"
   ];
 
   for (const file of migrationFiles) {
     const migrationPath = resolve(migrationsDir, file);
-    const migration = readFileSync(migrationPath, "utf8");
+    let migration: string;
+    
+    try {
+      migration = readFileSync(migrationPath, "utf8");
+    } catch (error) {
+      // Fallback to SQLite version if PostgreSQL-specific version doesn't exist
+      if (file === "002_solana_support_postgres.sql") {
+        const fallbackPath = resolve(migrationsDir, "002_solana_support.sql");
+        migration = readFileSync(fallbackPath, "utf8");
+      } else {
+        throw error;
+      }
+    }
+    
     const client = await pool.connect();
     try {
       await client.query(migration);

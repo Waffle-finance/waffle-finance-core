@@ -105,6 +105,40 @@ The test suite covers the order service state transitions, secret
 validation (rejects preimages that don't hash to the stored hashlock),
 and the schema bootstrapping on SQLite.
 
+### PostgreSQL Compatibility Tests
+
+The test suite includes comprehensive PostgreSQL compatibility tests that verify:
+- SQLite-to-PostgreSQL SQL translation correctness
+- Named parameter handling (`:name` syntax)
+- Positional parameter handling (`?` placeholders) 
+- `strftime` to `EXTRACT(EPOCH FROM NOW())` conversion
+- All `OrdersRepository` operations work identically on both databases
+- Database schema migrations
+
+To run the PostgreSQL compatibility tests:
+
+```bash
+# Start a PostgreSQL test instance (requires Docker)
+docker run -d --name postgres-test \
+  -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_USER=test \
+  -e POSTGRES_DB=waffle_test \
+  -p 5432:5432 \
+  postgres:15
+
+# Run tests with PostgreSQL enabled
+TEST_WITH_POSTGRES=true pnpm test
+
+# Or run only the PostgreSQL compatibility tests
+TEST_WITH_POSTGRES=true pnpm test db-postgres.test.ts
+
+# Cleanup
+docker stop postgres-test && docker rm postgres-test
+```
+
+The SQL translation unit tests always run (without requiring PostgreSQL),
+while the full database integration tests require `TEST_WITH_POSTGRES=true`.
+
 ### Testing with PostgreSQL
 
 To test the coordinator against a PostgreSQL database:
