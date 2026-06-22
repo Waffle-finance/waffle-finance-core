@@ -13,6 +13,7 @@
  */
 
 import type { JsonRpcProvider, TransactionResponse } from 'ethers';
+import { withRetry, type RetryOptions } from '../utils/retry-policy.js';
 
 const DEFAULT_MAX_BLOCK_WINDOW = 50; // tightened from 500 — keeps worst-case RPC calls low
 
@@ -27,9 +28,10 @@ export async function fetchIncomingEthPayments(
   provider: JsonRpcProvider,
   relayerAddress: string,
   lastProcessedBlock: number,
-  maxBlockWindow = DEFAULT_MAX_BLOCK_WINDOW
+  maxBlockWindow = DEFAULT_MAX_BLOCK_WINDOW,
+  retryOpts?: RetryOptions,
 ): Promise<{ payments: IncomingEthPayment[]; cursor: number }> {
-  const head = await provider.getBlockNumber();
+  const head = await withRetry(() => provider.getBlockNumber(), retryOpts);
   if (head <= lastProcessedBlock) {
     return { payments: [], cursor: lastProcessedBlock };
   }
@@ -40,7 +42,9 @@ export async function fetchIncomingEthPayments(
 
   // Fetch blocks in parallel (bounded by maxBlockWindow) rather than sequentially.
   const blockNums = Array.from({ length: toBlock - fromBlock + 1 }, (_, i) => fromBlock + i);
-  const blocks = await Promise.all(blockNums.map(n => provider.getBlock(n, true)));
+  const blocks = await Promise.all(
+    blockNums.map(n => withRetry(() => provider.getBlock(n, true), retryOpts))
+  );
 
   const payments: IncomingEthPayment[] = [];
   for (const block of blocks) {

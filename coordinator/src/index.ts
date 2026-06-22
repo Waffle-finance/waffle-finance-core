@@ -10,6 +10,7 @@ import { EthereumListener } from "./listeners/ethereum-listener.js";
 import { SorobanListener } from "./listeners/soroban-listener.js";
 import { SolanaListener } from "./listeners/solana-listener.js";
 import { Reconciler } from "./reconciliation/reconciler.js";
+import { createReadinessChecks } from "./readiness.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -30,7 +31,12 @@ async function main(): Promise<void> {
     orders,
     secrets,
     quotes,
-    getReconciliationStatus: () => reconciler.getStatus()
+    getReconciliationStatus: () => reconciler.getStatus(),
+    getReadinessChecks: createReadinessChecks({
+      cfg,
+      db,
+      getReconciliationStatus: () => reconciler.getStatus()
+    })
   });
 
   const server = app.listen(cfg.port, () => {

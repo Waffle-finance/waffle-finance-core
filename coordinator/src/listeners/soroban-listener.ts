@@ -2,7 +2,7 @@ import { rpc } from "@stellar/stellar-sdk";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
-import { listenerLastBlock } from "../metrics.js";
+import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
 
 /**
  * Polls the Soroban RPC for HTLC contract events and feeds them into
@@ -27,7 +27,7 @@ export class SorobanListener {
 
   start(): void {
     if (!this.cfg.soroban.htlcContract) {
-      this.log.warn("SOROBAN_HTLC contract not configured — Soroban listener disabled");
+      this.log.warn("SOROBAN_HTLC contract not configured - Soroban listener disabled");
       return;
     }
     const contractId = this.cfg.soroban.htlcContract;
@@ -42,15 +42,10 @@ export class SorobanListener {
   private async loop(contractId: string): Promise<void> {
     while (!this.stopped) {
       try {
+        const startedAt = Date.now();
         const latest = await this.server.getLatestLedger();
-        listenerLastBlock.set({ chain: "soroban" }, latest.sequence);
-        
-        let startLedger: number | undefined;
-        if (this.cursor === undefined) {
-          const lastLedger = await this.orders.getLastProcessedBlock("stellar");
-          startLedger = lastLedger > 0 ? lastLedger : latest.sequence - 1;
-        }
-
+        const startLedger = this.cursor === undefined ? latest.sequence - 1 : undefined;
+        let processedLedger = startLedger ?? latest.sequence;
         const events = await this.server.getEvents({
           filters: [{ type: "contract", contractIds: [contractId] }],
           startLedger: startLedger,
@@ -63,8 +58,14 @@ export class SorobanListener {
             { ledger: ev.ledger, txHash: ev.txHash, topics: ev.topic?.length ?? 0 },
             "Soroban event"
           );
-          await this.processSorobanEvent(ev);
+          processedLedger = Math.max(processedLedger, ev.ledger);
+          // Topic parsing is contract-specific; the SDK module in Phase 5
+          // exposes a typed decoder. Until then we log raw events and let
+          // the user/resolver post `/orders/:id/dst-locked` once they
+          // identify the matching public id.
         }
+        recordListenerProgress("soroban", processedLedger, latest.sequence);
+        observeListenerEventProcessing("soroban", "poll", startedAt);
         if (events.cursor) this.cursor = events.cursor;
       } catch (err) {
         this.log.warn({ err }, "Soroban poll failed");

@@ -2,7 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
-import { listenerLastBlock } from "../metrics.js";
+import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
 
 /**
  * Polls the Solana RPC for HTLC program logs and feeds order events into
@@ -28,7 +28,7 @@ export class SolanaListener {
 
   start(): void {
     if (!this.cfg.solana.programId || this.cfg.solana.programId === "PLACEHOLDER") {
-      this.log.warn("SOLANA_HTLC_PROGRAM not configured — Solana listener disabled");
+      this.log.warn("SOLANA_HTLC_PROGRAM not configured - Solana listener disabled");
       return;
     }
     this.log.info({ program: this.cfg.solana.programId }, "Solana listener starting");
@@ -44,8 +44,8 @@ export class SolanaListener {
 
     while (!this.stopped) {
       try {
+        const startedAt = Date.now();
         const slot = await this.connection.getSlot(this.cfg.solana.commitment);
-        listenerLastBlock.set({ chain: "solana" }, slot);
 
         if (this.lastSlot === 0) {
           this.lastSlot = slot - 1;
@@ -78,6 +78,8 @@ export class SolanaListener {
         if (sigs.length > 0) {
           this.lastSlot = Math.max(...sigs.map((s) => s.slot));
         }
+        recordListenerProgress("solana", this.lastSlot, slot);
+        observeListenerEventProcessing("solana", "poll", startedAt);
       } catch (err) {
         this.log.warn({ err }, "Solana poll failed");
       }
@@ -94,7 +96,7 @@ export class SolanaListener {
    *   Program log: {"hashlock":"0x...","orderId":"...","timelock":...}
    *
    * Until the Anchor IDL is finalised, we extract JSON payloads carried
-   * in "Program data:" lines — the Anchor event discriminator prefix is
+   * in "Program data:" lines - the Anchor event discriminator prefix is
    * stripped so any shape of payload is accepted as long as it contains
    * the fields we need.
    */
@@ -108,12 +110,12 @@ export class SolanaListener {
       if (line.includes("OrderRefunded")) { eventType = "OrderRefunded"; }
 
       // Try to pick up a JSON payload from any log line (Anchor emits them as
-      // "Program log: {…}" or "Program data: {…}").
+      // "Program log: {.}" or "Program data: {.}").
       const jsonMatch = line.match(/\{.*\}/);
       if (jsonMatch) {
         try {
           Object.assign(payload, JSON.parse(jsonMatch[0]));
-        } catch { /* not JSON — skip */ }
+        } catch { /* not JSON - skip */ }
       }
     }
 
@@ -127,7 +129,7 @@ export class SolanaListener {
       const timelock = payload.timelock as number | undefined;
 
       if (!hashlock || !orderId || timelock === null || timelock === undefined) {
-        this.log.warn({ sig, payload }, "OrderCreated missing required fields — cannot record src lock");
+        this.log.warn({ sig, payload }, "OrderCreated missing required fields - cannot record src lock");
         return;
       }
 

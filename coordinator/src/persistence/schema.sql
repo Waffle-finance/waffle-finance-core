@@ -62,6 +62,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_dst_address      ON orders (dst_address);
 CREATE INDEX IF NOT EXISTS idx_orders_status           ON orders (status);
 CREATE INDEX IF NOT EXISTS idx_orders_src_order_id     ON orders (src_chain, src_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_dst_order_id     ON orders (dst_chain, dst_order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_public_id        ON orders (public_id);
+CREATE INDEX IF NOT EXISTS idx_orders_created_at       ON orders (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_src_address_created_at ON orders (src_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_dst_address_created_at ON orders (dst_address, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS order_events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

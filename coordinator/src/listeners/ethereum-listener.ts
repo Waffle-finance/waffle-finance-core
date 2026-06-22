@@ -3,7 +3,7 @@ import { sepolia, mainnet } from "viem/chains";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
-import { listenerLastBlock } from "../metrics.js";
+import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
 
 const ORDER_CREATED = parseAbiItem(
   "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
@@ -107,7 +107,35 @@ export class EthereumListener {
         event: ORDER_CREATED,
         fromBlock,
         onLogs: (logs) => {
-          void this.processCreatedLogs(logs);
+          void (async () => {
+            const startedAt = Date.now();
+            for (const log of logs) {
+              if (log.blockNumber !== null) {
+                recordListenerProgress("ethereum", Number(log.blockNumber));
+              }
+              const hashlock = log.args.hashlock!;
+              try {
+                const order = await this.orders.findByHashlock(hashlock);
+                if (!order) {
+                  this.log.info(
+                    { hashlock, orderId: log.args.orderId?.toString() },
+                    "ETH order observed without local announce"
+                  );
+                  continue;
+                }
+                await this.orders.recordSrcLock({
+                  publicId: order.publicId,
+                  orderId: log.args.orderId!.toString(),
+                  txHash: log.transactionHash,
+                  blockNumber: Number(log.blockNumber),
+                  timelock: Number(log.args.timelock!)
+                });
+              } catch (err) {
+                this.log.warn({ err, hashlock }, "could not record src lock");
+              }
+            }
+            observeListenerEventProcessing("ethereum", "OrderCreated", startedAt);
+          })();
         }
       })
     );
@@ -118,15 +146,17 @@ export class EthereumListener {
         event: ORDER_CLAIMED,
         fromBlock,
         onLogs: (logs) => {
+          const startedAt = Date.now();
           for (const log of logs) {
             if (log.blockNumber !== null) {
-              listenerLastBlock.set({ chain: "ethereum" }, Number(log.blockNumber));
+              recordListenerProgress("ethereum", Number(log.blockNumber));
             }
             this.log.info(
               { orderId: log.args.orderId!.toString(), preimage: log.args.preimage },
               "ETH order claimed"
             );
           }
+          observeListenerEventProcessing("ethereum", "OrderClaimed", startedAt);
         }
       })
     );
@@ -137,12 +167,14 @@ export class EthereumListener {
         event: ORDER_REFUNDED,
         fromBlock,
         onLogs: (logs) => {
+          const startedAt = Date.now();
           for (const log of logs) {
             if (log.blockNumber !== null) {
-              listenerLastBlock.set({ chain: "ethereum" }, Number(log.blockNumber));
+              recordListenerProgress("ethereum", Number(log.blockNumber));
             }
             this.log.info({ orderId: log.args.orderId!.toString() }, "ETH order refunded");
           }
+          observeListenerEventProcessing("ethereum", "OrderRefunded", startedAt);
         }
       })
     );

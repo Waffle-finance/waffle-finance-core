@@ -2,7 +2,7 @@
  * Integration tests for rate-limited coordinator routes.
  *
  * Uses supertest to drive a real Express app wired to an in-memory SQLite
- * database — no network or external services required.
+ * database - no network or external services required.
  *
  * Covered scenarios:
  *  - POST /api/orders/announce: 201 on valid payload, 429 after limit exceeded
@@ -23,24 +23,27 @@ import { OrdersRepository } from "../src/persistence/orders-repo.js";
 import { OrderService } from "../src/services/order-service.js";
 import { SecretService } from "../src/services/secret-service.js";
 import { QuoteService } from "../src/services/quote-service.js";
-import { createApp } from "../src/server/app.js";
+import { createApp, type AppDeps } from "../src/server/app.js";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ?? Helpers ???????????????????????????????????????????????????????????????????
 
 const log = pino({ level: "silent" });
 
 const VALID_HASHLOCK = "0x" + "ab".repeat(32); // 64 hex chars
 const VALID_ETH_ADDR = "0x1111111111111111111111111111111111111111";
 const VALID_STELLAR_ADDR = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422";
+type FreshAppOptions = Partial<
+  Pick<AppDeps, "getReadinessChecks" | "getReconciliationStatus">
+>;
 
-async function freshApp() {
+async function freshApp(overrides: FreshAppOptions = {}) {
   const dir = mkdtempSync(resolve(tmpdir(), "waffle-routes-test-"));
   const db = await openDatabase(`file:${dir}/test.db`);
   const ordersRepo = new OrdersRepository(db);
   const orders = new OrderService(ordersRepo, log);
   const secrets = new SecretService(orders, log);
   const quotes = new QuoteService(log);
-  return createApp({ log, corsOrigin: "*", orders, secrets, quotes });
+  return createApp({ log, corsOrigin: "*", orders, secrets, quotes, ...overrides });
 }
 
 const BASE_ANNOUNCE = {
@@ -57,7 +60,76 @@ const BASE_ANNOUNCE = {
   dstAmount: "100000000"
 };
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ?? Tests ?????????????????????????????????????????????????????????????????????
+
+describe("health and readiness routes", () => {
+  it("returns liveness without dependency probes", async () => {
+    const app = await freshApp();
+    const res = await request(app).get("/healthz");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.service).toBe("wafflefinance-coordinator");
+  });
+
+  it("returns readiness ok when all dependency checks pass", async () => {
+    const app = await freshApp({
+      getReadinessChecks: () => [
+        { name: "database", ok: true, latencyMs: 1 },
+        { name: "ethereum_rpc", ok: true, latencyMs: 2 }
+      ]
+    });
+
+    const res = await request(app).get("/readyz");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.checks).toEqual([
+      { name: "database", ok: true, latencyMs: 1 },
+      { name: "ethereum_rpc", ok: true, latencyMs: 2 }
+    ]);
+  });
+
+  it("returns degraded readiness when a dependency check fails", async () => {
+    const app = await freshApp({
+      getReadinessChecks: () => [
+        { name: "database", ok: true },
+        { name: "soroban_rpc", ok: false, detail: "unavailable" }
+      ]
+    });
+
+    const res = await request(app).get("/readyz");
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe("degraded");
+    expect(res.body.checks).toContainEqual({
+      name: "soroban_rpc",
+      ok: false,
+      detail: "unavailable"
+    });
+  });
+
+  it("sanitizes readiness provider errors", async () => {
+    const app = await freshApp({
+      getReadinessChecks: () => {
+        throw new Error("postgres://user:pass@example.internal/db");
+      }
+    });
+
+    const res = await request(app).get("/readyz");
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe("degraded");
+    expect(res.body.checks).toEqual([
+      {
+        name: "readiness",
+        ok: false,
+        detail: "readiness_check_failed"
+      }
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain("postgres://");
+  });
+});
 
 describe("POST /api/orders/announce", () => {
   it("returns 201 for a valid order", async () => {
@@ -98,7 +170,7 @@ describe("POST /api/orders/announce", () => {
     const makeHashlock = (i: number) =>
       "0x" + i.toString(16).padStart(2, "0").repeat(32);
 
-    // Send 20 requests — all should succeed (limit is 20/min).
+    // Send 20 requests - all should succeed (limit is 20/min).
     for (let i = 0; i < 20; i++) {
       const res = await request(app)
         .post("/api/orders/announce")
@@ -219,7 +291,7 @@ describe("API key bypass", () => {
         txHash: "0xabc"
       };
 
-      // Send 10 requests (well above the 5/min limit) — all should get 400, not 429.
+      // Send 10 requests (well above the 5/min limit) - all should get 400, not 429.
       for (let i = 0; i < 10; i++) {
         const res = await request(app)
           .post("/api/secrets/reveal")
@@ -247,7 +319,7 @@ describe("API key bypass", () => {
       const makeHashlock = (i: number) =>
         "0x" + (i + 200).toString(16).padStart(2, "0").repeat(32);
 
-      // 25 requests — above the 20/min limit — all should succeed.
+      // 25 requests - above the 20/min limit - all should succeed.
       for (let i = 0; i < 25; i++) {
         const res = await request(app)
           .post("/api/orders/announce")

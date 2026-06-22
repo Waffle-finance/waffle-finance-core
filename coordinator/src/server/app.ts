@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import type { Logger } from "pino";
 import { healthRoutes } from "./routes/health.js";
+import type { ReadinessCheckProvider } from "./routes/health.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { httpRequestDuration } from "../metrics.js";
 import { ordersRoutes } from "./routes/orders.js";
@@ -20,6 +21,7 @@ export interface AppDeps {
   secrets: SecretService;
   quotes: QuoteService;
   getReconciliationStatus?: () => ReconciliationStatus;
+  getReadinessChecks?: ReadinessCheckProvider;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -43,7 +45,12 @@ export function createApp(deps: AppDeps): Express {
     next();
   });
 
-  app.use(healthRoutes(deps.getReconciliationStatus));
+  app.use(
+    healthRoutes({
+      getReconciliationStatus: deps.getReconciliationStatus,
+      getReadinessChecks: deps.getReadinessChecks
+    })
+  );
   app.use(metricsRoutes());
   // Pass the logger into route factories so rate-limit abuse events are
   // surfaced through the application's structured log stream.
@@ -53,7 +60,7 @@ export function createApp(deps: AppDeps): Express {
   // /api/prices (the aggregated endpoint consumed by the BridgeForm).
   app.use("/api", quotesRoutes(deps.quotes));
 
-  // Final error handler — never leak a stack trace to clients.
+  // Final error handler - never leak a stack trace to clients.
   app.use(
     (
       err: Error,

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Database } from "./db.js";
 import { canTransition, isTerminal } from "../state-machine/order-machine.js";
+import { dbQueryDuration } from "../metrics.js";
 
 type DatabaseT = Database;
 type Statement = ReturnType<DatabaseT["prepare"]>;
@@ -236,31 +237,46 @@ export class OrdersRepository {
   }
 
   private async run(stmt: Statement, ...params: any[]): Promise<StatementResult> {
-    const asyncStmt = stmt as AsyncCapableStatement;
-    if (asyncStmt.runAsync) {
-      return asyncStmt.runAsync(...params);
+    return this.withMetrics("run", async () => {
+      const asyncStmt = stmt as AsyncCapableStatement;
+      if (asyncStmt.runAsync) {
+        return asyncStmt.runAsync(...params);
+      }
+      const result = stmt.run(...params);
+      return {
+        changes: Number(result.changes),
+        lastInsertRowid: Number(result.lastInsertRowid)
+      };
+    });
+  }
+
+  private async withMetrics<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const end = dbQueryDuration.startTimer({ operation });
+    try {
+      return await fn();
+    } finally {
+      end();
     }
-    const result = stmt.run(...params);
-    return {
-      changes: Number(result.changes),
-      lastInsertRowid: Number(result.lastInsertRowid)
-    };
   }
 
   private async get<T>(stmt: Statement, ...params: any[]): Promise<T | undefined> {
-    const asyncStmt = stmt as AsyncCapableStatement;
-    if (asyncStmt.getAsync) {
-      return ((await asyncStmt.getAsync(...params)) ?? undefined) as T | undefined;
-    }
-    return stmt.get(...params) as T | undefined;
+    return this.withMetrics("get", async () => {
+      const asyncStmt = stmt as AsyncCapableStatement;
+      if (asyncStmt.getAsync) {
+        return ((await asyncStmt.getAsync(...params)) ?? undefined) as T | undefined;
+      }
+      return stmt.get(...params) as T | undefined;
+    });
   }
 
   private async all<T>(stmt: Statement, ...params: any[]): Promise<T[]> {
-    const asyncStmt = stmt as AsyncCapableStatement;
-    if (asyncStmt.allAsync) {
-      return (await asyncStmt.allAsync(...params)) as T[];
-    }
-    return stmt.all(...params) as T[];
+    return this.withMetrics("all", async () => {
+      const asyncStmt = stmt as AsyncCapableStatement;
+      if (asyncStmt.allAsync) {
+        return (await asyncStmt.allAsync(...params)) as T[];
+      }
+      return stmt.all(...params) as T[];
+    });
   }
 
   /** Returns the public id of the new order. */

@@ -12,6 +12,15 @@ export const ordersTotal = new Counter({
   registers: [registry]
 });
 
+/** Database query duration histogram */
+export const dbQueryDuration = new Histogram({
+  name: "coordinator_db_query_duration_seconds",
+  help: "Duration of database queries in seconds",
+  labelNames: ["operation"] as const,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+  registers: [registry]
+});
+
 /** Last block number seen by each listener */
 export const listenerLastBlock = new Gauge({
   name: "coordinator_listener_last_block",
@@ -19,6 +28,52 @@ export const listenerLastBlock = new Gauge({
   labelNames: ["chain"] as const,
   registers: [registry]
 });
+
+/** Latest chain head observed by each listener */
+export const listenerHeadBlock = new Gauge({
+  name: "coordinator_listener_head_block",
+  help: "Most recent chain head observed by each listener",
+  labelNames: ["chain"] as const,
+  registers: [registry]
+});
+
+/** Difference between the observed chain head and processed listener block */
+export const listenerLagBlocks = new Gauge({
+  name: "coordinator_listener_lag_blocks",
+  help: "Current listener lag in blocks, ledgers, or slots by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry]
+});
+
+/** Event processing duration per chain and event type */
+export const listenerEventProcessingDuration = new Histogram({
+  name: "coordinator_listener_event_processing_duration_seconds",
+  help: "Duration spent processing listener event batches",
+  labelNames: ["chain", "event"] as const,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],
+  registers: [registry]
+});
+
+export function recordListenerProgress(
+  chain: string,
+  processedBlock: number,
+  headBlock = processedBlock
+): void {
+  listenerLastBlock.set({ chain }, processedBlock);
+  listenerHeadBlock.set({ chain }, headBlock);
+  listenerLagBlocks.set({ chain }, Math.max(headBlock - processedBlock, 0));
+}
+
+export function observeListenerEventProcessing(
+  chain: string,
+  event: string,
+  startedAtMs: number
+): void {
+  listenerEventProcessingDuration.observe(
+    { chain, event },
+    Math.max(Date.now() - startedAtMs, 0) / 1000
+  );
+}
 
 /** HTTP request duration histogram */
 export const httpRequestDuration = new Histogram({

@@ -12,10 +12,17 @@
  * single shared poll loop for any number of (eventName, handler) pairs
  * against one contract, so callers don't need to reinvent the cursor
  * + re-entrancy + chunking logic each time.
+ *
+ * Resiliency:
+ *  - Persistent cursor (disk) so restarts resume where we left off.
+ *  - Exponential backoff + jitter on RPC failures (see `withRetry`).
+ *  - A single failed tick never advances the cursor.
  */
 
 import type { Contract, EventLog, JsonRpcProvider } from 'ethers';
-import { startAdaptivePoll, type AdaptivePollHandle } from './adaptive-poll.js';
+import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
+import { withRetry, type RetryOptions } from '../utils/retry-policy.js';
+import { CursorStore } from '../utils/cursor-store.js';
 
 export interface ContractEventBinding {
   /** Event name as declared in the contract ABI (e.g. "OrderCreated"). */
@@ -48,11 +55,16 @@ export interface ContractEventPollerOptions {
   maxBlockWindow?: number;
   /**
    * Optional starting block. Defaults to "current head" so we don't
-   * re-emit historical events on restart.
+   * re-emit historical events on restart. Ignored when a persisted
+   * cursor exists for this label.
    */
   startBlock?: number;
   /** Tag used in log lines to disambiguate multiple pollers. */
   label?: string;
+  /** Retry options for transient RPC failures. */
+  retry?: RetryOptions;
+  /** CursorStore instance. Created automatically if omitted. */
+  cursorStore?: CursorStore;
 }
 
 export interface ContractEventPollerHandle {
@@ -70,7 +82,7 @@ export async function startContractEventPoller(
   contract: Contract,
   provider: JsonRpcProvider,
   bindings: ContractEventBinding[],
-  options: ContractEventPollerOptions = {}
+  options: ContractEventPollerOptions = {},
 ): Promise<ContractEventPollerHandle> {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   const idleIntervalMs = options.idleIntervalMs ?? DEFAULT_IDLE_INTERVAL_MS;
@@ -78,15 +90,35 @@ export async function startContractEventPoller(
   const label = options.label ?? 'contract-poller';
   const isActive = options.isActive ?? (() => true);
   const isAttentive = options.isAttentive ?? (() => true);
+  const retryOpts: RetryOptions = options.retry ?? {};
+  const cursorStore = options.cursorStore ?? new CursorStore();
 
-  let lastProcessed = options.startBlock ?? (await provider.getBlockNumber());
+  // Load persisted cursor first; fall back to startBlock or current head.
+  let lastProcessed: number;
+  const persisted = cursorStore.load(label);
+  if (persisted !== null) {
+    lastProcessed = persisted;
+    console.log(`[${label}] resumed from persisted cursor ${lastProcessed}`);
+  } else {
+    lastProcessed = options.startBlock ?? (await withRetry(() => provider.getBlockNumber(), retryOpts));
+  }
+
   let isPolling = false;
+
+  const persistCursor = (block: number): void => {
+    lastProcessed = block;
+    try {
+      cursorStore.save(label, block);
+    } catch (err: any) {
+      console.warn(`[${label}] failed to persist cursor:`, err?.message ?? err);
+    }
+  };
 
   const tick = async () => {
     if (isPolling) return;
     isPolling = true;
     try {
-      const head = await provider.getBlockNumber();
+      const head = await withRetry(() => provider.getBlockNumber(), retryOpts);
       if (head <= lastProcessed) return;
 
       const fromBlock = lastProcessed + 1;
@@ -99,11 +131,8 @@ export async function startContractEventPoller(
           continue;
         }
         const filter = filterFactory();
-        const events = await contract.queryFilter(filter, fromBlock, toBlock);
+        const events = await withRetry(() => contract.queryFilter(filter, fromBlock, toBlock), retryOpts);
         for (const ev of events) {
-          // queryFilter returns `Log | EventLog`. Skip raw logs that
-          // didn't decode against the ABI (defensive — shouldn't
-          // happen for our own contracts, but cheap to guard).
           if (!('args' in ev) || !ev.args) continue;
           try {
             const args = Array.from(ev.args as any);
@@ -111,18 +140,15 @@ export async function startContractEventPoller(
           } catch (handlerErr: any) {
             console.error(
               `[${label}] handler for ${binding.eventName} threw:`,
-              handlerErr?.message ?? handlerErr
+              handlerErr?.message ?? handlerErr,
             );
           }
         }
       }
 
-      lastProcessed = toBlock;
+      persistCursor(toBlock);
     } catch (err: any) {
-      // Keep the cursor where it is and retry next tick. Transient
-      // RPC errors (429, upstream timeouts) are common on public
-      // endpoints; one log per failure is enough noise.
-      console.warn(`[${label}] poll failed, will retry:`, err?.shortMessage ?? err?.message ?? err);
+      console.warn(`[${label}] poll failed, cursor ${lastProcessed} preserved:`, err?.shortMessage ?? err?.message ?? err);
     } finally {
       isPolling = false;
     }
@@ -138,7 +164,7 @@ export async function startContractEventPoller(
   });
 
   console.log(
-    `[${label}] from block ${lastProcessed}, ${bindings.length} event(s) — active ${intervalMs / 1000}s / idle ${idleIntervalMs / 1000}s`
+    `[${label}] from block ${lastProcessed}, ${bindings.length} event(s) — active ${intervalMs / 1000}s / idle ${idleIntervalMs / 1000}s`,
   );
 
   return {

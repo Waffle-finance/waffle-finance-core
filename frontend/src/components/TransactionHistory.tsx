@@ -1,132 +1,45 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Clock, CheckCircle, XCircle, ArrowRight, ExternalLink, RefreshCw, Undo2 } from 'lucide-react';
 import { isTestnet } from '../config/networks';
 import RefundDialog from '../features/refund/RefundDialog';
+import { useTransactionHistoryCache, type Transaction } from '../hooks/useTransactionHistoryCache';
 import type { Address } from 'viem';
-
-interface Transaction {
-  id: string;
-  txHash: string;
-  fromNetwork: string;
-  toNetwork: string;
-  fromToken: string;
-  toToken: string;
-  amount: string;
-  estimatedAmount: string;
-  status: 'pending' | 'completed' | 'cancelled' | 'failed';
-  timestamp: number;
-  ethTxHash?: string;
-  stellarTxHash?: string;
-  ethAddress?: string;
-  stellarAddress?: string;
-  direction: 'eth-to-xlm' | 'xlm-to-eth';
-  // Refund support
-  // ETH-side refund metadata (eth-to-xlm; populated when ETH is locked on-chain)
-  onChainOrderId?: string;       // bytes32 hex (v1) or uint256 string (v2)
-  htlcContractAddress?: string;  // contract holding the locked ETH
-  htlcContractMode?: 'v1-mainnet-htlc' | 'v2-escrow';
-  timelockUnixSeconds?: number;
-  amountWei?: string;
-  // Generic refund tracking (works for both directions)
-  refundTxHash?: string;
-  refundNetwork?: 'ethereum' | 'stellar';  // which chain the refund lives on
-  refundedAt?: number;
-  autoRefundFailed?: boolean;
-  autoRefundError?: string;
-  networkMode?: 'mainnet' | 'testnet';
-}
 
 interface TransactionHistoryProps {
   ethAddress?: string;
   stellarAddress?: string;
 }
 
-const STORAGE_KEY = 'wafflefinance_transactions_v2';
+type TransactionFilter = 'all' | 'pending' | 'completed' | 'cancelled';
+
+const FILTER_OPTIONS: Array<{ key: TransactionFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
+
 const PRODUCTION_API_BASE_URL = 'https://oversync-k36vx.ondigitalocean.app';
 const API_BASE_URL = import.meta.env.PROD
   ? ''
-  : (import.meta as any).env?.VITE_API_BASE_URL || PRODUCTION_API_BASE_URL;
-
-// Hash patterns that indicate fabricated/demo data, used to filter out legacy entries
-// persisted by older builds. New entries can never match these because v2 only stores
-// real on-chain hashes returned from the coordinator.
-const KNOWN_FAKE_HASHES = new Set([
-  '0x1234567890abcdef1234567890abcdef12345678',
-  '0xabcdef1234567890abcdef1234567890abcdef12',
-  '0x9876543210fedcba9876543210fedcba98765432',
-  '0x0000000000000000000000000000000000000000000000000000000000000000',
-  '0x0000000000000000000000000000000000000000',
-]);
-
-function isRealHash(hash?: string): boolean {
-  if (!hash) return true;
-  if (KNOWN_FAKE_HASHES.has(hash)) return false;
-  if (hash.startsWith('mock_')) return false;
-  if (hash.startsWith('placeholder')) return false;
-  if (/^0x0+$/.test(hash)) return false;
-  return true;
-}
-
-function isRealTransaction(tx: Transaction): boolean {
-  return isRealHash(tx.txHash) && isRealHash(tx.ethTxHash) && isRealHash(tx.stellarTxHash);
-}
+  : import.meta.env.VITE_API_BASE_URL || PRODUCTION_API_BASE_URL;
 
 export default function TransactionHistory({ ethAddress, stellarAddress }: TransactionHistoryProps) {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'pending' | 'completed' | 'cancelled'>('all');
+  const [filter, setFilter] = useState<TransactionFilter>('all');
   const [refundTarget, setRefundTarget] = useState<Transaction | null>(null);
   const [manualRefundingIds, setManualRefundingIds] = useState<Set<string>>(() => new Set());
-
-  const loadFromStorage = useCallback((): Transaction[] => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw) as Transaction[];
-      if (!Array.isArray(parsed)) return [];
-      return parsed.filter(isRealTransaction);
-    } catch (err) {
-      console.warn('Could not parse stored transactions:', err);
-      return [];
-    }
-  }, []);
-
-  const refreshFromCoordinator = useCallback(async () => {
-    const apiBase = API_BASE_URL;
-    if (!ethAddress && !stellarAddress) {
-      setTransactions(loadFromStorage());
-      return;
-    }
-    setIsLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (ethAddress) params.set('eth', ethAddress);
-      if (stellarAddress) params.set('stellar', stellarAddress);
-      const res = await fetch(`${apiBase}/api/orders/history?${params.toString()}`);
-      if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
-      const body = await res.json();
-      const remote: Transaction[] = Array.isArray(body?.transactions)
-        ? body.transactions.filter(isRealTransaction)
-        : [];
-      const local = loadFromStorage();
-      const byId = new Map<string, Transaction>();
-      for (const tx of local) byId.set(tx.id, tx);
-      for (const tx of remote) byId.set(tx.id, tx);
-      const merged = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-      setTransactions(merged);
-    } catch (err) {
-      console.warn('Coordinator history unavailable, falling back to local cache:', err);
-      setTransactions(loadFromStorage());
-    } finally {
-      setIsLoading(false);
-    }
-  }, [ethAddress, stellarAddress, loadFromStorage]);
-
-  useEffect(() => {
-    setTransactions(loadFromStorage());
-    void refreshFromCoordinator();
-  }, [loadFromStorage, refreshFromCoordinator]);
+  const {
+    transactions,
+    isLoading,
+    isRefreshing,
+    isStale,
+    refreshFromCoordinator,
+    updateTransactions,
+  } = useTransactionHistoryCache({
+    ethAddress,
+    stellarAddress,
+    apiBase: API_BASE_URL,
+  });
 
   const getStatusColor = (status: Transaction['status']) => {
     switch (status) {
@@ -173,6 +86,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
   const filteredTransactions = transactions.filter(tx =>
     filter === 'all' || tx.status === filter
   );
+  const isHistoryBusy = isLoading || isRefreshing;
 
   const getEtherscanUrl = (txHash: string): string => {
     const base = isTestnet() ? 'https://sepolia.etherscan.io' : 'https://etherscan.io';
@@ -240,8 +154,8 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     refundHash: string,
     refundNetwork: 'ethereum' | 'stellar'
   ) => {
-    setTransactions((prev) => {
-      const next = prev.map((tx) =>
+    updateTransactions((prev) => {
+      return prev.map((tx) =>
         tx.id === orderId
           ? {
               ...tx,
@@ -252,12 +166,6 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
             }
           : tx
       );
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        /* ignore */
-      }
-      return next;
     });
   };
 
@@ -318,27 +226,27 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
           <p className="mt-2 text-sm text-slate-400">
             Track your cross-chain swaps between Ethereum and Stellar networks
           </p>
+          {(isRefreshing || isStale) && transactions.length > 0 && (
+            <p className="mt-2 text-xs text-cyan-100/60" aria-live="polite">
+              {isRefreshing ? 'Showing cached history while refreshing latest data...' : 'Showing cached history'}
+            </p>
+          )}
         </div>
         <button
           onClick={refreshFromCoordinator}
-          disabled={isLoading}
+          disabled={isHistoryBusy}
           className="button-hover-scale flex items-center justify-center gap-2 rounded-full border border-cyan-200/30 bg-cyan-200/[0.12] px-4 py-2 text-sm font-semibold text-cyan-50 shadow-[0_12px_34px_rgba(0,226,255,0.12)] transition hover:border-cyan-100/45 hover:bg-cyan-200/[0.18] disabled:opacity-60"
         >
-          <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-4 w-4 ${isHistoryBusy ? 'animate-spin' : ''}`} />
           Refresh
         </button>
       </div>
 
       <div className="mb-4 flex shrink-0 gap-2 overflow-x-auto pb-1">
-        {[
-          { key: 'all', label: 'All' },
-          { key: 'pending', label: 'Pending' },
-          { key: 'completed', label: 'Completed' },
-          { key: 'cancelled', label: 'Cancelled' }
-        ].map(({ key, label }) => (
+        {FILTER_OPTIONS.map(({ key, label }) => (
           <button
             key={key}
-            onClick={() => setFilter(key as any)}
+            onClick={() => setFilter(key)}
             className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
               filter === key
                 ? 'brand-cta'
@@ -379,7 +287,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {tx.ethTxHash && isRealHash(tx.ethTxHash) && (
+                  {tx.ethTxHash && (
                     <a
                       href={getEtherscanUrl(tx.ethTxHash)}
                       target="_blank"
@@ -392,7 +300,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       <ExternalLink className="h-3 w-3 opacity-70" />
                     </a>
                   )}
-                  {tx.stellarTxHash && isRealHash(tx.stellarTxHash) && (
+                  {tx.stellarTxHash && (
                     <a
                       href={getStellarExplorerUrl(tx.stellarTxHash)}
                       target="_blank"
