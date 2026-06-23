@@ -17,6 +17,7 @@ export class SorobanListener {
   private readonly pollMs: number;
   private cursor: string | undefined;
   private stopped = false;
+  private timeoutId?: ReturnType<typeof setTimeout>;
 
   constructor(cfg: SorobanConfig, pollMs: number, log: Logger) {
     this.cfg = cfg;
@@ -30,6 +31,9 @@ export class SorobanListener {
       this.log.warn("SOROBAN_HTLC contract id not configured — skipping Soroban listener");
       return;
     }
+    this.stop();
+    this.stopped = false;
+
     const contractId = this.cfg.htlc;
     this.log.info({ contract: contractId, rpc: this.cfg.rpcUrl }, "starting Soroban listener");
 
@@ -68,7 +72,7 @@ export class SorobanListener {
         this.log.warn({ err }, "Soroban poll failed");
       } finally {
         if (!this.stopped) {
-          setTimeout(tick, this.pollMs);
+          this.timeoutId = setTimeout(tick, this.pollMs);
         }
       }
     };
@@ -78,6 +82,10 @@ export class SorobanListener {
 
   stop(): void {
     this.stopped = true;
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
   }
 }
 

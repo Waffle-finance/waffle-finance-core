@@ -27,7 +27,12 @@ vi.mock("viem", async (importOriginal) => {
       getBlockNumber: vi.fn(async () => mockLatestBlock),
       getLogs: vi.fn(async () => mockCreatedLogs),
       watchEvent: vi.fn((options: any) => {
-        mockWatchEventCallback = options.onLogs;
+        // The listener registers a separate watcher per event (OrderCreated,
+        // OrderClaimed, OrderRefunded). The tests drive OrderCreated logs, so
+        // capture that handler specifically instead of the last one registered.
+        if (options.event?.name === "OrderCreated") {
+          mockWatchEventCallback = options.onLogs;
+        }
         return () => { mockWatchEventCallback = undefined; };
       })
     }))

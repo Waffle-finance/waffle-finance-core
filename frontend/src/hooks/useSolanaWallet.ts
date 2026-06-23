@@ -71,14 +71,26 @@ export function useSolanaWallet() {
       }));
     };
 
+    const handleConnect = (pubkey: { toString(): string } | null) => {
+      if (!pubkey) return;
+      setState(prev => ({
+        ...prev,
+        isConnected: true,
+        address: pubkey.toString(),
+        error: null,
+      }));
+    };
+
     const handleDisconnect = () => {
       setState(prev => ({ ...prev, isConnected: false, address: null }));
     };
 
+    provider.on('connect', handleConnect);
     provider.on('accountChanged', handleAccountChange);
     provider.on('disconnect', handleDisconnect);
 
     return () => {
+      provider.removeListener('connect', handleConnect);
       provider.removeListener('accountChanged', handleAccountChange);
       provider.removeListener('disconnect', handleDisconnect);
     };

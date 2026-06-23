@@ -5,6 +5,7 @@ import type { OrderRow } from "../../persistence/orders-repo.js";
 import type { OrderService } from "../../services/order-service.js";
 import { OrderValidationError } from "../../services/order-service.js";
 import { announceSchema } from "../../validation/announce.js";
+import { historyAddressSchema } from "../../validation/address.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 
 function serialiseOrder(order: OrderRow | null) {
@@ -81,29 +82,15 @@ export function ordersRoutes(orders: OrderService, log?: Logger): Router {
     }
   });
 
-  router.get("/orders/:id", async (req, res, next) => {
-    const id = req.params.id;
-    try {
-      const order = await orders.get(id);
-      if (!order) {
-        res.status(404).json({ error: "not_found" });
-        return;
-      }
-      res.json(serialiseOrder(order));
-    } catch (err) {
-      next(err);
-    }
-  });
-
+  // NOTE: the literal /orders/history route must be registered before the
+  // /orders/:id param route, otherwise Express matches "history" as an :id.
   router.get("/orders/history", async (req, res, next) => {
-    const address = (req.query.address as string | undefined) ?? "";
-    if (!address) {
-      res.status(400).json({ error: "address_required" });
+    const parsedAddress = historyAddressSchema.safeParse(req.query.address);
+    if (!parsedAddress.success) {
+      res.status(400).json({ error: "validation_error", details: parsedAddress.error.errors });
       return;
     }
-
-    // Support both cursor-based (preferred) and offset-based (legacy) pagination
-    const cursor = req.query.cursor as string | undefined;
+    const address = parsedAddress.data;
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
 
     try {
@@ -136,6 +123,20 @@ export function ordersRoutes(orders: OrderService, log?: Logger): Router {
         });
         return;
       }
+      next(err);
+    }
+  });
+
+  router.get("/orders/:id", async (req, res, next) => {
+    const id = req.params.id;
+    try {
+      const order = await orders.get(id);
+      if (!order) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      res.json(serialiseOrder(order));
+    } catch (err) {
       next(err);
     }
   });

@@ -68,7 +68,7 @@ export class EthereumListener {
   private async processCreatedLogs(logs: any[]): Promise<void> {
     for (const log of logs) {
       if (log.blockNumber !== null) {
-        listenerLastBlock.set({ chain: "ethereum" }, Number(log.blockNumber));
+        recordListenerProgress("ethereum", Number(log.blockNumber));
       }
       const hashlock = log.args.hashlock!;
       try {
@@ -121,6 +121,14 @@ export class EthereumListener {
                     { hashlock, orderId: log.args.orderId?.toString() },
                     "ETH order observed without local announce"
                   );
+                  continue;
+                }
+                if (log.removed) {
+                  this.log.warn(
+                    { hashlock, txHash: log.transactionHash },
+                    "ETH OrderCreated event removed due to reorg"
+                  );
+                  await this.orders.rollbackSrcLock(order.publicId);
                   continue;
                 }
                 await this.orders.recordSrcLock({

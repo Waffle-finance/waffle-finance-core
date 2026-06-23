@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Horizon, 
   Asset, 
@@ -32,6 +32,23 @@ const DIRECTION_MAP: Record<BridgeDirection, { from: typeof ETH_TOKEN; to: typeo
   xlm_to_sol:  { from: XLM_TOKEN, to: SOL_TOKEN  },
   sol_to_xlm:  { from: SOL_TOKEN,  to: XLM_TOKEN },
 };
+
+/**
+ * Which wallets a given route needs connected before it can run. Every
+ * supported route involves Ethereum; XLM/SOL routes additionally require the
+ * matching non-EVM wallet.
+ */
+function routeWalletsReady(
+  direction: BridgeDirection,
+  eth: string,
+  stellar: string,
+  solana: string
+): boolean {
+  if (direction === 'eth_to_sol' || direction === 'sol_to_eth') {
+    return Boolean(eth && solana);
+  }
+  return Boolean(eth && stellar);
+}
 
 const ETH_TO_XLM_RATE = 10000;
 const MAINNET_CHAIN_ID = '0x1';
@@ -199,7 +216,16 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const [orderId, setOrderId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [balance, setBalance] = useState<string>('0');
-  
+
+  // Mid-session wallet recovery state. When a wallet the active route depends on
+  // disconnects (or the EVM chain changes underneath us) we surface a warning,
+  // clear stale input, and require reconnection before another order is built.
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [walletChainId, setWalletChainId] = useState<string | null>(null);
+  const prevEthRef = useRef(ethAddress);
+  const prevStellarRef = useRef(stellarAddress);
+  const prevSolanaRef = useRef(solanaAddress ?? '');
+
   // Real-time exchange rate state.
   //
   // Quotes come from the relayer's /api/prices endpoint, which proxies
@@ -347,7 +373,79 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       cancelled = true;
     };
   }, [amount, direction]);
-  
+
+  // Track the EVM wallet's current chain so a network switch mid-session is
+  // detected. The listener is removed on unmount to avoid leaking it.
+  useEffect(() => {
+    const eth = window.ethereum;
+    if (!eth) return;
+    let cancelled = false;
+
+    eth
+      .request({ method: 'eth_chainId' })
+      .then((id: string) => { if (!cancelled) setWalletChainId(id); })
+      .catch(() => { /* wallet locked/unavailable — leave chain unknown */ });
+
+    const handleChainChanged = (id: string) => setWalletChainId(id);
+    eth.on('chainChanged', handleChainChanged);
+
+    return () => {
+      cancelled = true;
+      eth.removeListener('chainChanged', handleChainChanged);
+    };
+  }, []);
+
+  // Detect when a wallet the active route depends on drops mid-session and
+  // recover: warn the user, clear half-entered input, and fall back to the
+  // default ETH→XLM route if the dropped wallet was route-specific (XLM/SOL).
+  useEffect(() => {
+    const solana = solanaAddress ?? '';
+    const ethDropped = Boolean(prevEthRef.current) && !ethAddress;
+    const stellarDropped = Boolean(prevStellarRef.current) && !stellarAddress;
+    const solanaDropped = Boolean(prevSolanaRef.current) && !solana;
+
+    prevEthRef.current = ethAddress;
+    prevStellarRef.current = stellarAddress;
+    prevSolanaRef.current = solana;
+
+    const needsStellar = direction === 'eth_to_xlm' || direction === 'xlm_to_eth';
+    const needsSolana = direction === 'eth_to_sol' || direction === 'sol_to_eth';
+
+    const dropped: string[] = [];
+    if (ethDropped) dropped.push('Ethereum');
+    if (needsStellar && stellarDropped) dropped.push('Stellar');
+    if (needsSolana && solanaDropped) dropped.push('Solana');
+
+    if (dropped.length === 0) return;
+
+    setRecoveryNotice(
+      `${dropped.join(' and ')} wallet ${dropped.length > 1 ? 'connections' : 'connection'} lost. Reconnect to continue.`
+    );
+    setAmount('');
+    setEstimatedAmount('');
+    setIsSubmitting(false);
+
+    // Route invalidation: a route-specific wallet vanished, so the selected
+    // route can no longer run. Drop back to the default ETH→XLM route.
+    if ((needsStellar && stellarDropped) || (needsSolana && solanaDropped)) {
+      setDirection('eth_to_xlm');
+    }
+  }, [ethAddress, stellarAddress, solanaAddress, direction]);
+
+  // Clear the recovery warning once the active route's wallets reconnect.
+  const routeReady = routeWalletsReady(direction, ethAddress, stellarAddress, solanaAddress ?? '');
+  useEffect(() => {
+    if (routeReady && recoveryNotice) {
+      setRecoveryNotice(null);
+    }
+  }, [routeReady, recoveryNotice]);
+
+  // EVM network mismatch (e.g. the user switched MetaMask to the wrong chain).
+  const chainMismatch =
+    Boolean(ethAddress) &&
+    walletChainId !== null &&
+    walletChainId.toLowerCase() !== networkInfo.expectedChainId.toLowerCase();
+
   // Yön değiştirme — cycles ETH↔XLM, ETH↔SOL; Solana routes only if wallet connected
   const handleSwapDirection = () => {
     setDirection(prev => {
@@ -362,7 +460,19 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   // Form gönderimi - RELAYER API ÜZERİNDEN
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
+    // Stale-state guard: never build or submit a transaction after the wallets
+    // this route needs have disconnected, or the EVM chain changed under us.
+    if (recoveryNotice || !routeWalletsReady(direction, ethAddress, stellarAddress, solanaAddress ?? '')) {
+      setRecoveryNotice(prev => prev ?? 'Wallet disconnected. Reconnect to continue.');
+      return;
+    }
+    if (chainMismatch) {
+      // The network-mismatch banner already tells the user what to do; refuse
+      // to submit against the wrong chain rather than silently misrouting.
+      return;
+    }
+
     // Log transaction details
     console.log('🚀 Transaction Started:', { 
       direction: direction === 'eth_to_xlm' ? 'ETH → XLM' : 'XLM → ETH',
@@ -1423,6 +1533,23 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               )}
           </div>
           
+          {/* Wallet recovery warning */}
+          {recoveryNotice && (
+            <div role="alert" className="rounded-2xl border border-amber-400/40 bg-amber-500/15 p-3 text-center">
+              <div className="font-medium text-amber-100">⚠ {recoveryNotice}</div>
+            </div>
+          )}
+
+          {/* EVM network mismatch warning */}
+          {!recoveryNotice && chainMismatch && (
+            <div role="alert" className="rounded-2xl border border-amber-400/40 bg-amber-500/15 p-3 text-center">
+              <div className="font-medium text-amber-100">
+                ⚠ Your Ethereum wallet is on the wrong network. Switch to{' '}
+                {networkInfo.isTestnet ? 'Sepolia Testnet' : 'Ethereum Mainnet'} to continue.
+              </div>
+            </div>
+          )}
+
           {/* Status Message */}
           {statusMessage && (
             <div className="rounded-2xl border border-cyan-200/30 bg-cyan-200/[0.12] p-3 text-center">
@@ -1433,18 +1560,22 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSubmitting || !amount || !walletsConnected}
+            disabled={isSubmitting || !amount || !walletsConnected || !!recoveryNotice || chainMismatch}
             className={`button-hover-scale w-full rounded-full py-3.5 font-semibold transition-all ${
-              walletsConnected
+              walletsConnected && !recoveryNotice && !chainMismatch
                 ? 'brand-cta'
                 : 'cursor-not-allowed border border-white/5 bg-slate-700/45 text-slate-400'
             }`}
           >
-            {!walletsConnected
-              ? 'Connect Wallet'
-              : isSubmitting
-                ? statusMessage || 'Processing...'
-                : 'Bridge'
+            {recoveryNotice
+              ? 'Reconnect Wallet'
+              : chainMismatch
+                ? 'Wrong Network'
+                : !walletsConnected
+                  ? 'Connect Wallet'
+                  : isSubmitting
+                    ? statusMessage || 'Processing...'
+                    : 'Bridge'
             }
           </button>
         </form>

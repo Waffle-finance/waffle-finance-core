@@ -32,6 +32,7 @@ export interface ResolverConfig {
 }
 
 import { resolveEthereumRpcUrl } from "./ethereum-rpc-url.js";
+import { validateEthereumPrivateKey, validateStellarSecret } from "./validation.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -48,6 +49,22 @@ function optionalAddress(name: string): `0x${string}` | null {
     throw new Error(`${name} is not a 0x-prefixed 20-byte address`);
   }
   return v as `0x${string}`;
+}
+
+/** Read an optional Ethereum private key, validating its format when present. */
+function optionalPrivateKey(name: string): `0x${string}` | null {
+  const v = process.env[name];
+  if (!v) return null;
+  validateEthereumPrivateKey(v, name); // throws on malformed key; value is never logged
+  return v as `0x${string}`;
+}
+
+/** Read an optional Stellar secret seed, validating its format when present. */
+function optionalStellarSecret(name: string): string | null {
+  const v = process.env[name];
+  if (!v) return null;
+  validateStellarSecret(v, name); // throws on malformed seed; value is never logged
+  return v;
 }
 
 export function loadConfig(): ResolverConfig {
@@ -70,8 +87,7 @@ export function loadConfig(): ResolverConfig {
       resolverRegistry: optionalAddress(
         isMainnet ? "ETH_RESOLVER_REGISTRY_MAINNET" : "ETH_RESOLVER_REGISTRY_TESTNET"
       ),
-      resolverPrivateKey:
-        (process.env.RESOLVER_ETH_PRIVATE_KEY as `0x${string}` | undefined) ?? null
+      resolverPrivateKey: optionalPrivateKey("RESOLVER_ETH_PRIVATE_KEY")
     },
     soroban: {
       rpcUrl:
@@ -88,7 +104,7 @@ export function loadConfig(): ResolverConfig {
         process.env[
           isMainnet ? "SOROBAN_RESOLVER_REGISTRY_MAINNET" : "SOROBAN_RESOLVER_REGISTRY_TESTNET"
         ] ?? null,
-      resolverSecret: process.env.RESOLVER_STELLAR_SECRET ?? null
+      resolverSecret: optionalStellarSecret("RESOLVER_STELLAR_SECRET")
     }
   };
 }

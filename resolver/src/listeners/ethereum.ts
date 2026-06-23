@@ -38,6 +38,8 @@ export class EthereumListener {
       this.log.warn("ETH_HTLC_ESCROW address not configured — skipping Ethereum listener");
       return;
     }
+    await this.stop();
+
     const address = this.cfg.htlcEscrow;
     this.log.info({ chainId: this.cfg.chainId, contract: address }, "starting Ethereum listener");
 

@@ -59,10 +59,7 @@ export class SorobanListener {
             "Soroban event"
           );
           processedLedger = Math.max(processedLedger, ev.ledger);
-          // Topic parsing is contract-specific; the SDK module in Phase 5
-          // exposes a typed decoder. Until then we log raw events and let
-          // the user/resolver post `/orders/:id/dst-locked` once they
-          // identify the matching public id.
+          await this.processSorobanEvent(ev);
         }
         recordListenerProgress("soroban", processedLedger, latest.sequence);
         observeListenerEventProcessing("soroban", "poll", startedAt);

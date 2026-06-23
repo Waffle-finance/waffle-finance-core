@@ -4,6 +4,10 @@ import freighterApi from '@stellar/freighter-api';
 interface FreighterState {
   isConnected: boolean;
   address: string | null;
+  /** Freighter network name, e.g. "TESTNET" / "PUBLIC". Null until known. */
+  network: string | null;
+  /** Stellar network passphrase reported by Freighter. Null until known. */
+  networkPassphrase: string | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -12,6 +16,8 @@ export function useFreighter() {
   const [state, setState] = useState<FreighterState>({
     isConnected: false,
     address: null,
+    network: null,
+    networkPassphrase: null,
     isLoading: false,
     error: null,
   });
@@ -34,11 +40,23 @@ export function useFreighter() {
         if (isConnected) {
           const { address } = await freighterApi.getAddress();
           console.log('🚀 Freighter address:', address);
-          
+
+          let network: string | null = null;
+          let networkPassphrase: string | null = null;
+          try {
+            const net = await freighterApi.getNetwork();
+            network = net.network;
+            networkPassphrase = net.networkPassphrase;
+          } catch {
+            // Network details unavailable — leave null, the watcher will fill in.
+          }
+
           setState(prev => ({
             ...prev,
             isConnected: true,
             address,
+            network,
+            networkPassphrase,
             error: null,
           }));
         }
@@ -52,6 +70,71 @@ export function useFreighter() {
     };
 
     checkConnection();
+  }, []);
+
+  // Poll Freighter for address / network changes (including disconnect). The
+  // extension has no event emitter, so we poll on an interval and only update
+  // state when something actually changes. The interval is cleared on unmount
+  // so the poller does not leak across the session.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let cancelled = false;
+
+    const markDisconnected = () => {
+      setState(prev =>
+        prev.isConnected || prev.address
+          ? { ...prev, isConnected: false, address: null, network: null, networkPassphrase: null }
+          : prev
+      );
+    };
+
+    const poll = async () => {
+      try {
+        if (typeof freighterApi?.isConnected !== 'function') return;
+        const available = await freighterApi.isConnected();
+        if (!available) {
+          if (!cancelled) markDisconnected();
+          return;
+        }
+
+        const { address } = await freighterApi.getAddress();
+        if (!address) {
+          if (!cancelled) markDisconnected();
+          return;
+        }
+
+        let network: string | null = null;
+        let networkPassphrase: string | null = null;
+        try {
+          const net = await freighterApi.getNetwork();
+          network = net.network;
+          networkPassphrase = net.networkPassphrase;
+        } catch {
+          // Network details transiently unavailable — keep last-known values.
+        }
+
+        if (cancelled) return;
+        setState(prev => {
+          if (
+            prev.isConnected &&
+            prev.address === address &&
+            prev.network === network &&
+            prev.networkPassphrase === networkPassphrase
+          ) {
+            return prev;
+          }
+          return { ...prev, isConnected: true, address, network, networkPassphrase, error: null };
+        });
+      } catch {
+        // Ignore transient polling errors; the next tick re-evaluates.
+      }
+    };
+
+    const intervalId = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   // Connect to Freighter
@@ -78,11 +161,23 @@ export function useFreighter() {
       console.log('🚀 Getting Freighter address...');
       const { address } = await freighterApi.getAddress();
       console.log('🚀 Freighter connected successfully:', address);
-      
+
+      let network: string | null = null;
+      let networkPassphrase: string | null = null;
+      try {
+        const net = await freighterApi.getNetwork();
+        network = net.network;
+        networkPassphrase = net.networkPassphrase;
+      } catch {
+        // Non-fatal — network details will be populated by the watcher.
+      }
+
       setState(prev => ({
         ...prev,
         isConnected: true,
         address,
+        network,
+        networkPassphrase,
         isLoading: false,
         error: null,
       }));
@@ -107,6 +202,8 @@ export function useFreighter() {
     setState({
       isConnected: false,
       address: null,
+      network: null,
+      networkPassphrase: null,
       isLoading: false,
       error: null,
     });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Chain, Direction } from "../persistence/orders-repo.js";
+import { validateChainAddress } from "./address.js";
 
 /**
  * Centralised validation for order announcements.
@@ -8,14 +9,12 @@ import type { Chain, Direction } from "../persistence/orders-repo.js";
  * (direction <-> chains, and address format <-> chain) so that malformed
  * payloads are rejected at parse time with a structured ZodError, rather
  * than reaching the service layer and surfacing as an ad-hoc error later.
+ *
+ * Chain-address rules live in ./address.ts so they stay consistent with the
+ * history endpoint and any future address-aware routes.
  */
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
-const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
-// Base-58 Solana pubkey: 32–44 alphanumeric chars excluding 0, O, I, l
-const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /**
  * The src/dst chains each supported swap direction must use. Keep this map
@@ -28,22 +27,6 @@ export const DIRECTION_CHAINS: Record<Direction, { src: Chain; dst: Chain }> = {
   eth_to_sol: { src: "ethereum", dst: "solana" },
   sol_to_eth: { src: "solana", dst: "ethereum" }
 };
-
-/** Returns an error message if `addr` is not well-formed for `chain`, else null. */
-function addressError(chain: Chain, addr: string): string | null {
-  if (chain === "ethereum") {
-    if (!HEX_ADDRESS.test(addr)) return `${addr} is not a valid Ethereum address`;
-    if (addr.toLowerCase() === ZERO_ADDRESS) return "Zero address is not a valid Ethereum address";
-    return null;
-  }
-  if (chain === "stellar") {
-    return STELLAR_ADDRESS.test(addr) ? null : `${addr} is not a valid Stellar account`;
-  }
-  if (chain === "solana") {
-    return SOLANA_ADDRESS.test(addr) ? null : `${addr} is not a valid Solana address`;
-  }
-  return null;
-}
 
 const announceShape = z.object({
   direction: z.enum(["eth_to_xlm", "xlm_to_eth", "eth_to_sol", "sol_to_eth"]),
@@ -78,11 +61,11 @@ export const announceSchema = announceShape.superRefine((input, ctx) => {
   }
 
   // 2) Each address must be well-formed for the chain it belongs to.
-  const srcErr = addressError(input.srcChain, input.srcAddress);
+  const srcErr = validateChainAddress(input.srcChain, input.srcAddress);
   if (srcErr) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["srcAddress"], message: srcErr });
   }
-  const dstErr = addressError(input.dstChain, input.dstAddress);
+  const dstErr = validateChainAddress(input.dstChain, input.dstAddress);
   if (dstErr) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dstAddress"], message: dstErr });
   }

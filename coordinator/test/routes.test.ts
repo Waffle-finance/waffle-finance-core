@@ -337,6 +337,64 @@ describe("API key bypass", () => {
   });
 });
 
+describe("GET /api/orders/history", () => {
+  const VALID_SOLANA_ADDR = "11111111111111111111111111111111"; // 32-char base58
+
+  it("returns 400 with validation details when the address is missing", async () => {
+    const app = await freshApp();
+    const res = await request(app).get("/api/orders/history");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("validation_error");
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
+
+  it("rejects a malformed address with 400", async () => {
+    const app = await freshApp();
+    const res = await request(app).get("/api/orders/history").query({ address: "not-an-address" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("validation_error");
+  });
+
+  it("rejects the Ethereum zero address with 400", async () => {
+    const app = await freshApp();
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ address: "0x" + "0".repeat(40) });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("validation_error");
+  });
+
+  it("accepts a valid Ethereum address and returns matching orders", async () => {
+    const app = await freshApp();
+    await request(app).post("/api/orders/announce").send(BASE_ANNOUNCE).expect(201);
+
+    const res = await request(app).get("/api/orders/history").query({ address: VALID_ETH_ADDR });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.pagination).toMatchObject({ limit: 50, offset: 0, count: 1 });
+  });
+
+  it("accepts a valid Stellar address and returns matching orders", async () => {
+    const app = await freshApp();
+    await request(app).post("/api/orders/announce").send(BASE_ANNOUNCE).expect(201);
+
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ address: VALID_STELLAR_ADDR });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+  });
+
+  it("accepts a valid Solana address (empty history is still 200)", async () => {
+    const app = await freshApp();
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ address: VALID_SOLANA_ADDR });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toEqual([]);
+  });
+});
+
 describe("Rate-limit response headers", () => {
   it("sets X-RateLimit-* headers on every response", async () => {
     const app = await freshApp();
