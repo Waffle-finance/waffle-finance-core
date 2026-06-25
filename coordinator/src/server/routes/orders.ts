@@ -94,11 +94,14 @@ export function ordersRoutes(orders: OrderService, log?: Logger): Router {
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
 
     // Support both cursor-based (preferred) and offset-based (legacy) pagination
-    const cursor = req.query.cursor as string | undefined;
+    const cursorParam = req.query.cursor as string | undefined;
+    const cursor = cursorParam && cursorParam.trim() !== '' ? cursorParam : undefined;
+    const offset = req.query.offset !== undefined ? Math.max(Number(req.query.offset), 0) : undefined;
 
     try {
-      if (cursor !== undefined || req.query.offset === undefined) {
-        // Use cursor-based pagination (preferred)
+      // Use cursor pagination if cursor is provided, otherwise use offset (legacy default)
+      if (cursor !== undefined) {
+        // Cursor-based pagination
         const result = await orders.historyWithCursor(address, limit, cursor);
         res.json({
           transactions: result.orders.map((o) => serialiseOrder(o)).filter(Boolean),
@@ -109,12 +112,12 @@ export function ordersRoutes(orders: OrderService, log?: Logger): Router {
           }
         });
       } else {
-        // Legacy offset-based pagination for backward compatibility
-        const offset = Math.max(Number(req.query.offset ?? 0), 0);
-        const list = await orders.history(address, limit, offset);
+        // Offset-based pagination (default for backward compatibility)
+        const finalOffset = offset ?? 0;
+        const list = await orders.history(address, limit, finalOffset);
         res.json({
           transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
-          pagination: { limit, offset, count: list.length }
+          pagination: { limit, offset: finalOffset, count: list.length }
         });
       }
     } catch (err) {

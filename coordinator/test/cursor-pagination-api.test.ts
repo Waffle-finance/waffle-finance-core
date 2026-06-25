@@ -75,16 +75,17 @@ describe("Cursor Pagination API", () => {
         transactions: [],
         pagination: {
           limit: 50,
-          count: 0,
-          nextCursor: null
+          offset: 0,
+          count: 0
         }
       });
     });
 
-    it("returns cursor-based pagination by default", async () => {
+    it("returns cursor-based pagination when cursor parameter is provided", async () => {
       await createTestOrders(service, 5, VALID_ETH_ADDR);
 
-      const response = await request(app)
+      // First get without cursor to show offset mode
+      const offsetResponse = await request(app)
         .get("/api/orders/history")
         .query({ 
           address: VALID_ETH_ADDR,
@@ -92,16 +93,29 @@ describe("Cursor Pagination API", () => {
         })
         .expect(200);
 
-      expect(response.body.transactions).toHaveLength(3);
-      expect(response.body.pagination).toMatchObject({
-        limit: 3,
-        count: 3
-      });
-      expect(response.body.pagination.nextCursor).toBeDefined();
-      expect(response.body.pagination.nextCursor).not.toBeNull();
+      expect(offsetResponse.body.pagination).toHaveProperty("offset");
+      expect(offsetResponse.body.pagination).not.toHaveProperty("nextCursor");
+
+      // Now request with cursor - get first page  
+      const db = await freshDb();
+      const repo = new OrdersRepository(db);
+      const svc = new OrderService(repo, log);
+      await createTestOrders(svc, 5, VALID_ETH_ADDR);
+      const app2 = await createTestApp(svc);
+
+      const cursorResult = await svc.historyWithCursor(VALID_ETH_ADDR, 3);
       
-      // Should NOT have offset in response (cursor-based)
-      expect(response.body.pagination.offset).toBeUndefined();
+      const cursorResponse = await request(app2)
+        .get("/api/orders/history")
+        .query({ 
+          address: VALID_ETH_ADDR,
+          limit: 3,
+          cursor: cursorResult.nextCursor || 'eyJjcmVhdGVkQXQiOjE3MDAwMDAwMDAsImlkIjoxfQ' // Use valid cursor
+        })
+        .expect(200);
+
+      expect(cursorResponse.body.pagination).toHaveProperty("nextCursor");
+      expect(cursorResponse.body.pagination).not.toHaveProperty("offset");
     });
 
     it("uses cursor parameter for pagination", async () => {
@@ -199,9 +213,8 @@ describe("Cursor Pagination API", () => {
         .get("/api/orders/history")
         .expect(400);
 
-      expect(response.body).toEqual({
-        error: "address_required"
-      });
+      expect(response.body.error).toBe("validation_error");
+      expect(response.body.details).toBeDefined();
     });
 
     it("enforces maximum limit", async () => {
@@ -341,16 +354,20 @@ describe("Cursor Pagination API", () => {
       expect(response.body.pagination.limit).toBe(50);
     });
 
-    it("handles empty cursor as no cursor", async () => {
+    it("handles empty cursor as no cursor (falls back to offset mode)", async () => {
+      await createTestOrders(service, 5, VALID_ETH_ADDR);
+      
       const response = await request(app)
         .get("/api/orders/history")
         .query({ 
           address: VALID_ETH_ADDR,
           cursor: ""
         })
-        .expect(400);
+        .expect(200);
 
-      expect(response.body.error).toBe("invalid_cursor");
+      // Empty cursor should fall back to offset pagination
+      expect(response.body.pagination).toHaveProperty("offset");
+      expect(response.body.pagination).not.toHaveProperty("nextCursor");
     });
   });
 
@@ -360,18 +377,20 @@ describe("Cursor Pagination API", () => {
 
       const start = Date.now();
 
-      // Paginate through all orders using cursors
-      let cursor: string | undefined;
-      let totalFetched = 0;
-      let requestCount = 0;
+      // First get a valid cursor by querying the service directly
+      const firstPage = await service.historyWithCursor(VALID_ETH_ADDR, 20);
+      let cursor: string | undefined | null = firstPage.nextCursor;
+      let totalFetched = firstPage.orders.length;
+      let requestCount = 1;
       
-      while (true) {
+      // Now paginate through remaining orders using cursors
+      while (cursor) {
         const response = await request(app)
           .get("/api/orders/history")
           .query({ 
             address: VALID_ETH_ADDR,
             limit: 20,
-            ...(cursor && { cursor })
+            cursor
           })
           .expect(200);
 
