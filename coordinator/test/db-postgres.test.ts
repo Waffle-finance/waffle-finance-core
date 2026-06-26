@@ -20,7 +20,13 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import pino from "pino";
 import { Pool } from "pg";
-import { openDatabase, isPostgresDatabase, PostgresStatement } from "../src/persistence/db.js";
+import {
+  openDatabase,
+  isPostgresDatabase,
+  PostgresStatement,
+  queryMigrations,
+  getCurrentSchemaVersion,
+} from "../src/persistence/db.js";
 import { OrdersRepository } from "../src/persistence/orders-repo.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -96,22 +102,32 @@ describe("PostgreSQL Database Compatibility", () => {
 
   testBoth("should create schema and run migrations", async (db, dbType) => {
     expect(db).toBeTruthy();
-    
+
     // Verify tables were created
     if (dbType === 'postgres') {
       const result = await db.getPool().query(`
-        SELECT tablename FROM pg_tables 
-        WHERE schemaname = 'public' AND tablename IN ('orders', 'order_events', 'resolver_heartbeats')
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename IN ('orders', 'order_events', 'resolver_heartbeats', 'schema_migrations')
         ORDER BY tablename
       `);
-      expect(result.rows.map((r: any) => r.tablename)).toEqual(['order_events', 'orders', 'resolver_heartbeats']);
+      expect(result.rows.map((r: any) => r.tablename)).toEqual([
+        'order_events', 'orders', 'resolver_heartbeats', 'schema_migrations'
+      ]);
     }
     // For SQLite, just test that we can query the schema
     const stmt = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
     if (dbType === 'sqlite') {
       const tables = stmt.all();
       expect(tables.map((t: any) => t.name)).toContain('orders');
+      expect(tables.map((t: any) => t.name)).toContain('schema_migrations');
     }
+
+    // Both backends: migration history should be populated
+    const migrations = await queryMigrations(db);
+    expect(migrations.length).toBeGreaterThan(0);
+    const version = await getCurrentSchemaVersion(db);
+    expect(version).toBe("005_schema_migrations.sql");
   });
 
   testBoth("should support all OrdersRepository operations", async (db, dbType) => {
