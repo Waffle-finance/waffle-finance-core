@@ -404,6 +404,30 @@ export class OrdersRepository {
   }
 
   /**
+   * Return orders in `src_locked` or `dst_locked` whose relevant timelock
+   * has already passed (timelock < nowSeconds).  These are candidates for
+   * the periodic expiry scan.
+   *
+   * Only non-terminal statuses are returned — completed, refunded, failed
+   * orders are excluded because they cannot transition to `expired`.
+   */
+  async findExpiredCandidates(nowSeconds: number): Promise<OrderRow[]> {
+    const rows = await this.all<OrderDbRow>(
+      this.db.prepare(`
+        SELECT * FROM orders
+        WHERE status IN ('src_locked', 'dst_locked')
+          AND (
+            (src_timelock IS NOT NULL AND src_timelock < :now)
+            OR
+            (dst_timelock IS NOT NULL AND dst_timelock < :now)
+          )
+      `),
+      { now: nowSeconds }
+    );
+    return rows.map(rowToOrder);
+  }
+
+  /**
    * Return orders in `src_locked` or `dst_locked` state that have no preimage
    * recorded.  These are candidates for secret recovery via on-chain log replay.
    */

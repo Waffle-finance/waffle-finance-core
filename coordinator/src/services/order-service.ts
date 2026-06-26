@@ -140,4 +140,32 @@ export class OrderService {
   > {
     return this.repo.findOrdersMissingSecret();
   }
+
+  /**
+   * Scan for orders whose timelock has passed and mark them `expired`.
+   *
+   * `expired` is a soft, non-terminal state: the order can still be
+   * refunded or fail afterwards.  The scan deliberately skips terminal
+   * orders (completed / refunded / failed) — see `findExpiredCandidates`.
+   *
+   * Returns the number of orders that were successfully transitioned.
+   */
+  async expireStaleOrders(nowSeconds?: number): Promise<number> {
+    const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+    const candidates = await this.repo.findExpiredCandidates(now);
+    let count = 0;
+    for (const order of candidates) {
+      try {
+        await this.markStatus(order.publicId, "expired");
+        this.log.info({ publicId: order.publicId }, "order marked expired by timelock");
+        count++;
+      } catch (err: any) {
+        this.log.warn(
+          { publicId: order.publicId, err: err?.message },
+          "cannot expire order — skipping"
+        );
+      }
+    }
+    return count;
+  }
 }
