@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
+import { logger } from '../utils/logger';
 
 interface FreighterState {
   isConnected: boolean;
@@ -25,21 +26,21 @@ export function useFreighter() {
   // Check if Freighter is connected on mount
   useEffect(() => {
     const checkConnection = async () => {
-      console.log('🚀 Checking Freighter connection...');
+      logger.walletConnect('Freighter', undefined, { action: 'checking' });
       
       try {
         // Check if Freighter is available
         if (!freighterApi || typeof freighterApi.isConnected !== 'function') {
-          console.log('❌ Freighter API not available');
+          logger.walletError('Freighter', 'API not available');
           return;
         }
         
         const isConnected = await freighterApi.isConnected();
-        console.log('🚀 Freighter connection status:', isConnected);
+        logger.event('wallet_state_change', `Freighter connection status: ${isConnected}`, { isConnected });
         
         if (isConnected) {
           const { address } = await freighterApi.getAddress();
-          console.log('🚀 Freighter address:', address);
+          logger.walletConnect('Freighter', address);
 
           let network: string | null = null;
           let networkPassphrase: string | null = null;
@@ -61,7 +62,7 @@ export function useFreighter() {
           }));
         }
       } catch (error) {
-        console.error('❌ Error checking Freighter connection:', error);
+        logger.walletError('Freighter', error instanceof Error ? error : String(error), { action: 'connection_check' });
         setState(prev => ({
           ...prev,
           error: error instanceof Error ? error.message : 'Connection check failed',
@@ -139,7 +140,7 @@ export function useFreighter() {
 
   // Connect to Freighter
   const connect = useCallback(async () => {
-    console.log('🚀 Connecting to Freighter...');
+    logger.event('wallet_connect', 'Connecting to Freighter...');
     setState(prev => ({ ...prev, isLoading: true, error: null }));
     
     try {
@@ -149,18 +150,18 @@ export function useFreighter() {
       }
       
       const isAvailable = await freighterApi.isConnected();
-      console.log('🚀 Freighter availability:', isAvailable);
+      logger.event('wallet_state_change', `Freighter availability: ${isAvailable}`, { isAvailable });
       
       if (!isAvailable) {
         throw new Error('Freighter wallet is not available. Please install Freighter extension.');
       }
 
-      console.log('🚀 Requesting Freighter permission...');
+      logger.event('wallet_connect', 'Requesting Freighter permission...');
       await freighterApi.setAllowed();
       
-      console.log('🚀 Getting Freighter address...');
+      logger.event('wallet_connect', 'Getting Freighter address...');
       const { address } = await freighterApi.getAddress();
-      console.log('🚀 Freighter connected successfully:', address);
+      logger.walletConnect('Freighter', address, { action: 'connected_successfully' });
 
       let network: string | null = null;
       let networkPassphrase: string | null = null;
@@ -184,7 +185,7 @@ export function useFreighter() {
 
       return address;
     } catch (error) {
-      console.error('❌ Freighter connection error:', error);
+      logger.walletError('Freighter', error instanceof Error ? error : String(error));
       const errorMessage = error instanceof Error ? error.message : 'Failed to connect to Freighter';
       setState(prev => ({
         ...prev,
@@ -215,7 +216,7 @@ export function useFreighter() {
       const networkInfo = await freighterApi.getNetwork();
       return networkInfo;
     } catch (error) {
-      console.error('Error getting network info:', error);
+      logger.networkError(error instanceof Error ? error : String(error), { action: 'get_network_info' });
       return null;
     }
   }, []);
@@ -232,13 +233,14 @@ export function useFreighter() {
     }
 
     try {
+      logger.transactionSign('unknown', 'Freighter', { signerAddress: signerAddress.substring(0, 6) });
       const result = await freighterApi.signTransaction(xdr, {
         networkPassphrase,
         address: signerAddress,
       });
       return result.signedTxXdr;
     } catch (error) {
-      console.error('Error signing transaction:', error);
+      logger.transactionError('unknown', error instanceof Error ? error : String(error));
       throw error;
     }
   }, [state.address]);
