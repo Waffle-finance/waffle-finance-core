@@ -91,7 +91,7 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
     event Registered(address indexed resolver, uint256 stake);
     event StakeIncreased(address indexed resolver, uint256 added, uint256 newTotal);
     event Unregistered(address indexed resolver, uint256 stakeReturned);
-    event Slashed(address indexed resolver, uint256 amount, address beneficiary);
+    event Slashed(address indexed resolver, uint256 amount, address indexed beneficiary);
     event MinStakeUpdated(uint256 oldMinStake, uint256 newMinStake);
     event SlashBeneficiaryUpdated(address oldBeneficiary, address newBeneficiary);
 
@@ -324,6 +324,62 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
     /// @notice Alias kept for backwards compatibility.
     function listLength() external view returns (uint256) {
         return _resolverList.length;
+    }
+
+    /// @notice Return full ResolverInfo for every currently-active resolver.
+    ///         A resolver is active when its `active` flag is true AND its
+    ///         stake meets or exceeds the current `minStake`, matching the
+    ///         logic used by `isActive`.
+    ///
+    /// @dev    Off-chain view helper. Iterates the full resolver list in
+    ///         memory — avoid calling on-chain in a gas-limited context.
+    ///         Coordinators and monitoring tools use this for a single-call
+    ///         snapshot instead of N individual `get()` calls.
+    ///
+    ///         The returned array may be shorter than `getResolverCount()` if
+    ///         some registered resolvers are currently inactive due to slashing
+    ///         or a `minStake` increase.
+    function getActiveResolvers() external view returns (ResolverInfo[] memory) {
+        uint256 len = _resolverList.length;
+        uint256 snap = minStake; // cache to avoid repeated SLOADs
+        uint256 activeCount = 0;
+
+        for (uint256 i = 0; i < len; i++) {
+            ResolverInfo storage info = _resolvers[_resolverList[i]];
+            if (info.active && info.stake >= snap) {
+                activeCount++;
+            }
+        }
+
+        ResolverInfo[] memory result = new ResolverInfo[](activeCount);
+        uint256 j = 0;
+        for (uint256 i = 0; i < len; i++) {
+            ResolverInfo storage info = _resolvers[_resolverList[i]];
+            if (info.active && info.stake >= snap) {
+                result[j++] = info;
+            }
+        }
+        return result;
+    }
+
+    /// @notice Return ResolverInfo for each address in `resolvers`.
+    ///         Unregistered addresses return a zero-value struct (all fields
+    ///         are zero / false / address(0)), matching the behaviour of
+    ///         `get()` for unknown addresses.
+    ///
+    /// @dev    Lets coordinators and front-ends fetch info for a known set of
+    ///         resolver addresses in a single RPC call instead of N individual
+    ///         `get()` calls.  Safe to call with an empty array.
+    function getBatchInfo(address[] calldata resolvers)
+        external
+        view
+        returns (ResolverInfo[] memory)
+    {
+        ResolverInfo[] memory result = new ResolverInfo[](resolvers.length);
+        for (uint256 i = 0; i < resolvers.length; i++) {
+            result[i] = _resolvers[resolvers[i]];
+        }
+        return result;
     }
 
     // ---------------------------------------------------------------

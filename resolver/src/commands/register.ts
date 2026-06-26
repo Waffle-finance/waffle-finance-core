@@ -17,6 +17,10 @@ const REGISTRY_ABI = parseAbi([
   "function unregister()",
   "function isActive(address resolver) view returns (bool)",
   "function get(address resolver) view returns ((address resolver,uint256 stake,uint64 registeredAt,uint64 lastSlashAt,uint256 totalSlashed,bool active))",
+  "function getActiveResolvers() view returns ((address resolver,uint256 stake,uint64 registeredAt,uint64 lastSlashAt,uint256 totalSlashed,bool active)[])",
+  "function getBatchInfo(address[] resolvers) view returns ((address resolver,uint256 stake,uint64 registeredAt,uint64 lastSlashAt,uint256 totalSlashed,bool active)[])",
+  "function list() view returns (address[])",
+  "function getResolverCount() view returns (uint256)",
   "function minStake() view returns (uint256)",
   "function stakeAsset() view returns (address)"
 ]);

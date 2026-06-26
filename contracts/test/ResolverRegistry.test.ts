@@ -622,7 +622,171 @@ describe("ResolverRegistry", () => {
     });
   });
 
-  //  constructor validation 
+  //  getActiveResolvers
+
+  describe("getActiveResolvers", () => {
+    it("returns an empty array when no resolvers are registered", async () => {
+      const { registry } = await deploy();
+      expect(await registry.getActiveResolvers()).to.deep.equal([]);
+    });
+
+    it("returns all resolvers when all are active", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, r2] = signers;
+      const { token, registry } = await deploy();
+
+      for (const r of [r1, r2]) {
+        await fundAndApprove(token, registry, r, MIN_STAKE);
+        await registry.connect(r).register(MIN_STAKE);
+      }
+
+      const active = await registry.getActiveResolvers();
+      expect(active.length).to.equal(2);
+      const addresses = active.map((i: { resolver: string }) => i.resolver.toLowerCase());
+      expect(addresses).to.include(r1.address.toLowerCase());
+      expect(addresses).to.include(r2.address.toLowerCase());
+    });
+
+    it("excludes slashed-inactive resolvers while keeping active ones", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, r2] = signers;
+      const { token, registry } = await deploy();
+
+      for (const r of [r1, r2]) {
+        await fundAndApprove(token, registry, r, MIN_STAKE * 2n);
+        await registry.connect(r).register(MIN_STAKE * 2n);
+      }
+
+      // Slash r1 below minimum — deactivates it.
+      await registry.slash(r1.address, MIN_STAKE + 1n);
+
+      const active = await registry.getActiveResolvers();
+      expect(active.length).to.equal(1);
+      expect(active[0].resolver.toLowerCase()).to.equal(r2.address.toLowerCase());
+    });
+
+    it("re-includes a resolver that tops up stake after being slashed below minimum", async () => {
+      const [, , , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE * 3n);
+
+      await registry.connect(resolver).register(MIN_STAKE * 2n);
+      await registry.slash(resolver.address, MIN_STAKE + 1n);
+      expect((await registry.getActiveResolvers()).length).to.equal(0);
+
+      await registry.connect(resolver).increaseStake(2n);
+      const active = await registry.getActiveResolvers();
+      expect(active.length).to.equal(1);
+      expect(active[0].resolver.toLowerCase()).to.equal(resolver.address.toLowerCase());
+    });
+
+    it("reflects minStake increase: previously-active resolvers drop out", async () => {
+      const [, , , resolver] = await ethers.getSigners();
+      const { owner, token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE);
+      await registry.connect(resolver).register(MIN_STAKE);
+
+      expect((await registry.getActiveResolvers()).length).to.equal(1);
+
+      await registry.connect(owner).setMinStake(MIN_STAKE * 2n);
+      expect((await registry.getActiveResolvers()).length).to.equal(0);
+    });
+
+    it("returns empty array after the only active resolver unregisters", async () => {
+      const [, , , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE);
+      await registry.connect(resolver).register(MIN_STAKE);
+
+      await registry.connect(resolver).unregister();
+      expect(await registry.getActiveResolvers()).to.deep.equal([]);
+    });
+  });
+
+  //  getBatchInfo
+
+  describe("getBatchInfo", () => {
+    it("returns zero-value structs for unregistered addresses", async () => {
+      const [, , , , stranger] = await ethers.getSigners();
+      const { registry } = await deploy();
+
+      const results = await registry.getBatchInfo([stranger.address]);
+      expect(results.length).to.equal(1);
+      expect(results[0].stake).to.equal(0n);
+      expect(results[0].active).to.be.false;
+      expect(results[0].resolver).to.equal(ethers.ZeroAddress);
+    });
+
+    it("returns an empty array for an empty input", async () => {
+      const { registry } = await deploy();
+      expect(await registry.getBatchInfo([])).to.deep.equal([]);
+    });
+
+    it("returns correct info for registered addresses", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, r2] = signers;
+      const { token, registry } = await deploy();
+
+      for (const r of [r1, r2]) {
+        await fundAndApprove(token, registry, r, MIN_STAKE);
+        await registry.connect(r).register(MIN_STAKE);
+      }
+
+      const results = await registry.getBatchInfo([r1.address, r2.address]);
+      expect(results.length).to.equal(2);
+      expect(results[0].stake).to.equal(MIN_STAKE);
+      expect(results[0].active).to.be.true;
+      expect(results[1].stake).to.equal(MIN_STAKE);
+      expect(results[1].active).to.be.true;
+    });
+
+    it("handles a mix of registered and unregistered addresses", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, , stranger] = signers;
+      const { token, registry } = await deploy();
+
+      await fundAndApprove(token, registry, r1, MIN_STAKE);
+      await registry.connect(r1).register(MIN_STAKE);
+
+      const results = await registry.getBatchInfo([r1.address, stranger.address]);
+      expect(results.length).to.equal(2);
+      expect(results[0].stake).to.equal(MIN_STAKE);
+      expect(results[0].active).to.be.true;
+      expect(results[1].stake).to.equal(0n);
+      expect(results[1].active).to.be.false;
+      expect(results[1].resolver).to.equal(ethers.ZeroAddress);
+    });
+
+    it("reflects current state after slashing", async () => {
+      const [, , , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE * 2n);
+      await registry.connect(resolver).register(MIN_STAKE * 2n);
+
+      await registry.slash(resolver.address, MIN_STAKE + 1n);
+
+      const results = await registry.getBatchInfo([resolver.address]);
+      expect(results[0].active).to.be.false;
+      expect(results[0].totalSlashed).to.equal(MIN_STAKE + 1n);
+    });
+  });
+
+  //  Slashed event — indexed beneficiary
+
+  describe("Slashed event indexing", () => {
+    it("emits Slashed with resolver and beneficiary as indexed topics", async () => {
+      const [, beneficiary, , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE * 2n);
+      await registry.connect(resolver).register(MIN_STAKE * 2n);
+
+      await expect(registry.slash(resolver.address, MIN_STAKE))
+        .to.emit(registry, "Slashed")
+        .withArgs(resolver.address, MIN_STAKE, beneficiary.address);
+    });
+  });
+
+  //  constructor validation
 
   describe("constructor", () => {
     it("reverts if stakeAsset is the zero address", async () => {
