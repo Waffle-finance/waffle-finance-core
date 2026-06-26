@@ -174,6 +174,8 @@ import { gasPriceTracker } from './services/gas-tracker.js';
 
 // Phase 8: Monitoring System imports
 import { getMonitor } from './services/monitoring.js';
+import { logSolanaStatus } from './utils/solana-config.js';
+import { solanaPlaceholderMode } from './metrics.js';
 
 // Contract addresses
 const ETH_TO_XLM_RATE = 10000; // 1 ETH = 10,000 XLM (LEGACY - now using real-time prices)
@@ -506,7 +508,16 @@ async function initializeRelayer() {
   
   // Validate configuration
   validateConfig();
-  
+
+  // Detect Solana placeholder mode and expose as a metric so operators see
+  // an explicit warning when Solana settlement is not yet configured.
+  const solanaProgram =
+    process.env.SOLANA_HTLC_PROGRAM ??
+    process.env.SOLANA_HTLC_PROGRAM_TESTNET ??
+    process.env.SOLANA_HTLC_PROGRAM_MAINNET;
+  const solanaStatus = logSolanaStatus(solanaProgram);
+  solanaPlaceholderMode.set(solanaStatus === 'placeholder' ? 1 : 0);
+
   // Display configuration
   console.log(`🌐 Environment: ${RELAYER_CONFIG.nodeEnv}`);
   console.log(`🔗 Ethereum Network: ${RELAYER_CONFIG.ethereum.network}`);
