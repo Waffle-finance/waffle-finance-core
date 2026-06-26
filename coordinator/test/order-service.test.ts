@@ -117,6 +117,156 @@ describe("SecretService", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// expireStaleOrders
+// ---------------------------------------------------------------------------
+
+const BASE_ANNOUNCE_INPUT = {
+  direction: "eth_to_xlm" as const,
+  hashlock: VALID_HASHLOCK,
+  srcChain: "ethereum" as const,
+  srcAddress: VALID_ETH_ADDR,
+  srcAsset: "native",
+  srcAmount: "1000000000000000000",
+  srcSafetyDeposit: "1000000000000000",
+  dstChain: "stellar" as const,
+  dstAddress: VALID_STELLAR_ADDR,
+  dstAsset: "native",
+  dstAmount: "100000000",
+};
+
+describe("expireStaleOrders", () => {
+  it("marks a src_locked order as expired when its src_timelock has passed", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    const order = await orders.announce(BASE_ANNOUNCE_INPUT);
+    const pastTimelock = Math.floor(Date.now() / 1000) - 3600;
+
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "1",
+      txHash: "0xdeadbeef",
+      blockNumber: 1,
+      timelock: pastTimelock,
+    });
+
+    const expired = await orders.expireStaleOrders();
+    expect(expired).toBe(1);
+
+    const updated = await orders.get(order.publicId);
+    expect(updated!.status).toBe("expired");
+  });
+
+  it("does not expire a src_locked order whose timelock is still in the future", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    const order = await orders.announce(BASE_ANNOUNCE_INPUT);
+    const futureTimelock = Math.floor(Date.now() / 1000) + 7200;
+
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "2",
+      txHash: "0xdeadbeef",
+      blockNumber: 1,
+      timelock: futureTimelock,
+    });
+
+    const expired = await orders.expireStaleOrders();
+    expect(expired).toBe(0);
+
+    const updated = await orders.get(order.publicId);
+    expect(updated!.status).toBe("src_locked");
+  });
+
+  it("marks a dst_locked order as expired when its dst_timelock has passed", async () => {
+    const db = await freshDb();
+    const repo = new OrdersRepository(db);
+    const orders = new OrderService(repo, log);
+
+    const order = await orders.announce(BASE_ANNOUNCE_INPUT);
+    const pastTimelock = Math.floor(Date.now() / 1000) - 3600;
+
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "3",
+      txHash: "0xsrclock",
+      blockNumber: 1,
+      timelock: Math.floor(Date.now() / 1000) + 7200, // src still live
+    });
+    await orders.recordDstLock({
+      publicId: order.publicId,
+      orderId: "4",
+      txHash: "0xdstlock",
+      blockNumber: 2,
+      timelock: pastTimelock, // dst expired
+      resolver: null,
+    });
+
+    const expired = await orders.expireStaleOrders();
+    expect(expired).toBe(1);
+
+    const updated = await orders.get(order.publicId);
+    expect(updated!.status).toBe("expired");
+  });
+
+  it("does not expire terminal (completed / refunded) orders", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    // Create + advance to completed via refunded path
+    const orderA = await orders.announce({
+      ...BASE_ANNOUNCE_INPUT,
+      hashlock: "0x" + "b".repeat(64),
+    });
+    const pastTimelock = Math.floor(Date.now() / 1000) - 3600;
+    await orders.recordSrcLock({
+      publicId: orderA.publicId,
+      orderId: "5",
+      txHash: "0xtx",
+      blockNumber: 1,
+      timelock: pastTimelock,
+    });
+    await orders.markStatus(orderA.publicId, "refunded");
+
+    const expired = await orders.expireStaleOrders();
+    expect(expired).toBe(0);
+
+    const updated = await orders.get(orderA.publicId);
+    expect(updated!.status).toBe("refunded");
+  });
+
+  it("allows an expired order to subsequently be refunded", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    const order = await orders.announce(BASE_ANNOUNCE_INPUT);
+    const pastTimelock = Math.floor(Date.now() / 1000) - 3600;
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "6",
+      txHash: "0xexpiry",
+      blockNumber: 1,
+      timelock: pastTimelock,
+    });
+
+    await orders.expireStaleOrders();
+    expect((await orders.get(order.publicId))!.status).toBe("expired");
+
+    await orders.markStatus(order.publicId, "refunded");
+    expect((await orders.get(order.publicId))!.status).toBe("refunded");
+  });
+
+  it("returns 0 and does nothing when no orders are stale", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    const expired = await orders.expireStaleOrders();
+    expect(expired).toBe(0);
+  });
+});
+
 describe("PostgresStatement", () => {
   it("uses async execution and converts SQLite timestamp expressions", async () => {
     const query = vi.fn(async () => ({ rowCount: 1, rows: [] }));
