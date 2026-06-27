@@ -194,7 +194,7 @@ export class RecoveryService extends EventEmitter {
     this.recoveryRequests.set(recoveryId, recoveryRequest);
     this.stats.pendingRecoveries++;
 
-    console.log(`🔄 Recovery initiated for order ${order.orderHash} (${recoveryId})`);
+    console.log(`🔄 orderHash=${order.orderHash} Recovery initiated for order ${order.orderHash} (${recoveryId})`);
     
     // Emit recovery event
     this.eventManager.emitEvent(EventType.Recovery, order.orderHash, {
@@ -258,7 +258,7 @@ export class RecoveryService extends EventEmitter {
       ).toString();
       this.stats.lastRecoveryAt = getCurrentTimestamp();
 
-      console.log(`✅ Recovery completed: ${recoveryId}`);
+      console.log(`✅ orderHash=${recovery.orderHash} Recovery completed: ${recoveryId}`);
       
       // Emit success event
       this.eventManager.emitEvent(EventType.Recovery, recovery.orderHash, {
@@ -270,7 +270,7 @@ export class RecoveryService extends EventEmitter {
       });
 
     } catch (error) {
-      console.error(`❌ Recovery failed: ${recoveryId}`, error);
+      console.error(`❌ orderHash=${recovery.orderHash} Recovery failed: ${recoveryId}`, error);
       
       recovery.status = RecoveryStatus.Failed;
       recovery.updatedAt = getCurrentTimestamp();
@@ -301,7 +301,7 @@ export class RecoveryService extends EventEmitter {
    * Execute timeout refund
    */
   private async executeTimeoutRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🔄 Executing timeout refund for order ${order.orderHash}`);
+    console.log(`🔄 orderHash=${order.orderHash} Executing timeout refund for order ${order.orderHash}`);
     
     // 1. Ethereum refund
     if (order.srcChainId === 1) { // Ethereum
@@ -315,47 +315,47 @@ export class RecoveryService extends EventEmitter {
 
     // 3. Update order status
     // This would normally update the order in the database
-    console.log(`✅ Timeout refund completed for order ${order.orderHash}`);
+    console.log(`✅ orderHash=${order.orderHash} Timeout refund completed for order ${order.orderHash}`);
   }
 
   /**
    * Execute emergency refund
    */
   private async executeEmergencyRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🚨 Executing emergency refund for order ${order.orderHash}`);
-    console.log(`Emergency reason: ${recovery.metadata.emergencyReason}`);
+    console.log(`🚨 orderHash=${order.orderHash} Executing emergency refund for order ${order.orderHash}`);
+    console.log(`orderHash=${order.orderHash} Emergency reason: ${recovery.metadata.emergencyReason}`);
     
     // Emergency refund logic - more aggressive, bypasses normal checks
     await this.executeEthereumEmergencyRefund(order);
     await this.executeStellarEmergencyRefund(order);
     
-    console.log(`✅ Emergency refund completed for order ${order.orderHash}`);
+    console.log(`✅ orderHash=${order.orderHash} Emergency refund completed for order ${order.orderHash}`);
   }
 
   /**
    * Execute public withdrawal
    */
   private async executePublicWithdrawal(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🔓 Executing public withdrawal for order ${order.orderHash}`);
+    console.log(`🔓 orderHash=${order.orderHash} Executing public withdrawal for order ${order.orderHash}`);
     
     // Public withdrawal - anyone can trigger after timelock + grace period
     await this.executePublicEthereumWithdrawal(order);
     await this.executePublicStellarWithdrawal(order);
     
-    console.log(`✅ Public withdrawal completed for order ${order.orderHash}`);
+    console.log(`✅ orderHash=${order.orderHash} Public withdrawal completed for order ${order.orderHash}`);
   }
 
   /**
    * Execute force recovery (admin only)
    */
   private async executeForceRecovery(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`⚡ Executing force recovery for order ${order.orderHash}`);
+    console.log(`⚡ orderHash=${order.orderHash} Executing force recovery for order ${order.orderHash}`);
     
     // Force recovery - admin override
     await this.executeForceEthereumRecovery(order);
     await this.executeForceeStellarRecovery(order);
     
-    console.log(`✅ Force recovery completed for order ${order.orderHash}`);
+    console.log(`✅ orderHash=${order.orderHash} Force recovery completed for order ${order.orderHash}`);
   }
 
   /**
@@ -363,57 +363,57 @@ export class RecoveryService extends EventEmitter {
    */
   private async executeEthereumRefund(order: ActiveOrder): Promise<void> {
     // Mock implementation - would call actual Ethereum contract
-    console.log(`🔄 Ethereum refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    console.log(`🔄 orderHash=${order.orderHash} Ethereum refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
     
     // Simulate contract call
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    console.log(`✅ Ethereum refund successful`);
+    console.log(`✅ orderHash=${order.orderHash} Ethereum refund successful`);
   }
 
   private async executeEthereumEmergencyRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🚨 Ethereum emergency refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    console.log(`🚨 orderHash=${order.orderHash} Ethereum emergency refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 500));
-    console.log(`✅ Ethereum emergency refund successful`);
+    console.log(`✅ orderHash=${order.orderHash} Ethereum emergency refund successful`);
   }
 
   private async executePublicEthereumWithdrawal(order: ActiveOrder): Promise<void> {
-    console.log(`🔓 Ethereum public withdrawal: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    console.log(`🔓 orderHash=${order.orderHash} Ethereum public withdrawal: ${order.order.makingAmount} ${order.order.makerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 1000));
-    console.log(`✅ Ethereum public withdrawal successful`);
+    console.log(`✅ orderHash=${order.orderHash} Ethereum public withdrawal successful`);
   }
 
   private async executeForceEthereumRecovery(order: ActiveOrder): Promise<void> {
-    console.log(`⚡ Ethereum force recovery: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    console.log(`⚡ orderHash=${order.orderHash} Ethereum force recovery: ${order.order.makingAmount} ${order.order.makerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 800));
-    console.log(`✅ Ethereum force recovery successful`);
+    console.log(`✅ orderHash=${order.orderHash} Ethereum force recovery successful`);
   }
 
   /**
    * Stellar refund operations
    */
   private async executeStellarRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🔄 Stellar refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    console.log(`🔄 orderHash=${order.orderHash} Stellar refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 1200));
-    console.log(`✅ Stellar refund successful`);
+    console.log(`✅ orderHash=${order.orderHash} Stellar refund successful`);
   }
 
   private async executeStellarEmergencyRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🚨 Stellar emergency refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    console.log(`🚨 orderHash=${order.orderHash} Stellar emergency refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 600));
-    console.log(`✅ Stellar emergency refund successful`);
+    console.log(`✅ orderHash=${order.orderHash} Stellar emergency refund successful`);
   }
 
   private async executePublicStellarWithdrawal(order: ActiveOrder): Promise<void> {
-    console.log(`🔓 Stellar public withdrawal: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    console.log(`🔓 orderHash=${order.orderHash} Stellar public withdrawal: ${order.order.takingAmount} ${order.order.takerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 1100));
-    console.log(`✅ Stellar public withdrawal successful`);
+    console.log(`✅ orderHash=${order.orderHash} Stellar public withdrawal successful`);
   }
 
   private async executeForceeStellarRecovery(order: ActiveOrder): Promise<void> {
-    console.log(`⚡ Stellar force recovery: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    console.log(`⚡ orderHash=${order.orderHash} Stellar force recovery: ${order.order.takingAmount} ${order.order.takerAsset}`);
     await new Promise(resolve => setTimeout(resolve, 900));
-    console.log(`✅ Stellar force recovery successful`);
+    console.log(`✅ orderHash=${order.orderHash} Stellar force recovery successful`);
   }
 
   /**
@@ -425,7 +425,7 @@ export class RecoveryService extends EventEmitter {
       return;
     }
 
-    console.log(`🔄 Retrying recovery: ${recoveryId}`);
+    console.log(`🔄 orderHash=${recovery.orderHash} Retrying recovery: ${recoveryId}`);
     recovery.status = RecoveryStatus.Pending;
     recovery.updatedAt = getCurrentTimestamp();
 
@@ -459,7 +459,7 @@ export class RecoveryService extends EventEmitter {
     this.recoveryRequests.set(recoveryId, recoveryRequest);
     this.stats.pendingRecoveries++;
 
-    console.log(`🔄 Manual recovery initiated: ${recoveryId} by ${initiator}`);
+    console.log(`🔄 orderHash=${orderHash} Manual recovery initiated: ${recoveryId} by ${initiator}`);
     
     // Execute recovery
     await this.executeRecovery(recoveryId);
@@ -495,15 +495,15 @@ export class RecoveryService extends EventEmitter {
   }
 
   private trackNewOrder(orderHash: string): void {
-    console.log(`📊 Recovery tracking: New order ${orderHash}`);
+    console.log(`📊 orderHash=${orderHash} Recovery tracking: New order ${orderHash}`);
   }
 
   private handleOrderCancellation(orderHash: string): void {
-    console.log(`📊 Recovery tracking: Order cancelled ${orderHash}`);
+    console.log(`📊 orderHash=${orderHash} Recovery tracking: Order cancelled ${orderHash}`);
   }
 
   private handleOrderCompletion(orderHash: string): void {
-    console.log(`📊 Recovery tracking: Order completed ${orderHash}`);
+    console.log(`📊 orderHash=${orderHash} Recovery tracking: Order completed ${orderHash}`);
   }
 
   /**
