@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect } from 'vitest';
 import BridgeForm, { getUnsupportedRouteReason } from './BridgeForm';
 
@@ -196,6 +196,71 @@ describe('BridgeForm wallet recovery', () => {
     rerender(<BridgeForm ethAddress={ETH} stellarAddress={XLM} signStellarTransaction={noopSign} />);
     expect(screen.queryByRole('alert')).toBeNull();
 
+    await flush();
+  });
+});
+
+describe('BridgeForm cross-chain validation', () => {
+  it('blocks a Solana route when the destination address is not a Solana address', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        ethUsd: 3500,
+        xlmUsd: 0.12,
+        solUsd: 150,
+        xlmPerEth: 29166,
+        staleness: 'fresh',
+        fetchedAt: Date.now(),
+      }),
+    });
+
+    render(
+      <BridgeForm
+        ethAddress={ETH}
+        stellarAddress={XLM}
+        solanaAddress="not-a-solana-address"
+        signStellarTransaction={noopSign}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /ETH\s*→\s*SOL/i }));
+    fireEvent.change(screen.getByPlaceholderText('0.0'), { target: { value: '0.1' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Bridge$/i }));
+
+    expect(await screen.findByText(/Destination must be a Solana address/i)).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    await flush();
+  });
+
+  it('blocks an amount greater than the source asset balance', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        ethUsd: 3500,
+        xlmUsd: 0.12,
+        solUsd: 150,
+        xlmPerEth: 29166,
+        staleness: 'fresh',
+        fetchedAt: Date.now(),
+      }),
+    });
+
+    render(
+      <BridgeForm ethAddress={ETH} stellarAddress={XLM} signStellarTransaction={noopSign} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /XLM\s*→\s*ETH/i }));
+    await waitFor(() => expect(screen.getByText(/Balance:\s*0\.0000\s*XLM/i)).toBeInTheDocument());
+    fireEvent.change(screen.getByPlaceholderText('0.0'), {
+      target: { value: '1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Bridge$/i }));
+
+    expect(await screen.findByText(/Insufficient XLM balance/i)).toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/orders/create'),
+      expect.anything()
+    );
     await flush();
   });
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Horizon, 
   Asset, 
@@ -10,6 +10,13 @@ import { isTestnet, getCurrentNetwork } from '../../config/networks';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
+import {
+  validateAmount,
+  validateAssetPair,
+  validateBalance,
+  validateDestinationChain,
+  validateRouteWallets,
+} from '../../utils/validation';
 
 export interface BridgeFormProps {
   ethAddress: string;
@@ -32,6 +39,38 @@ const DIRECTION_MAP: Record<BridgeDirection, { from: typeof ETH_TOKEN; to: typeo
   xlm_to_sol:  { from: XLM_TOKEN, to: SOL_TOKEN  },
   sol_to_xlm:  { from: SOL_TOKEN,  to: XLM_TOKEN },
 };
+
+const ROUTE_OPTIONS = ['eth_to_xlm', 'xlm_to_eth', 'eth_to_sol', 'sol_to_eth'] as const;
+
+function routeWalletsReady(
+  direction: BridgeDirection,
+  eth: string,
+  stellar: string,
+  solana: string
+): boolean {
+  return validateRouteWallets(direction, eth, stellar, solana).isValid;
+}
+
+export function getUnsupportedRouteReason(
+  direction: BridgeDirection,
+  eth: string,
+  stellar: string,
+  solana: string
+): string | null {
+  const result = validateRouteWallets(direction, eth, stellar, solana);
+  return result.isValid ? null : result.message;
+}
+
+function destinationAddressForRoute(
+  direction: BridgeDirection,
+  eth: string,
+  stellar: string,
+  solana: string
+): string {
+  if (direction.endsWith('_eth')) return eth;
+  if (direction.endsWith('_xlm')) return stellar;
+  return solana;
+}
 
 const ETH_TO_XLM_RATE = 10000;
 const MAINNET_CHAIN_ID = '0x1';
@@ -199,6 +238,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const [orderId, setOrderId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [balance, setBalance] = useState<string>('0');
+  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const prevEthRef = useRef(ethAddress);
+  const prevStellarRef = useRef(stellarAddress);
+  const prevSolanaRef = useRef(solanaAddress ?? '');
   
   // Real-time exchange rate state.
   //
@@ -347,6 +391,54 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       cancelled = true;
     };
   }, [amount, direction]);
+
+  useEffect(() => {
+    const solana = solanaAddress ?? '';
+    const ethDropped = Boolean(prevEthRef.current) && !ethAddress;
+    const stellarDropped = Boolean(prevStellarRef.current) && !stellarAddress;
+    const solanaDropped = Boolean(prevSolanaRef.current) && !solana;
+
+    prevEthRef.current = ethAddress;
+    prevStellarRef.current = stellarAddress;
+    prevSolanaRef.current = solana;
+
+    const needsStellar =
+      direction === 'eth_to_xlm' ||
+      direction === 'xlm_to_eth' ||
+      direction === 'xlm_to_sol' ||
+      direction === 'sol_to_xlm';
+    const needsSolana =
+      direction === 'eth_to_sol' ||
+      direction === 'sol_to_eth' ||
+      direction === 'xlm_to_sol' ||
+      direction === 'sol_to_xlm';
+
+    const dropped: string[] = [];
+    if (ethDropped) dropped.push('Ethereum');
+    if (needsStellar && stellarDropped) dropped.push('Stellar');
+    if (needsSolana && solanaDropped) dropped.push('Solana');
+
+    if (dropped.length === 0) return;
+
+    setRecoveryNotice(
+      `${dropped.join(' and ')} wallet ${dropped.length > 1 ? 'connections' : 'connection'} lost. Reconnect to continue.`
+    );
+    setAmount('');
+    setEstimatedAmount('');
+    setIsSubmitting(false);
+    setValidationErrors({});
+
+    if ((needsStellar && stellarDropped) || (needsSolana && solanaDropped)) {
+      setDirection('eth_to_xlm');
+    }
+  }, [ethAddress, stellarAddress, solanaAddress, direction]);
+
+  const routeReady = routeWalletsReady(direction, ethAddress, stellarAddress, solanaAddress ?? '');
+  useEffect(() => {
+    if (routeReady && recoveryNotice) {
+      setRecoveryNotice(null);
+    }
+  }, [routeReady, recoveryNotice]);
   
   // Yön değiştirme — cycles ETH↔XLM, ETH↔SOL; Solana routes only if wallet connected
   const handleSwapDirection = () => {
@@ -362,6 +454,28 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   // Form gönderimi - RELAYER API ÜZERİNDEN
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setValidationErrors({});
+
+    const errors: Record<string, string> = {};
+    const routeResult = validateRouteWallets(direction, ethAddress, stellarAddress, solanaAddress ?? '');
+    const assetPairResult = validateAssetPair(fromToken.symbol, toToken.symbol);
+    const amountResult = validateAmount(amount, fromToken.decimals);
+    const balanceResult = validateBalance(amount, balance, fromToken.symbol);
+    const destinationResult = validateDestinationChain(
+      direction,
+      destinationAddressForRoute(direction, ethAddress, stellarAddress, solanaAddress ?? '')
+    );
+
+    if (!routeResult.isValid) errors.route = routeResult.message;
+    if (!assetPairResult.isValid) errors.route = assetPairResult.message;
+    if (!amountResult.isValid) errors.amount = amountResult.message;
+    if (!balanceResult.isValid) errors.amount = balanceResult.message;
+    if (!destinationResult.isValid) errors.destination = destinationResult.message;
+
+    if (Object.keys(errors).length > 0) {
+      setValidationErrors(errors);
+      return;
+    }
     
     // Log transaction details
     console.log('🚀 Transaction Started:', { 
@@ -370,16 +484,6 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       from: direction === 'eth_to_xlm' ? ethAddress : stellarAddress,
       to: direction === 'eth_to_xlm' ? stellarAddress : ethAddress
     });
-    
-    if (!amount || !ethAddress || !stellarAddress) {
-      console.error('❌ Missing required fields');
-      if (isSolanaDirection) {
-        if (!solanaAddress) { alert('Please connect your Phantom wallet.'); return; }
-      } else {
-              alert('Please fill all fields and connect wallets.');
-      }
-      return;
-    }
     
     setIsSubmitting(true);
     setStatusMessage('Hazırlanıyor...');
@@ -1157,10 +1261,12 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   };
 
   // Check if wallets are connected
-  const isSolanaDirection = direction === 'eth_to_sol' || direction === 'sol_to_eth';
-  const walletsConnected = isSolanaDirection
-    ? (direction === 'eth_to_sol' ? (ethAddress && solanaAddress) : (solanaAddress && ethAddress))
-    : (ethAddress && stellarAddress);
+  const isSolanaDirection =
+    direction === 'eth_to_sol' ||
+    direction === 'sol_to_eth' ||
+    direction === 'xlm_to_sol' ||
+    direction === 'sol_to_xlm';
+  const walletsConnected = routeWalletsReady(direction, ethAddress, stellarAddress, solanaAddress ?? '');
 
   return (
     <div className="w-full rounded-[1.25rem] p-4 swap-card-bg swap-card-border md:p-5 lg:p-6">
@@ -1203,6 +1309,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-3">
+          {validationErrors.form && (
+            <div role="alert" className="rounded-2xl border border-red-400/40 bg-red-500/15 p-3 text-center text-sm text-red-200">
+              {validationErrors.form}
+            </div>
+          )}
           <div className="mb-1 flex items-center justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">Bridge console</p>
@@ -1219,24 +1330,43 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
 
           {/* Route selector */}
           <div className="flex gap-1.5 rounded-xl border border-white/[0.06] bg-white/[0.03] p-1">
-            {(['eth_to_xlm', 'xlm_to_eth', 'eth_to_sol', 'sol_to_eth'] as const).map((d) => {
+            {ROUTE_OPTIONS.map((d) => {
               const labels: Record<string, string> = {
                 eth_to_xlm: 'ETH → XLM', xlm_to_eth: 'XLM → ETH',
                 eth_to_sol: 'ETH → SOL', sol_to_eth: 'SOL → ETH',
               };
               const isSol = d === 'eth_to_sol' || d === 'sol_to_eth';
               const active = direction === d;
+              const unsupportedReason = getUnsupportedRouteReason(
+                d,
+                ethAddress,
+                stellarAddress,
+                solanaAddress ?? ''
+              );
+              const isDisabled = Boolean(unsupportedReason) && !active;
               return (
                 <button
                   key={d}
                   type="button"
-                  onClick={() => { setDirection(d); setAmount(''); setEstimatedAmount(''); }}
+                  disabled={isDisabled}
+                  aria-disabled={isDisabled}
+                  title={unsupportedReason ?? undefined}
+                  onClick={() => {
+                    if (!unsupportedReason) {
+                      setDirection(d);
+                      setAmount('');
+                      setEstimatedAmount('');
+                      setValidationErrors({});
+                    }
+                  }}
                   className={`flex-1 rounded-lg px-2 py-1.5 text-[0.65rem] font-semibold transition ${
                     active
                       ? isSol
                         ? 'bg-purple-500/25 text-purple-200 border border-purple-500/30'
                         : 'bg-[#4f6bff]/25 text-[#a8b4ff] border border-[#4f6bff]/30'
-                      : 'text-slate-500 hover:text-slate-300'
+                      : isDisabled
+                        ? 'cursor-not-allowed text-slate-700'
+                        : 'text-slate-500 hover:text-slate-300'
                   }`}
                 >
                   {labels[d]}
@@ -1244,6 +1374,9 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               );
             })}
           </div>
+          {validationErrors.route && (
+            <p className="mt-1.5 text-xs text-red-300">{validationErrors.route}</p>
+          )}
 
           {/* From Section */}
           <div>
@@ -1310,6 +1443,9 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                   Balance: {balance} {fromToken.symbol}
                 </div>
               </div>
+              {validationErrors.amount && (
+                <p className="mt-1 text-xs text-red-300">{validationErrors.amount}</p>
+              )}
             </div>
           </div>
 
@@ -1344,6 +1480,9 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 {estimatedAmount || '0.0'}
               </div>
               <div className="mt-1 text-xs text-slate-500">$0.00</div>
+              {validationErrors.destination && (
+                <p className="mt-1 text-xs text-red-300">{validationErrors.destination}</p>
+              )}
             </div>
           </div>
           
@@ -1423,6 +1562,12 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               )}
           </div>
           
+          {recoveryNotice && (
+            <div role="alert" className="rounded-2xl border border-amber-400/40 bg-amber-500/15 p-3 text-center">
+              <div className="font-medium text-amber-100">{recoveryNotice}</div>
+            </div>
+          )}
+
           {/* Status Message */}
           {statusMessage && (
             <div className="rounded-2xl border border-cyan-200/30 bg-cyan-200/[0.12] p-3 text-center">
@@ -1433,14 +1578,16 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSubmitting || !amount || !walletsConnected}
+            disabled={isSubmitting || !amount || !walletsConnected || Boolean(recoveryNotice)}
             className={`button-hover-scale w-full rounded-full py-3.5 font-semibold transition-all ${
-              walletsConnected
+              walletsConnected && !recoveryNotice
                 ? 'brand-cta'
                 : 'cursor-not-allowed border border-white/5 bg-slate-700/45 text-slate-400'
             }`}
           >
-            {!walletsConnected
+            {recoveryNotice
+              ? 'Reconnect Wallet'
+              : !walletsConnected
               ? 'Connect Wallet'
               : isSubmitting
                 ? statusMessage || 'Processing...'
