@@ -58,6 +58,16 @@ export interface OrderRow {
   archivedAt: number | null;
 }
 
+export interface OrderHistoryResult {
+  orders: OrderRow[];
+  nextCursor: string | null;
+}
+
+export interface CursorInfo {
+  createdAt: number;
+  id: number;
+}
+
 export interface AnnounceOrderInput {
   direction: Direction;
   hashlock: string;
@@ -143,6 +153,7 @@ export class OrdersRepository {
   private readonly byPublicId: Statement;
   private readonly byHashlock: Statement;
   private readonly byAddress: Statement;
+  private readonly byAddressCursor: Statement;
   private readonly bySrcOrderId: Statement;
   private readonly byDstOrderId: Statement;
   private readonly updateStatus: Statement;
@@ -171,6 +182,13 @@ export class OrdersRepository {
       WHERE src_address = :addr OR dst_address = :addr
       ORDER BY created_at DESC
       LIMIT :limit OFFSET :offset
+    `);
+    this.byAddressCursor = db.prepare(`
+      SELECT * FROM orders
+      WHERE (src_address = :addr OR dst_address = :addr)
+        AND (created_at < :cursorCreatedAt OR (created_at = :cursorCreatedAt AND id < :cursorId))
+      ORDER BY created_at DESC, id DESC
+      LIMIT :limit
     `);
     this.bySrcOrderId = db.prepare(`
       SELECT * FROM orders WHERE src_chain = :chain AND src_order_id = :orderId
@@ -314,6 +332,95 @@ export class OrdersRepository {
   async findByAddress(addr: string, limit = 50, offset = 0): Promise<OrderRow[]> {
     const rows = await this.all<OrderDbRow>(this.byAddress, { addr, limit, offset });
     return rows.map(rowToOrder);
+  }
+
+  /**
+   * Find orders by address using cursor-based pagination.
+   * More efficient and consistent than offset pagination for large datasets.
+   */
+  async findByAddressWithCursor(addr: string, limit = 50, cursor?: string): Promise<OrderHistoryResult> {
+    // Treat empty-string cursor as invalid — callers must pass undefined for "no cursor"
+    if (cursor !== undefined && cursor === '') {
+      throw new Error('Invalid cursor: empty string is not a valid cursor');
+    }
+
+    // Fetch one extra row to cheaply detect whether a next page exists
+    const fetchLimit = limit + 1;
+    let rows: OrderDbRow[];
+
+    if (!cursor) {
+      // First page - get latest orders
+      const firstPageStmt = this.db.prepare(`
+        SELECT * FROM orders
+        WHERE src_address = :addr OR dst_address = :addr
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+      `);
+      rows = await this.all<OrderDbRow>(firstPageStmt, { addr, limit: fetchLimit });
+    } else {
+      // Subsequent pages - use cursor
+      const cursorInfo = this.decodeCursor(cursor);
+      rows = await this.all<OrderDbRow>(this.byAddressCursor, {
+        addr,
+        limit: fetchLimit,
+        cursorCreatedAt: cursorInfo.createdAt,
+        cursorId: cursorInfo.id
+      });
+    }
+
+    const hasMore = rows.length > limit;
+    // Trim to the requested limit
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const orders = pageRows.map(rowToOrder);
+
+    // Generate next cursor only if there are genuinely more rows
+    let nextCursor: string | null = null;
+    if (hasMore) {
+      const lastOrder = orders[orders.length - 1];
+      if (lastOrder) {
+        nextCursor = this.encodeCursor({
+          createdAt: lastOrder.createdAt,
+          id: lastOrder.id
+        });
+      }
+    }
+
+    return { orders, nextCursor };
+  }
+
+  /**
+   * Encode cursor information as a base64url string.
+   * Format: base64url(JSON.stringify({createdAt, id}))
+   */
+  private encodeCursor(cursor: CursorInfo): string {
+    const json = JSON.stringify(cursor);
+    return Buffer.from(json, 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+  }
+
+  /**
+   * Decode cursor string back to cursor information.
+   * Validates the cursor format and throws if invalid.
+   */
+  private decodeCursor(cursor: string): CursorInfo {
+    try {
+      // Add padding back and convert base64url to base64
+      const padded = cursor + '==='.slice((cursor.length + 3) % 4);
+      const base64 = padded.replace(/-/g, '+').replace(/_/g, '/');
+      const json = Buffer.from(base64, 'base64').toString('utf8');
+      const parsed = JSON.parse(json);
+      
+      if (typeof parsed.createdAt !== 'number' || typeof parsed.id !== 'number') {
+        throw new Error('Invalid cursor format: missing or invalid createdAt/id');
+      }
+      
+      return parsed;
+    } catch (error) {
+      throw new Error(`Invalid cursor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async setStatus(publicId: string, status: OrderStatus): Promise<void> {

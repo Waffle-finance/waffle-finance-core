@@ -93,14 +93,43 @@ export function ordersRoutes(orders: OrderService, log?: Logger): Router {
     }
     const address = parsedAddress.data;
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
-    const offset = Math.max(Number(req.query.offset ?? 0), 0);
+
+    // Support both cursor-based (preferred) and offset-based (legacy) pagination
+    const cursorParam = req.query.cursor as string | undefined;
+    const cursor = cursorParam && cursorParam.trim() !== '' ? cursorParam : undefined;
+    const offset = req.query.offset !== undefined ? Math.max(Number(req.query.offset), 0) : undefined;
+
     try {
-      const list = await orders.history(address, limit, offset);
-      res.json({
-        transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
-        pagination: { limit, offset, count: list.length }
-      });
+      // Use cursor pagination if cursor is provided, otherwise use offset (legacy default)
+      if (cursor !== undefined) {
+        // Cursor-based pagination
+        const result = await orders.historyWithCursor(address, limit, cursor);
+        res.json({
+          transactions: result.orders.map((o) => serialiseOrder(o)).filter(Boolean),
+          pagination: {
+            limit,
+            count: result.orders.length,
+            nextCursor: result.nextCursor
+          }
+        });
+      } else {
+        // Offset-based pagination (default for backward compatibility)
+        const finalOffset = offset ?? 0;
+        const list = await orders.history(address, limit, finalOffset);
+        res.json({
+          transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
+          pagination: { limit, offset: finalOffset, count: list.length }
+        });
+      }
     } catch (err) {
+      // Handle invalid cursor gracefully
+      if (err instanceof Error && err.message.includes('Invalid cursor')) {
+        res.status(400).json({
+          error: "invalid_cursor", 
+          message: "The provided cursor is invalid or expired" 
+        });
+        return;
+      }
       next(err);
     }
   });
