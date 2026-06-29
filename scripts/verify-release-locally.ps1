@@ -91,6 +91,14 @@ foreach ($contract in $RequiredContracts) {
 }
 Write-Host ""
 
+Write-Info "Validating contract artifacts and SDK ABI drift..."
+node scripts/validate-artifacts.mjs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error-Message "Contract artifacts validation failed"
+}
+Write-Success "Contract artifacts and SDK ABI drift check complete"
+Write-Host ""
+
 Write-Info "Compiling contracts with Foundry..."
 Push-Location contracts
 forge build
