@@ -52,12 +52,7 @@ export class SorobanListener {
   ): Promise<void> {
     const latest = await retryRpcCall(
       () => this.server.getLatestLedger(),
-      {
-        maxAttempts: this.cfg.rpc.maxRetries,
-        baseDelayMs: this.cfg.rpc.baseDelayMs,
-        maxDelayMs: this.cfg.rpc.maxDelayMs,
-        logger: this.log,
-      }
+      { logger: this.log }
     );
     const startLedger = this.cursor === undefined ? latest.sequence - 1 : undefined;
 
@@ -75,12 +70,7 @@ export class SorobanListener {
 
     const events = await retryRpcCall(
       () => this.server.getEvents(req),
-      {
-        maxAttempts: this.cfg.rpc.maxRetries,
-        baseDelayMs: this.cfg.rpc.baseDelayMs,
-        maxDelayMs: this.cfg.rpc.maxDelayMs,
-        logger: this.log,
-      }
+      { logger: this.log }
     );
 
     for (const ev of events.events) {

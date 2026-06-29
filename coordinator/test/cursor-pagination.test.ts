@@ -27,6 +27,7 @@ async function createTestOrders(
   address: string,
   startIndex = 0
 ): Promise<void> {
+async function createTestOrders(repo: OrdersRepository, count: number, address: string, startIndex = 0): Promise<void> {
   // Create orders with slight time differences to ensure proper ordering
   for (let i = 0; i < count; i++) {
     const input: AnnounceOrderInput = {

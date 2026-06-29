@@ -268,6 +268,7 @@ describe("GET /api/orders/:id", () => {
     const app = await freshApp();
     const unknownId = "wf_0x" + "f".repeat(64);
     const res = await request(app).get(`/api/orders/${unknownId}`);
+    const res = await request(app).get("/api/orders/wf_0x" + "0".repeat(64));
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("not_found");
     expect(typeof res.body.message).toBe("string");

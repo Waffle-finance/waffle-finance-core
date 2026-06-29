@@ -39,6 +39,7 @@ describe("OrderService", () => {
       dstAmount: "100000000"
     });
     expect(order.publicId).toBe(`wf_${VALID_HASHLOCK}`);
+    expect(order.publicId).toMatch(/^wf_0x[0-9a-f]{64}$/);
     expect(order.status).toBe("announced");
 
     const byId = await orders.get(order.publicId);
