@@ -167,8 +167,11 @@ export class OrdersRepository {
     this.byPublicId = db.prepare("SELECT * FROM orders WHERE public_id = ?");
     this.byHashlock = db.prepare("SELECT * FROM orders WHERE hashlock = ?");
     this.byAddress = db.prepare(`
-      SELECT * FROM orders
-      WHERE src_address = :addr OR dst_address = :addr
+      SELECT * FROM (
+        SELECT * FROM orders WHERE src_address = :addr
+        UNION
+        SELECT * FROM orders WHERE dst_address = :addr
+      )
       ORDER BY created_at DESC
       LIMIT :limit OFFSET :offset
     `);
