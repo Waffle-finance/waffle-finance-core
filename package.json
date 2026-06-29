@@ -16,6 +16,8 @@
   "packageManager": "pnpm@8.15.0",
   "scripts": {
     "dev": "pnpm -r dev",
+    "dev:simulation": "ENV_FILE=$PWD/.env.simulation pnpm -r dev --mode simulation",
+    "dev:staging": "ENV_FILE=$PWD/.env.staging pnpm -r dev --mode staging",
     "build": "pnpm -r build",
     "build:prod": "NODE_ENV=production pnpm -r build",
     "test": "pnpm -r test",
