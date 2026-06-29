@@ -4,7 +4,8 @@ import {
   type OrderRow,
   type OrderHistoryResult,
   type AnnounceOrderInput,
-  type Chain
+  type Chain,
+  type SearchOrdersFilters
 } from "../persistence/orders-repo.js";
 import { canTransition } from "../state-machine/order-machine.js";
 import { ordersTotal } from "../metrics.js";
@@ -71,30 +72,62 @@ export class OrderService {
     return this.repo.findByPublicId(publicId);
   }
 
-  history(address: string, limit?: number, offset?: number): Promise<OrderRow[]> {
-    return this.repo.findByAddress(address, limit, offset);
+  history(
+    addressOrFilters: string | SearchOrdersFilters,
+    limit?: number,
+    offset?: number
+  ): Promise<OrderRow[]> {
+    if (typeof addressOrFilters === "string") {
+      return this.repo.findByAddress(addressOrFilters, limit, offset);
+    }
+    return this.repo.searchOrders(addressOrFilters, limit, offset);
   }
 
   /**
-   * Get order history for an address using cursor-based pagination.
-   * More efficient and consistent than offset pagination for large datasets.
+   * Get order history using dynamic filters and cursor-based pagination.
    */
-  async historyWithCursor(address: string, limit = 50, cursor?: string): Promise<OrderHistoryResult> {
-    // Check cache first
-    const cached = this.historyCache.get(address, limit, cursor);
-    if (cached) {
-      this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache hit for history request");
-      return cached;
+  async historyWithCursor(
+    addressOrFilters: string | SearchOrdersFilters,
+    limit = 50,
+    cursor?: string
+  ): Promise<OrderHistoryResult> {
+    const isSimpleAddress = typeof addressOrFilters === "string";
+    const filters: SearchOrdersFilters = isSimpleAddress 
+      ? { addresses: [addressOrFilters] } 
+      : addressOrFilters;
+
+    // We only cache simple queries (single address, no search/status/etc. filters)
+    const hasExtraFilters = 
+      (filters.addresses && filters.addresses.length > 1) ||
+      filters.status ||
+      filters.lifecyclePhase ||
+      filters.direction ||
+      filters.correlationId ||
+      filters.hashlock ||
+      filters.search;
+
+    if (!hasExtraFilters && filters.addresses?.[0]) {
+      const address = filters.addresses[0];
+      // Check cache first
+      const cached = this.historyCache.get(address, limit, cursor);
+      if (cached) {
+        this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache hit for history request");
+        return cached;
+      }
+
+      // Cache miss - fetch from database
+      this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache miss for history request");
+      const result = await this.repo.searchOrdersWithCursor(filters, limit, cursor);
+      
+      // Cache the result
+      this.historyCache.set(address, limit, cursor, result);
+      
+      return result;
     }
 
-    // Cache miss - fetch from database
-    this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache miss for history request");
-    const result = await this.repo.findByAddressWithCursor(address, limit, cursor);
-    
-    // Cache the result
-    this.historyCache.set(address, limit, cursor, result);
-    
-    return result;
+    // For filtered queries, bypass cache completely to ensure fresh troubleshooting data
+    this.log.debug({ filters, limit, cursor: cursor || 'first' }, "Fetching filtered history (bypassing cache)");
+    return this.repo.searchOrdersWithCursor(filters, limit, cursor);
   }
 
   findByHashlock(hashlock: string): Promise<OrderRow | null> {
@@ -163,13 +196,13 @@ export class OrderService {
     this.historyCache.invalidateAddress(order.dstAddress);
   }
 
-  async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
+  async markStatus(publicId: string, status: OrderRow["status"], errorState?: string | null): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
     if (!canTransition(order.status, status)) {
       throw new OrderValidationError(`cannot transition from ${order.status} to ${status}`);
     }
-    await this.repo.setStatus(publicId, status);
+    await this.repo.setStatus(publicId, status, errorState);
     this.log.info({ publicId, status }, "status updated");
     ordersTotal.inc({ status });
     
