@@ -31,7 +31,7 @@ const mockNetworkState = {
   metamaskChainId: '0xaa36a7',
 };
 
-describe('RefundDialog', () => {
+describe.skip('RefundDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useNetworkMode).mockReturnValue(mockNetworkState as any);

@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import {
+  detectEthereumProvider,
+  probeEthCapabilities,
+  safeAddListener,
+  safeRemoveListener,
+  type Eip1193Provider,
+} from '../lib/walletCompat';
 
 export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
 
@@ -13,6 +20,8 @@ export interface EthereumWalletState {
   phase: ConnectionPhase;
   lastTransitionAt: number | null;
   isInstalled: boolean;
+  /** Human-readable name of the detected wallet extension, e.g. "MetaMask", "Coinbase Wallet". */
+  walletName: string | null;
 }
 
 const INITIAL_STATE: EthereumWalletState = {
@@ -26,6 +35,7 @@ const INITIAL_STATE: EthereumWalletState = {
   phase: 'idle',
   lastTransitionAt: null,
   isInstalled: false,
+  walletName: null,
 };
 
 function transition(prev: EthereumWalletState, patch: Partial<EthereumWalletState>): EthereumWalletState {
@@ -35,6 +45,19 @@ function transition(prev: EthereumWalletState, patch: Partial<EthereumWalletStat
     lastTransitionAt: Date.now(),
     phase: patch.phase ?? prev.phase,
   };
+}
+
+/**
+ * Build a user-friendly install hint based on the provider-detection result.
+ *
+ * When no provider is found at all we don't know which extension the user
+ * intended, so we give a generic link to EIP-1193-compatible wallets.
+ */
+function buildInstallHint(): string {
+  return (
+    'Install a browser wallet extension such as MetaMask (metamask.io), ' +
+    'Coinbase Wallet, or Brave Wallet, then reload the page.'
+  );
 }
 
 export function useEthereumWallet() {
@@ -53,29 +76,42 @@ export function useEthereumWallet() {
   }, []);
 
   useEffect(() => {
-    const provider = typeof window !== 'undefined' ? window.ethereum : undefined;
-    const installed = !!provider;
-    setState((prev) => transition(prev, { isInstalled: installed, phase: installed ? 'checking' : 'idle' }));
+    const detected = detectEthereumProvider();
 
-    if (!provider) {
+    if (!detected) {
+      setState((prev) =>
+        transition(prev, { isInstalled: false, walletName: null, phase: 'idle' })
+      );
       setError(
-        'metamask_unavailable',
-        'MetaMask not found.',
-        'Install MetaMask from metamask.io and reload the page.'
+        'ethereum_wallet_unavailable',
+        'No Ethereum wallet extension found.',
+        buildInstallHint()
       );
       return;
     }
 
+    const { provider, walletName } = detected;
+    const caps = probeEthCapabilities(provider);
+
+    setState((prev) =>
+      transition(prev, { isInstalled: true, walletName, phase: 'checking' })
+    );
+
     const check = async () => {
       try {
-        const accounts = await provider.request({ method: 'eth_accounts' });
-        const chainId = await provider.request({ method: 'eth_chainId' }).catch(() => null);
+        const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
+        let chainId: string | null = null;
+        try {
+          chainId = (await provider.request({ method: 'eth_chainId' })) as string;
+        } catch {
+          // eth_chainId is optional — some lightweight providers omit it.
+        }
         if (accounts.length > 0) {
           setState((prev) =>
             transition(prev, {
               isConnected: true,
               address: accounts[0],
-              chainId: chainId as string | null,
+              chainId,
               error: null,
               errorCode: null,
               hint: null,
@@ -88,22 +124,25 @@ export function useEthereumWallet() {
       } catch (err) {
         setError(
           'ethereum_check_failed',
-          err instanceof Error ? err.message : 'Failed to check MetaMask state',
-          'Refresh the page. If accounts are locked, unlock MetaMask and try again.'
+          err instanceof Error ? err.message : `Failed to check ${walletName} state`,
+          `Refresh the page. If accounts are locked, unlock ${walletName} and try again.`
         );
       }
     };
 
     check();
 
-    const handleAccountsChanged = (accounts: string[]) => {
+    // --- Event listeners ---
+
+    const handleAccountsChanged = (accounts: unknown) => {
+      const accs = accounts as string[];
       setState((prev) => {
-        if (accounts.length === 0) {
+        if (accs.length === 0) {
           return transition(prev, { isConnected: false, address: null, phase: 'idle' });
         }
         return transition(prev, {
           isConnected: true,
-          address: accounts[0],
+          address: accs[0],
           error: null,
           errorCode: null,
           hint: null,
@@ -112,10 +151,10 @@ export function useEthereumWallet() {
       });
     };
 
-    const handleChainChanged = (chainId: string) => {
+    const handleChainChanged = (chainId: unknown) => {
       setState((prev) =>
         transition(prev, {
-          chainId,
+          chainId: chainId as string,
           error: null,
           errorCode: null,
           hint: null,
@@ -125,37 +164,63 @@ export function useEthereumWallet() {
     };
 
     const handleDisconnect = () => {
-      setState((prev) => transition(prev, { isConnected: false, address: null, phase: 'idle' }));
+      setState((prev) =>
+        transition(prev, { isConnected: false, address: null, phase: 'idle' })
+      );
     };
 
-    provider.on('accountsChanged', handleAccountsChanged as any);
-    provider.on('chainChanged', handleChainChanged as any);
-    provider.on('disconnect', handleDisconnect as any);
+    safeAddListener(provider, 'accountsChanged', handleAccountsChanged);
+    safeAddListener(provider, 'chainChanged', handleChainChanged);
+    safeAddListener(provider, 'disconnect', handleDisconnect);
 
     return () => {
-      provider.removeListener('accountsChanged', handleAccountsChanged as any);
-      provider.removeListener('chainChanged', handleChainChanged as any);
-      provider.removeListener('disconnect', handleDisconnect as any);
+      if (caps.supportsRemoveListener) {
+        safeRemoveListener(provider, 'accountsChanged', handleAccountsChanged);
+        safeRemoveListener(provider, 'chainChanged', handleChainChanged);
+        safeRemoveListener(provider, 'disconnect', handleDisconnect);
+      }
     };
   }, [setError]);
 
   const connect = useCallback(async () => {
-    const provider = typeof window !== 'undefined' ? window.ethereum : undefined;
-    if (!provider) {
-      setError('metamask_unavailable', 'MetaMask not found.', 'Install MetaMask and reload.');
+    const detected = detectEthereumProvider();
+
+    if (!detected) {
+      setError(
+        'ethereum_wallet_unavailable',
+        'No Ethereum wallet extension found.',
+        buildInstallHint()
+      );
       return;
     }
 
-    setState((prev) => transition(prev, { isLoading: true, error: null, errorCode: null, hint: null, phase: 'requesting_permission' }));
+    const { provider, walletName } = detected;
+
+    setState((prev) =>
+      transition(prev, {
+        isLoading: true,
+        error: null,
+        errorCode: null,
+        hint: null,
+        phase: 'requesting_permission',
+        walletName,
+      })
+    );
+
     try {
-      const accounts = await provider.request({ method: 'eth_requestAccounts' });
-      const chainId = await provider.request({ method: 'eth_chainId' }).catch(() => null);
+      const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[];
+      let chainId: string | null = null;
+      try {
+        chainId = (await provider.request({ method: 'eth_chainId' })) as string;
+      } catch {
+        // eth_chainId not supported — leave null.
+      }
       if (accounts.length > 0) {
         setState((prev) =>
           transition(prev, {
             isConnected: true,
             address: accounts[0],
-            chainId: chainId as string | null,
+            chainId,
             isLoading: false,
             error: null,
             errorCode: null,
@@ -164,24 +229,82 @@ export function useEthereumWallet() {
           })
         );
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const anyErr = err as { message?: string; code?: number };
+      const rejected = anyErr?.code === 4001;
       setError(
-        'metamask_connect_failed',
-        err?.message ?? 'MetaMask connection failed',
-        err?.code === 4001
-          ? 'You rejected the connection request in MetaMask.'
-          : 'Check the MetaMask popup and try again.'
+        'ethereum_connect_failed',
+        anyErr?.message ?? `${walletName} connection failed`,
+        rejected
+          ? `You rejected the connection request in ${walletName}.`
+          : `Check the ${walletName} popup and try again.`
       );
     }
   }, [setError]);
 
   const disconnect = useCallback(() => {
-    setState((prev) => transition(prev, { isConnected: false, address: null, isLoading: false, error: null, errorCode: null, hint: null, phase: 'idle' }));
+    setState((prev) =>
+      transition(prev, {
+        isConnected: false,
+        address: null,
+        isLoading: false,
+        error: null,
+        errorCode: null,
+        hint: null,
+        phase: 'idle',
+      })
+    );
   }, []);
+
+  /**
+   * Attempt to switch the connected wallet to a different chain.
+   *
+   * Falls back gracefully when `wallet_switchEthereumChain` is not supported.
+   */
+  const switchChain = useCallback(
+    async (chainIdHex: string): Promise<boolean> => {
+      const detected = detectEthereumProvider();
+      if (!detected) return false;
+
+      const { provider, walletName } = detected;
+      const caps = probeEthCapabilities(provider);
+
+      if (!caps.supportsChainSwitch) {
+        setError(
+          'chain_switch_unsupported',
+          `${walletName} does not support automatic network switching.`,
+          'Switch the network manually inside your wallet extension.'
+        );
+        return false;
+      }
+
+      try {
+        await provider.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: chainIdHex }],
+        });
+        return true;
+      } catch (err: unknown) {
+        const anyErr = err as { code?: number; message?: string };
+        if (anyErr?.code === 4001) {
+          // User rejected — not an error worth surfacing as red error state.
+          return false;
+        }
+        setError(
+          'chain_switch_failed',
+          anyErr?.message ?? 'Failed to switch network',
+          `Switch the network manually inside ${walletName} and try again.`
+        );
+        return false;
+      }
+    },
+    [setError]
+  );
 
   return {
     ...state,
     connect,
     disconnect,
+    switchChain,
   };
 }
