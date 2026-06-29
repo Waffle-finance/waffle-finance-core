@@ -127,7 +127,7 @@ describe("PostgreSQL Database Compatibility", () => {
     const migrations = await queryMigrations(db);
     expect(migrations.length).toBeGreaterThan(0);
     const version = await getCurrentSchemaVersion(db);
-    const expected = dbType === "postgres" ? "006_stale_cleanup_postgres.sql" : "006_stale_cleanup.sql";
+    const expected = dbType === "postgres" ? "007_richer_history_metadata_postgres.sql" : "007_richer_history_metadata.sql";
     expect(version).toBe(expected);
   });
 
@@ -149,7 +149,7 @@ describe("PostgreSQL Database Compatibility", () => {
       dstAmount: "100000000"
     });
 
-    expect(order.publicId).toMatch(/^[a-f0-9]{32}$/);
+    expect(order.publicId).toMatch(/^wf_0x[a-f0-9]{64}$/);
     expect(order.status).toBe("announced");
     expect(order.hashlock).toBe(VALID_HASHLOCK);
 
@@ -262,7 +262,7 @@ describe("PostgreSQL Database Compatibility", () => {
   testBoth("should rollback src lock from src_locked to announced", async (db) => {
     const repo = new OrdersRepository(db);
     const order = await repo.announce({
-      direction: "eth_to_xlm", hashlock: VALID_HASHLOCK,
+      direction: "eth_to_xlm", hashlock: "0x" + "b".repeat(64),
       srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
       srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
       dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
@@ -287,7 +287,7 @@ describe("PostgreSQL Database Compatibility", () => {
   testBoth("should rollback dst lock from dst_locked to src_locked", async (db) => {
     const repo = new OrdersRepository(db);
     const order = await repo.announce({
-      direction: "eth_to_xlm", hashlock: VALID_HASHLOCK,
+      direction: "eth_to_xlm", hashlock: "0x" + "8".repeat(64),
       srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
       srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
       dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
@@ -606,7 +606,7 @@ describe("PostgreSQL Migration Edge Cases", () => {
     if (!fresh) return;
 
     const version = await getCurrentSchemaVersion(fresh);
-    expect(version).toBe("006_stale_cleanup_postgres.sql");
+    expect(version).toBe("007_richer_history_metadata_postgres.sql");
 
     await fresh.getPool().end();
   });

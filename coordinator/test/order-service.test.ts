@@ -38,7 +38,7 @@ describe("OrderService", () => {
       dstAsset: "native",
       dstAmount: "100000000"
     });
-    expect(order.publicId).toMatch(/^[a-f0-9]{32}$/);
+    expect(order.publicId).toMatch(/^wf_0x[a-f0-9]{64}$/);
     expect(order.status).toBe("announced");
 
     const byId = await orders.get(order.publicId);

@@ -17,6 +17,7 @@ const EXPECTED_MIGRATIONS = [
   "004_query_optimizations.sql",
   "005_schema_migrations.sql",
   "006_stale_cleanup.sql",
+  "007_richer_history_metadata.sql",
 ];
 
 async function freshDb() {
@@ -98,7 +99,7 @@ describe("Schema migration logging — SQLite", () => {
   it("getCurrentSchemaVersion returns the last migration name", async () => {
     const db = await freshDb();
     const version = await getCurrentSchemaVersion(db);
-    expect(version).toBe("006_stale_cleanup.sql");
+    expect(version).toBe("007_richer_history_metadata.sql");
   });
 
   it("getCurrentSchemaVersion returns null for an empty migrations table", async () => {
