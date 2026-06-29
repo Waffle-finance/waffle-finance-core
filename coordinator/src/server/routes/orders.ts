@@ -9,6 +9,7 @@ import { historyAddressSchema, orderIdSchema } from "../../validation/address.js
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, notFoundError } from "../errors.js";
+import { getRouteCapability } from "@wafflefinance/sdk";
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -49,7 +50,12 @@ function serialiseOrder(order: OrderRow | null) {
   };
 }
 
-export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?: AbuseDetector): Router {
+export function ordersRoutes(
+  orders: OrderService,
+  network: "testnet" | "mainnet",
+  log?: Logger,
+  abuseDetector?: AbuseDetector
+): Router {
   const router = Router();
 
   const apiKeys = loadApiKeys();
@@ -70,6 +76,22 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
   router.post("/orders/announce", announceRateLimit, async (req, res, next) => {
     try {
       const parsed = announceSchema.parse(req.body);
+
+      const cap = getRouteCapability(
+        parsed.srcChain,
+        parsed.dstChain,
+        "wafflefinance-htlc",
+        network
+      );
+      if (cap.status === "unsupported") {
+        res.status(400).json({
+          error: "unsupported_operation",
+          message: cap.reason,
+          guidance: cap.actionableGuidance
+        });
+        return;
+      }
+
       const order = await orders.announce(parsed);
       res.status(201).json(serialiseOrder(order));
     } catch (err) {

@@ -7,6 +7,7 @@ import {
   Memo
 } from '@stellar/stellar-sdk';
 import { isTestnet, getCurrentNetwork } from '../../config/networks';
+import { getRouteCapability } from '@wafflefinance/sdk';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
@@ -265,6 +266,15 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const fromToken = DIRECTION_MAP[direction].from;
   const toToken   = DIRECTION_MAP[direction].to;
 
+  const fromChain = direction.startsWith('eth') ? 'ethereum' : (direction.startsWith('xlm') ? 'stellar' : 'solana');
+  const toChain = direction.endsWith('eth') ? 'ethereum' : (direction.endsWith('xlm') ? 'stellar' : 'solana');
+  const capability = getRouteCapability(
+    fromChain,
+    toChain,
+    'wafflefinance-htlc',
+    networkInfo.isTestnet ? 'testnet' : 'mainnet'
+  );
+
   // Fetch balance when direction or addresses change
   useEffect(() => {
     let cancelled = false;
@@ -455,6 +465,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationErrors({});
+
+    if (capability.status === 'unsupported') {
+      setValidationErrors({ form: `${capability.reason} ${capability.actionableGuidance}` });
+      return;
+    }
 
     const errors: Record<string, string> = {};
     const routeResult = validateRouteWallets(direction, ethAddress, stellarAddress, solanaAddress ?? '');
@@ -1343,16 +1358,28 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 stellarAddress,
                 solanaAddress ?? ''
               );
-              const isDisabled = Boolean(unsupportedReason) && !active;
+              const dFrom = d.startsWith('eth') ? 'ethereum' : (d.startsWith('xlm') ? 'stellar' : 'solana');
+              const dTo = d.endsWith('eth') ? 'ethereum' : (d.endsWith('xlm') ? 'stellar' : 'solana');
+              const routeCap = getRouteCapability(
+                dFrom,
+                dTo,
+                'wafflefinance-htlc',
+                networkInfo.isTestnet ? 'testnet' : 'mainnet'
+              );
+              const isRouteCapUnsupported = routeCap.status === 'unsupported';
+              const isDisabled = (Boolean(unsupportedReason) && !active) || isRouteCapUnsupported;
+              const buttonTitle = isRouteCapUnsupported
+                ? `${routeCap.reason} ${routeCap.actionableGuidance}`
+                : (unsupportedReason ?? undefined);
               return (
                 <button
                   key={d}
                   type="button"
                   disabled={isDisabled}
                   aria-disabled={isDisabled}
-                  title={unsupportedReason ?? undefined}
+                  title={buttonTitle}
                   onClick={() => {
-                    if (!unsupportedReason) {
+                    if (!unsupportedReason && !isRouteCapUnsupported) {
                       setDirection(d);
                       setAmount('');
                       setEstimatedAmount('');
@@ -1365,7 +1392,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                         ? 'bg-purple-500/25 text-purple-200 border border-purple-500/30'
                         : 'bg-[#4f6bff]/25 text-[#a8b4ff] border border-[#4f6bff]/30'
                       : isDisabled
-                        ? 'cursor-not-allowed text-slate-700'
+                        ? 'cursor-not-allowed text-slate-700 opacity-40'
                         : 'text-slate-500 hover:text-slate-300'
                   }`}
                 >
@@ -1568,6 +1595,21 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             </div>
           )}
 
+          {/* Capability Alerts */}
+          {capability.status === 'unsupported' && (
+            <div role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/15 p-3 text-center">
+              <div className="font-semibold text-red-200 text-sm">{capability.reason}</div>
+              <div className="mt-1 text-xs text-red-300/80">{capability.actionableGuidance}</div>
+            </div>
+          )}
+
+          {capability.status === 'partially-supported' && (
+            <div role="alert" className="rounded-2xl border border-amber-500/30 bg-amber-500/15 p-3 text-center">
+              <div className="font-semibold text-amber-200 text-sm">{capability.reason}</div>
+              <div className="mt-1 text-xs text-amber-300/80">{capability.actionableGuidance}</div>
+            </div>
+          )}
+
           {/* Status Message */}
           {statusMessage && (
             <div className="rounded-2xl border border-cyan-200/30 bg-cyan-200/[0.12] p-3 text-center">
@@ -1578,9 +1620,9 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSubmitting || !amount || !walletsConnected || Boolean(recoveryNotice)}
+            disabled={isSubmitting || !amount || !walletsConnected || Boolean(recoveryNotice) || capability.status === 'unsupported'}
             className={`button-hover-scale w-full rounded-full py-3.5 font-semibold transition-all ${
-              walletsConnected && !recoveryNotice
+              walletsConnected && !recoveryNotice && capability.status !== 'unsupported'
                 ? 'brand-cta'
                 : 'cursor-not-allowed border border-white/5 bg-slate-700/45 text-slate-400'
             }`}

@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     orders,
     secrets,
     quotes,
+    network: cfg.network,
     getReconciliationStatus: () => reconciler.getStatus(),
     getReadinessChecks: createReadinessChecks({
       cfg,
@@ -72,9 +73,9 @@ async function main(): Promise<void> {
   const sorobanListener = new SorobanListener(cfg, orders, log);
   const solanaListener = new SolanaListener(cfg, orders, log);
   await Promise.all([
-    retryAsync(() => ethListener.start()),
-    retryAsync(() => sorobanListener.start()),
-    retryAsync(() => solanaListener.start()),
+    retryAsync(async () => ethListener.start()),
+    retryAsync(async () => sorobanListener.start()),
+    retryAsync(async () => solanaListener.start()),
   ]);
 
   const shutdown = async (signal: string) => {
