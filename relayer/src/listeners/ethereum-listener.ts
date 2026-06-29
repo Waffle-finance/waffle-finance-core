@@ -6,6 +6,7 @@
 import { ethers, Contract, EventLog } from 'ethers';
 import { RELAYER_CONFIG } from '../index.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
+import { sanitizeForLog } from '../utils/sanitize-for-log.js';
 
 // Mock CrossChainOrder interface for now
 interface CrossChainOrder {

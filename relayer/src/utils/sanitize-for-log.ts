@@ -2,11 +2,11 @@ export function sanitizeForLog<T>(obj: T, depth = 0): T {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === 'string') {
-    return obj.replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]');
+    return obj.replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]') as unknown as T;
   }
 
   if (typeof obj === 'object') {
-    if (depth >= 3) return '[MAX_DEPTH_REACHED]';
+    if (depth >= 3) return '[MAX_DEPTH_REACHED]' as unknown as T;
 
     if (obj instanceof Error) {
       const sanitizedMessage = typeof obj.message === 'string' 

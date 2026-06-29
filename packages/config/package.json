@@ -1,0 +1,43 @@
+{
+  "name": "@wafflefinance/config",
+  "version": "1.0.0",
+  "description": "Consolidated configuration schemas, validation, and loaders for WaffleFinance services",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./node": {
+      "import": "./dist/node.js",
+      "types": "./dist/node.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "@stellar/stellar-sdk": ">=13.0.0",
+    "dotenv": ">=16.0.0",
+    "viem": ">=2.0.0"
+  },
+  "devDependencies": {
+    "@stellar/stellar-sdk": "^13.0.0",
+    "@types/node": "^22.10.0",
+    "dotenv": "^16.4.5",
+    "typescript": "^5.6.0",
+    "viem": "^2.21.0",
+    "vitest": "^2.1.0"
+  }
+}

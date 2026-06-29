@@ -3,7 +3,8 @@
  * @description Monitors Ethereum events and coordinates Stellar transactions
  */
 
-import { config } from 'dotenv';
+import { loadRelayerConfig } from '@wafflefinance/config/node';
+import { resolveEthereumRpcUrl } from '@wafflefinance/config';
 import { resolve } from 'path';
 import express from 'express';
 import cors from 'cors';
@@ -26,10 +27,9 @@ import {
   hasRecentVisitor,
   markVisitorPresent,
 } from './utils/site-presence.js';
-import { resolveEthereumRpcUrl } from './utils/ethereum-rpc-url.js';
 
-// Load environment variables from root directory
-config({ path: resolve(process.cwd(), '../.env') });
+// Load and validate config using our shared package
+const parsedRelayerConfig = loadRelayerConfig();
 
 // ✅ NETWORK-AWARE Dynamic Safety Deposit Helper Function
 function calculateDynamicSafetyDeposit(amountInWei: string | bigint, networkMode?: string): bigint {
@@ -105,7 +105,7 @@ const NETWORK_CONFIG = {
 };
 
 // Determine current network from environment (default)
-const DEFAULT_NETWORK_MODE = process.env.NETWORK_MODE || 'mainnet'; // Read from .env
+const DEFAULT_NETWORK_MODE = parsedRelayerConfig.network;
 
 // Dynamic network config getter
 function getNetworkConfig(networkMode?: string): any {
@@ -362,81 +362,11 @@ function resolveEthereumRpcUrlForRelayer(): string {
 
 // Relayer configuration from environment variables
 export const RELAYER_CONFIG = {
-  // Service settings
-  port: Number(process.env.RELAYER_PORT || process.env.PORT) || 3001,
-  pollInterval: Number(process.env.RELAYER_POLL_INTERVAL) || 15_000,
-  activePollIntervalMs: Number(process.env.RELAYER_ACTIVE_POLL_INTERVAL_MS) || 15_000,
-  idlePollIntervalMs: Number(process.env.RELAYER_IDLE_POLL_INTERVAL_MS) || 120_000,
-  visitorTtlMs: Number(process.env.RELAYER_VISITOR_TTL_MS) || 5 * 60_000,
-  retryAttempts: Number(process.env.RELAYER_RETRY_ATTEMPTS) || 3,
-  retryDelay: Number(process.env.RELAYER_RETRY_DELAY) || 2000,
-  
-  // Network configuration
-  nodeEnv: process.env.NODE_ENV || 'development',
-  enableMockMode: process.env.ENABLE_MOCK_MODE === 'true',
-  debug: process.env.DEBUG === 'true',
-  resolverAllowlist: parseCsv(process.env.RELAYER_RESOLVER_ADDRESSES),
-  rpcTimeoutMs: Number(process.env.RELAYER_RPC_TIMEOUT_MS) || 30000,
-  
-  // Ethereum configuration
+  ...parsedRelayerConfig,
   ethereum: {
-    network: process.env.ETHEREUM_NETWORK || 'mainnet',
-    rpcUrl: resolveEthereumRpcUrlForRelayer(),
-    // ✅ Dynamic contract addresses based on network
+    ...parsedRelayerConfig.ethereum,
     contractAddress: getHtlcBridgeAddress(DEFAULT_NETWORK_MODE), // For EthereumEventListener (testnet only)
     escrowFactoryAddress: getEscrowFactoryAddress(DEFAULT_NETWORK_MODE), // For transactions (mainnet + testnet)
-    fusionApiUrl: 'https://api.1inch.dev/fusion',
-    fusionApiKey: process.env.ONEINCH_API_KEY || '',
-    privateKey: process.env.RELAYER_PRIVATE_KEY || '',
-    gasPrice: Number(process.env.GAS_PRICE_GWEI) || 20,
-    gasLimit: Number(process.env.GAS_LIMIT) || 300000,
-    startBlock: Number(process.env.START_BLOCK_ETHEREUM) || 0,
-    minConfirmations: Number(process.env.MIN_CONFIRMATION_BLOCKS) || 6,
-  },
-  
-  // Stellar configuration - DYNAMIC based on DEFAULT_NETWORK_MODE
-  stellar: {
-    network: process.env.STELLAR_NETWORK || DEFAULT_NETWORK_MODE, // ✅ DEFAULT_NETWORK_MODE kullan!
-    horizonUrl: process.env.STELLAR_HORIZON_URL || (
-      (DEFAULT_NETWORK_MODE === 'mainnet') 
-        ? 'https://horizon.stellar.org' 
-        : 'https://horizon-testnet.stellar.org'
-    ),
-    networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE || (
-      (DEFAULT_NETWORK_MODE === 'mainnet')
-        ? 'Public Global Stellar Network ; September 2015'
-        : 'Test SDF Network ; September 2015'
-    ),
-    secretKey: process.env.RELAYER_STELLAR_SECRET || '',
-    publicKey: process.env.RELAYER_STELLAR_PUBLIC || '',
-    startLedger: Number(process.env.START_LEDGER_STELLAR) || 0,
-    minConfirmations: Number(process.env.STELLAR_MIN_CONFIRMATIONS) || 1,
-  },
-  
-  // Fee and limit settings
-  fees: {
-    feeRate: Number(process.env.RELAYER_FEE_RATE) || 50, // basis points
-    minSwapAmountUSD: Number(process.env.MIN_SWAP_AMOUNT_USD) || 10,
-    maxSwapAmountUSD: Number(process.env.MAX_SWAP_AMOUNT_USD) || 100000,
-    maxOrderAmount: Number(process.env.MAX_ORDER_AMOUNT) || 1000000,
-  },
-  
-  // Security settings
-  security: {
-    minTimelockDuration: Number(process.env.MIN_TIMELOCK_DURATION) || 3600,
-    maxTimelockDuration: Number(process.env.MAX_TIMELOCK_DURATION) || 604800,
-    defaultTimelockDuration: Number(process.env.DEFAULT_TIMELOCK_DURATION) || 86400,
-    emergencyShutdown: process.env.EMERGENCY_SHUTDOWN === 'true',
-    maintenanceMode: process.env.MAINTENANCE_MODE === 'true',
-  },
-  
-  // Monitoring and logging
-  monitoring: {
-    logLevel: process.env.LOG_LEVEL || 'info',
-    enableRequestLogging: process.env.ENABLE_REQUEST_LOGGING === 'true',
-    verboseLogging: process.env.VERBOSE_LOGGING === 'true',
-    healthCheckInterval: Number(process.env.HEALTH_CHECK_INTERVAL) || 30000,
-    healthCheckTimeout: Number(process.env.HEALTH_CHECK_TIMEOUT) || 5000,
   }
 };
 
@@ -459,9 +389,8 @@ function validateConfig() {
     );
   }
 
-  // Hard-fail on placeholder private keys — a dummy key would silently sign
-  // transactions from the zero/garbage address, causing unrecoverable failures.
-  const ethKey = process.env.RELAYER_PRIVATE_KEY;
+  // Hard-fail on placeholder private keys
+  const ethKey = RELAYER_CONFIG.ethereum.privateKey;
   if (!ethKey) {
     throw new Error('RELAYER_PRIVATE_KEY is not set. Set it in .env before starting.');
   }
@@ -472,7 +401,7 @@ function validateConfig() {
     );
   }
 
-  const stellarSecret = process.env.RELAYER_STELLAR_SECRET;
+  const stellarSecret = RELAYER_CONFIG.stellar.secretKey;
   if (!stellarSecret) {
     throw new Error('RELAYER_STELLAR_SECRET is not set. Set it in .env before starting.');
   }

@@ -3,9 +3,6 @@
  *
  * Priority (testnet): SEPOLIA_RPC_URL → ETHEREUM_RPC_URL → Infura (INFURA_API_KEY) → public fallback
  * Priority (mainnet): MAINNET_RPC_URL → ETHEREUM_RPC_URL → Infura (INFURA_API_KEY) → public fallback
- *
- * Production (DigitalOcean): set INFURA_API_KEY or the full SEPOLIA_RPC_URL /
- * MAINNET_RPC_URL — both work. Explicit URLs win over the API key.
  */
 
 export type EvmNetworkMode = 'testnet' | 'mainnet';
@@ -23,7 +20,7 @@ export function infuraRpcUrl(network: EvmNetworkMode, apiKey: string): string {
 
 export function resolveEthereumRpcUrl(
   network: EvmNetworkMode,
-  env: NodeJS.ProcessEnv = process.env
+  env: Record<string, string | undefined> = (typeof process !== 'undefined' ? process.env : {}) as Record<string, string | undefined>
 ): string {
   const infuraKey = env.INFURA_API_KEY?.trim();
 

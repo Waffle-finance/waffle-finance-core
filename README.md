@@ -242,6 +242,8 @@ All suites gate every pull request via GitHub Actions.
 
 ## Key environment variables
 
+All environment variables across the monorepo packages are consolidated and validated using the shared `@wafflefinance/config` package (under `packages/config`). Invalid or missing values fail fast with clear, actionable validation messages at startup.
+
 | Variable | Used by | Description |
 |---|---|---|
 | `ETHEREUM_RPC_URL` | relayer, coordinator | Sepolia or mainnet RPC |
