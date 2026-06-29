@@ -5,10 +5,52 @@ import type { OrderRow } from "../../persistence/orders-repo.js";
 import type { OrderService } from "../../services/order-service.js";
 import { OrderValidationError } from "../../services/order-service.js";
 import { announceSchema } from "../../validation/announce.js";
-import { historyAddressSchema, orderIdSchema } from "../../validation/address.js";
+import { historyAddressSchema, orderIdSchema, isSupportedAddress } from "../../validation/address.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, notFoundError } from "../errors.js";
+
+const historyQuerySchema = z.object({
+  address: z.string().trim().optional(),
+  eth: z.string().trim().optional(),
+  stellar: z.string().trim().optional(),
+  solana: z.string().trim().optional(),
+  correlationId: z.string().trim().optional(),
+  hashlock: z.string().trim().optional(),
+  search: z.string().trim().optional(),
+  status: z.string().trim().optional(),
+  lifecyclePhase: z.string().trim().optional(),
+  direction: z.string().trim().optional(),
+  limit: z.coerce.number().int().positive().default(50).transform(val => Math.min(val, 200)),
+  offset: z.coerce.number().int().nonnegative().optional(),
+  cursor: z.string().trim().optional().transform(val => val === "" ? undefined : val)
+}).superRefine((data, ctx) => {
+  const hasAddress = data.address || data.eth || data.stellar || data.solana;
+  const hasSearch = data.correlationId || data.hashlock || data.search;
+  
+  if (!hasAddress && !hasSearch) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["address"],
+      message: "At least one address (address, eth, stellar, solana) or search criteria (correlationId, hashlock, search) is required"
+    });
+  }
+
+  const validateAddr = (val: string | undefined, name: string) => {
+    if (val && !isSupportedAddress(val)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [name],
+        message: `${name} must be a valid address`
+      });
+    }
+  };
+
+  validateAddr(data.address, "address");
+  validateAddr(data.eth, "eth");
+  validateAddr(data.stellar, "stellar");
+  validateAddr(data.solana, "solana");
+});
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -45,7 +87,11 @@ function serialiseOrder(order: OrderRow | null) {
     },
     resolver: order.resolverAddress,
     createdAt: order.createdAt,
-    updatedAt: order.updatedAt
+    updatedAt: order.updatedAt,
+    lifecyclePhase: order.lifecyclePhase,
+    lastUpdatedTimestamp: order.lastUpdatedTimestamp,
+    errorState: order.errorState,
+    correlationId: order.correlationId
   };
 }
 
@@ -88,24 +134,51 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
   // NOTE: the literal /orders/history route must be registered before the
   // /orders/:id param route, otherwise Express matches "history" as an :id.
   router.get("/orders/history", async (req, res, next) => {
-    const parsedAddress = historyAddressSchema.safeParse(req.query.address);
-    if (!parsedAddress.success) {
-      res.status(400).json(validationError(parsedAddress.error.errors));
+    const queryResult = historyQuerySchema.safeParse(req.query);
+    if (!queryResult.success) {
+      res.status(400).json(validationError(queryResult.error.errors));
       return;
     }
-    const address = parsedAddress.data;
-    const limit = Math.min(Number(req.query.limit ?? 50), 200);
+    const queryData = queryResult.data;
 
-    // Support both cursor-based (preferred) and offset-based (legacy) pagination
-    const cursorParam = req.query.cursor as string | undefined;
-    const cursor = cursorParam && cursorParam.trim() !== '' ? cursorParam : undefined;
-    const offset = req.query.offset !== undefined ? Math.max(Number(req.query.offset), 0) : undefined;
+    const limit = queryData.limit;
+    const cursor = queryData.cursor;
+    const offset = queryData.offset;
+
+    const addresses: string[] = [];
+    const addAddress = (val: string | undefined) => {
+      if (val) {
+        addresses.push(val);
+      }
+    };
+
+    addAddress(queryData.address);
+    addAddress(queryData.eth);
+    addAddress(queryData.stellar);
+    addAddress(queryData.solana);
+
+    const correlationId = queryData.correlationId;
+    const hashlock = queryData.hashlock;
+    const search = queryData.search;
+    const status = queryData.status;
+    const lifecyclePhase = queryData.lifecyclePhase;
+    const direction = queryData.direction;
+
+    const filters = {
+      addresses: addresses.length > 0 ? addresses : undefined,
+      status,
+      lifecyclePhase,
+      direction,
+      correlationId,
+      hashlock,
+      search
+    };
 
     try {
       // Use cursor pagination if cursor is provided, otherwise use offset (legacy default)
       if (cursor !== undefined) {
         // Cursor-based pagination
-        const result = await orders.historyWithCursor(address, limit, cursor);
+        const result = await orders.historyWithCursor(filters, limit, cursor);
         res.json({
           transactions: result.orders.map((o) => serialiseOrder(o)).filter(Boolean),
           pagination: {
@@ -117,7 +190,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
       } else {
         // Offset-based pagination (default for backward compatibility)
         const finalOffset = offset ?? 0;
-        const list = await orders.history(address, limit, finalOffset);
+        const list = await orders.history(filters, limit, finalOffset);
         res.json({
           transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
           pagination: { limit, offset: finalOffset, count: list.length }

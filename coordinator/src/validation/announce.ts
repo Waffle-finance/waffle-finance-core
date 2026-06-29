@@ -39,7 +39,8 @@ const announceShape = z.object({
   dstChain: z.enum(["ethereum", "stellar", "solana"]),
   dstAddress: z.string(),
   dstAsset: z.string().min(1),
-  dstAmount: z.string().regex(/^\d+$/, "dstAmount must be a decimal integer string")
+  dstAmount: z.string().regex(/^\d+$/, "dstAmount must be a decimal integer string"),
+  correlationId: z.string().optional()
 });
 
 export const announceSchema = announceShape.superRefine((input, ctx) => {

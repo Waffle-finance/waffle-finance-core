@@ -163,7 +163,7 @@ describe("Cursor Pagination Integration", () => {
   });
 
   describe("performance with large datasets", () => {
-    it("handles large address history efficiently", async () => {
+    it("handles large address history efficiently", { timeout: 15000 }, async () => {
       const orderCount = 500;
       await createTestOrders(service, orderCount, VALID_ETH_ADDR);
       

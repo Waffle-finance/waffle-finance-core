@@ -28,6 +28,10 @@ export interface Transaction {
   autoRefundFailed?: boolean;
   autoRefundError?: string;
   networkMode?: 'mainnet' | 'testnet';
+  lifecyclePhase?: string;
+  lastUpdatedTimestamp?: number;
+  errorState?: string;
+  correlationId?: string;
 }
 
 interface HistoryCachePayload {
@@ -130,6 +134,89 @@ function mergeTransactions(...sources: Transaction[][]): Transaction[] {
   return Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
 }
 
+function mapCoordinatorOrderToTransaction(order: any): Transaction {
+  const fromToken = order.direction.startsWith('eth') ? 'ETH' : (order.direction.startsWith('xlm') ? 'XLM' : 'SOL');
+  const toToken = order.direction.endsWith('eth') ? 'ETH' : (order.direction.endsWith('xlm') ? 'XLM' : 'SOL');
+
+  const formatAmount = (amountStr: string, token: string): string => {
+    try {
+      const amount = parseFloat(amountStr);
+      if (isNaN(amount)) return '0';
+      if (token === 'ETH') return (amount / 1e18).toFixed(6);
+      if (token === 'XLM') return (amount / 1e7).toFixed(6);
+      if (token === 'SOL') return (amount / 1e9).toFixed(6);
+      return amountStr;
+    } catch {
+      return '0';
+    }
+  };
+
+  const getFromNetworkLabel = (dir: string): string => {
+    if (dir.startsWith('eth')) return 'Ethereum';
+    if (dir.startsWith('xlm')) return 'Stellar';
+    return 'Solana';
+  };
+
+  const getToNetworkLabel = (dir: string): string => {
+    if (dir.endsWith('eth')) return 'Ethereum';
+    if (dir.endsWith('xlm')) return 'Stellar';
+    return 'Solana';
+  };
+
+  const getFrontendStatus = (status: string): Transaction['status'] => {
+    switch (status) {
+      case 'completed':
+        return 'completed';
+      case 'failed':
+        return 'failed';
+      case 'refunded':
+      case 'cancelled':
+        return 'cancelled';
+      case 'expired':
+        return 'failed';
+      default:
+        return 'pending';
+    }
+  };
+
+  const txHash = order.src?.lockTx || order.dst?.lockTx || order.hashlock;
+  const ethTxHash = order.direction.startsWith('eth') ? order.src?.lockTx : order.dst?.lockTx;
+  const stellarTxHash = order.direction.startsWith('xlm') ? order.src?.lockTx : order.dst?.lockTx;
+  const ethAddress = order.direction.startsWith('eth') ? order.src?.address : order.dst?.address;
+  const stellarAddress = order.direction.startsWith('xlm') ? order.src?.address : order.dst?.address;
+
+  return {
+    id: order.id,
+    txHash: txHash || order.id,
+    fromNetwork: getFromNetworkLabel(order.direction),
+    toNetwork: getToNetworkLabel(order.direction),
+    fromToken,
+    toToken,
+    amount: formatAmount(order.src?.amount || '0', fromToken),
+    estimatedAmount: formatAmount(order.dst?.amount || '0', toToken),
+    status: getFrontendStatus(order.status),
+    timestamp: (order.createdAt || Math.floor(Date.now() / 1000)) * 1000,
+    ethTxHash,
+    stellarTxHash,
+    ethAddress,
+    stellarAddress,
+    direction: order.direction.replace('_to_', '-to-') as 'eth-to-xlm' | 'xlm-to-eth',
+    onChainOrderId: order.src?.orderId || order.dst?.orderId || undefined,
+    htlcContractAddress: order.src?.chain === 'ethereum' ? order.src?.address : undefined,
+    timelockUnixSeconds: order.src?.timelock || order.dst?.timelock || undefined,
+    amountWei: order.src?.chain === 'ethereum' ? order.src?.amount : undefined,
+    refundTxHash: order.status === 'refunded' ? order.secret?.revealedTx : undefined,
+    refundNetwork: order.status === 'refunded' ? (order.direction.startsWith('eth') ? 'ethereum' : 'stellar') : undefined,
+    refundedAt: order.status === 'refunded' ? (order.updatedAt * 1000) : undefined,
+    
+    // Rich metadata fields
+    lifecyclePhase: order.lifecyclePhase || order.status,
+    lastUpdatedTimestamp: order.lastUpdatedTimestamp || order.updatedAt,
+    errorState: order.errorState || undefined,
+    correlationId: order.correlationId || undefined,
+  };
+}
+
 export function useTransactionHistoryCache({
   ethAddress,
   stellarAddress,
@@ -215,7 +302,7 @@ export function useTransactionHistoryCache({
 
         const body = await res.json();
         const remote: Transaction[] = Array.isArray(body?.transactions)
-          ? body.transactions.filter(isRealTransaction)
+          ? body.transactions.map(mapCoordinatorOrderToTransaction).filter(isRealTransaction)
           : [];
         const merged = mergeTransactions(loadFromStorage(), remote);
 
