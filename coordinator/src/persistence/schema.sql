@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS orders (
 
     created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    archived_at           INTEGER
+    archived_at           INTEGER,
+
+    lifecycle_phase       TEXT    NOT NULL DEFAULT 'announced',
+    last_updated_timestamp INTEGER,
+    error_state           TEXT,
+    correlation_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_hashlock         ON orders (hashlock);

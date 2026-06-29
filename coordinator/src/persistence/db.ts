@@ -164,7 +164,7 @@ export class PostgresStatement {
 // The latest migration file name.  Bump this whenever a new migration is
 // added so startup validation can detect databases that are missing
 // incremental changes.
-export const CURRENT_SCHEMA_VERSION = "006_stale_cleanup.sql";
+export const CURRENT_SCHEMA_VERSION = "007_richer_history_metadata.sql";
 
 // Logical migrations that schema.sql covers, in application order.
 // These names are seeded into the schema_migrations table on first open of a
@@ -176,6 +176,7 @@ const SQLITE_MIGRATIONS = [
   "004_query_optimizations.sql",
   "005_schema_migrations.sql",
   "006_stale_cleanup.sql",
+  "007_richer_history_metadata.sql",
 ] as const;
 
 // Postgres migration files, applied in order.  Migration 005 creates the
@@ -188,6 +189,7 @@ const POSTGRES_MIGRATION_FILES = [
   "004_query_optimizations.sql",
   "005_schema_migrations.sql",
   "006_stale_cleanup_postgres.sql",
+  "007_richer_history_metadata_postgres.sql",
 ] as const;
 
 // ── Public helpers ───────────────────────────────────────────────────────────
@@ -364,6 +366,38 @@ function openSqliteDatabase(url: string): Database {
     db.exec("ALTER TABLE orders ADD COLUMN archived_at INTEGER");
   } catch {
     // Column already present — safe to ignore.
+  }
+
+  // Apply richer history metadata columns for existing databases.
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN lifecycle_phase TEXT DEFAULT 'announced'");
+  } catch {
+    // Already present
+  }
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN last_updated_timestamp INTEGER");
+  } catch {
+    // Already present
+  }
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN error_state TEXT");
+  } catch {
+    // Already present
+  }
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN correlation_id TEXT");
+  } catch {
+    // Already present
+  }
+  try {
+    db.exec(`
+      UPDATE orders SET 
+        lifecycle_phase = status, 
+        last_updated_timestamp = updated_at 
+      WHERE lifecycle_phase IS NULL OR last_updated_timestamp IS NULL
+    `);
+  } catch {
+    // Safe to ignore
   }
 
   // Seed migration history for all logical migrations covered by schema.sql.
