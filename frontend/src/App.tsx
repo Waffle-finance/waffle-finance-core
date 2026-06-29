@@ -7,6 +7,7 @@ import { useFreighter } from './hooks/useFreighter'
 import { useSolanaWallet } from './hooks/useSolanaWallet'
 import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
+import { usePersistedState } from './lib/usePersistedState'
 import { pingBackendWake } from './lib/wakeBackend'
 import { isMainnetEnabled } from './config/networks'
 import NetworkMismatchBanner from './components/NetworkMismatchBanner'
@@ -28,7 +29,10 @@ import {
 function App() {
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'bridge' | 'history'>('bridge');
+  const [activeTab, setActiveTab] = usePersistedState<'bridge' | 'history'>({
+    key: 'active-tab',
+    defaultValue: 'bridge',
+  });
   const [showIntro, setShowIntro] = useState(() => {
     return sessionStorage.getItem('wafflefinance:intro-seen') !== 'true';
   });
@@ -69,6 +73,26 @@ function App() {
 
   // Toast hook
   const toast = useToast();
+
+  // Persist which wallet types are connected so the UI can offer a smoother
+  // reconnection experience on page load. The actual reconnection is handled
+  // by each wallet hook's mount-effect.
+  const [, setLastConnectedWallets] = usePersistedState<{
+    metaMask: boolean;
+    freighter: boolean;
+    phantom: boolean;
+  }>({
+    key: 'wallet-connections',
+    defaultValue: { metaMask: false, freighter: false, phantom: false },
+  });
+
+  useEffect(() => {
+    setLastConnectedWallets({
+      metaMask: Boolean(ethAddress),
+      freighter: stellarConnected,
+      phantom: solanaConnected,
+    });
+  }, [ethAddress, stellarConnected, solanaConnected, setLastConnectedWallets]);
 
   // Tell the relayer someone is browsing (keeps pollers attentive, no RPC until swap).
   useEffect(() => {

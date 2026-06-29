@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { usePersistedState } from '../../lib/usePersistedState';
 import { 
   Horizon, 
   Asset, 
@@ -185,7 +186,10 @@ const API_BASE_URL = import.meta.env.PROD
 const ENABLE_MOCK_DATA = import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
 
 export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, signStellarTransaction }: BridgeFormProps): React.JSX.Element {
-  const [direction, setDirection] = useState<BridgeDirection>('eth_to_xlm');
+  const [direction, setDirection] = usePersistedState<BridgeDirection>({
+    key: 'bridge-direction',
+    defaultValue: 'eth_to_xlm',
+  });
   const [networkInfo, setNetworkInfo] = useState(() => {
     const currentNetwork = getCurrentNetwork();
     const isTestnetMode = isTestnet();
@@ -231,7 +235,10 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       clearInterval(interval);
     };
   }, []);
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = usePersistedState({
+    key: 'bridge-amount',
+    defaultValue: '',
+  });
   const [estimatedAmount, setEstimatedAmount] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [orderCreated, setOrderCreated] = useState(false);
