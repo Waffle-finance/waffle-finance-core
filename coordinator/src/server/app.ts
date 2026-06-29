@@ -26,6 +26,7 @@ export interface AppDeps {
   quotes: QuoteService;
   getReconciliationStatus?: () => ReconciliationStatus;
   getReadinessChecks?: ReadinessCheckProvider;
+  network?: "testnet" | "mainnet";
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -81,7 +82,7 @@ export function createApp(deps: AppDeps): Express {
   // surfaced through the application's structured log stream.  The shared
   // abuse detector is also threaded through so cross-route enumeration is
   // tracked automatically.
-  app.use("/api", ordersRoutes(deps.orders, deps.log, abuseDetector));
+  app.use("/api", ordersRoutes(deps.orders, deps.network ?? "testnet", deps.log, abuseDetector));
   app.use("/api", secretsRoutes(deps.secrets, deps.log, abuseDetector));
   // quotes routes expose /api/quotes/eth-xlm, /api/quotes/eth-sol, and
   // /api/prices (the aggregated endpoint consumed by the BridgeForm).

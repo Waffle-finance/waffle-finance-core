@@ -263,4 +263,35 @@ describe('BridgeForm cross-chain validation', () => {
     );
     await flush();
   });
+
+  it('displays a warning alert for Solana route on Testnet indicating Simulation Mode', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        ethUsd: 3500,
+        xlmUsd: 0.12,
+        solUsd: 150,
+        xlmPerEth: 29166,
+        staleness: 'fresh',
+        fetchedAt: Date.now(),
+      }),
+    });
+
+    render(
+      <BridgeForm
+        ethAddress={ETH}
+        stellarAddress={XLM}
+        solanaAddress={SOL}
+        signStellarTransaction={noopSign}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /ETH\s*→\s*SOL/i }));
+    
+    // Check that warning alert is present and mentions "Simulation Mode"
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toMatch(/Simulation Mode/i);
+    await flush();
+  });
 });
+

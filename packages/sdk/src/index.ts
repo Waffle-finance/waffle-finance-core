@@ -126,3 +126,11 @@ export {
 
 // Solana — normalised adapter
 export { SolanaHTLCAdapter } from "./solana/adapter.js";
+
+// Capability Matrix
+export {
+  getRouteCapability,
+  type CapabilityStatus,
+  type Capability,
+} from "./capability.js";
+

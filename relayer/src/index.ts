@@ -5,6 +5,7 @@
 
 import { loadRelayerConfig } from '@wafflefinance/config/node';
 import { resolveEthereumRpcUrl } from '@wafflefinance/config';
+import { getRouteCapability } from '@wafflefinance/sdk';
 import { resolve } from 'path';
 import express from 'express';
 import cors from 'cors';
@@ -795,6 +796,21 @@ async function initializeRelayer() {
       // Dynamic network detection from request or fallback to env
       const requestNetwork = networkMode || network || (req.query.network) || DEFAULT_NETWORK_MODE;
       const isMainnetRequest = requestNetwork === 'mainnet';
+      
+      const cap = getRouteCapability(
+        fromChain,
+        toChain,
+        "wafflefinance-htlc",
+        isMainnetRequest ? "mainnet" : "testnet"
+      );
+      if (cap.status === "unsupported") {
+        console.log(`❌ BLOCKING UNSUPPORTED LEG: ${fromChain} -> ${toChain} on ${isMainnetRequest ? "mainnet" : "testnet"}`);
+        return res.status(400).json({
+          error: 'unsupported_operation',
+          message: cap.reason,
+          guidance: cap.actionableGuidance
+        });
+      }
       
       console.log(`🌐 Network Detection:`, {
         requestNetwork,
