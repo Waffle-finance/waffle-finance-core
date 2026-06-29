@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute, resolve } from "node:path";
 import { config as dotenvConfig } from "dotenv";
 import { resolveEthereumRpcUrl } from "./ethereum-rpc-url.js";
 import {
@@ -35,6 +35,15 @@ export function findEnvFile(): string | null {
  * Resolves the .env file path and loads it via dotenv.
  */
 export function loadDotenv(): void {
+  const customEnv = process.env.ENV_FILE;
+  if (customEnv) {
+    const absolutePath = isAbsolute(customEnv) ? customEnv : resolve(process.cwd(), customEnv);
+    if (existsSync(absolutePath)) {
+      dotenvConfig({ path: absolutePath });
+      return;
+    }
+  }
+
   const envPath = findEnvFile();
   if (envPath) {
     dotenvConfig({ path: envPath });
@@ -194,6 +203,12 @@ export function loadResolverConfig(
       htlc: rawEnv[isMainnet ? "SOROBAN_HTLC_MAINNET" : "SOROBAN_HTLC_TESTNET"] ?? "",
       resolverRegistry: rawEnv[isMainnet ? "SOROBAN_RESOLVER_REGISTRY_MAINNET" : "SOROBAN_RESOLVER_REGISTRY_TESTNET"] ?? "",
       resolverSecret: rawEnv.RESOLVER_STELLAR_SECRET ?? "",
+    },
+    rpc: {
+      maxRetries: rawEnv.RESOLVER_RPC_MAX_RETRIES ?? "5",
+      baseDelayMs: rawEnv.RESOLVER_RPC_BASE_DELAY_MS ?? "1000",
+      maxDelayMs: rawEnv.RESOLVER_RPC_MAX_DELAY_MS ?? "30000",
+      timeoutMs: rawEnv.RESOLVER_RPC_TIMEOUT_MS ?? "10000",
     },
   };
 

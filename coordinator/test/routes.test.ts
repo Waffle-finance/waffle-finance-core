@@ -190,6 +190,37 @@ describe("POST /api/orders/announce", () => {
     expect(res.headers["retry-after"]).toBeDefined();
   });
 
+  it("returns 400 with unsupported_operation error for Solana on Mainnet", async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "waffle-routes-test-"));
+    const db = await openDatabase(`file:${dir}/test.db`);
+    const ordersRepo = new OrdersRepository(db);
+    const orders = new OrderService(ordersRepo, log);
+    const secrets = new SecretService(orders, log);
+    const quotes = new QuoteService(log);
+    const app = createApp({ log, corsOrigin: "*", orders, secrets, quotes, network: "mainnet" });
+
+    const res = await request(app)
+      .post("/api/orders/announce")
+      .send({
+        direction: "eth_to_sol",
+        hashlock: VALID_HASHLOCK,
+        srcChain: "ethereum",
+        srcAddress: VALID_ETH_ADDR,
+        srcAsset: "native",
+        srcAmount: "1000000000000000000",
+        srcSafetyDeposit: "1000000000000000",
+        dstChain: "solana",
+        dstAddress: "So11111111111111111111111111111111111111112",
+        dstAsset: "native",
+        dstAmount: "1000000000"
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("unsupported_operation");
+    expect(res.body.message).toContain("Solana swaps are not supported on Mainnet yet");
+    expect(res.body.guidance).toBeDefined();
+  });
+
   it("X-Forwarded-For is ignored when no trusted proxy is configured", async () => {
     const app = await freshApp();
     // Even with a forged XFF header the IP used for bucketing is the actual

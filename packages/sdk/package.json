@@ -58,6 +58,10 @@
     "./shared-utils": {
       "import": "./dist/shared-utils/index.js",
       "types": "./dist/shared-utils/index.d.ts"
+    },
+    "./capability": {
+      "import": "./dist/capability.js",
+      "types": "./dist/capability.d.ts"
     }
   },
   "files": [

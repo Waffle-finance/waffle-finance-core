@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@wafflefinance/config": "workspace:*",
+    "@wafflefinance/sdk": "workspace:*",
     "@stellar/stellar-sdk": "^13.0.0",
     "@types/node": "^22.10.0",
     "axios": "^1.10.0",

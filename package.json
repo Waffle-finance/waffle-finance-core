@@ -16,6 +16,8 @@
   "packageManager": "pnpm@8.15.0",
   "scripts": {
     "dev": "pnpm -r dev",
+    "dev:simulation": "ENV_FILE=$PWD/.env.simulation pnpm -r dev --mode simulation",
+    "dev:staging": "ENV_FILE=$PWD/.env.staging pnpm -r dev --mode staging",
     "build": "pnpm -r build",
     "build:prod": "NODE_ENV=production pnpm -r build",
     "test": "pnpm -r test",
@@ -45,7 +47,8 @@
     "@typescript-eslint/parser": "^6.16.0",
     "eslint": "^8.56.0",
     "prettier": "^3.1.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vite-plugin-node-polyfills": "^0.28.0"
   },
   "engines": {
     "node": ">=22.0.0",
@@ -66,6 +69,5 @@
     "atomic-swap"
   ],
   "author": "WaffleFinance Team",
-  "license": "MIT",
-  "dependencies": {}
+  "license": "MIT"
 }
