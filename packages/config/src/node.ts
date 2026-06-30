@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config as dotenvConfig } from "dotenv";
+import { loadChainSettings } from "./chains.js";
 import { resolveEthereumRpcUrl } from "./ethereum-rpc-url.js";
 import {
   coordinatorConfigSchema,
@@ -54,6 +55,9 @@ export function loadCoordinatorConfig(
   
   const network = (rawEnv.NETWORK_MODE ?? rawEnv.NETWORK ?? "testnet") as NetworkMode;
   const isMainnet = network === "mainnet";
+  const chain = loadChainSettings(network, rawEnv, {
+    ethereumRpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
+  });
 
   const mapped = {
     network,
@@ -66,24 +70,22 @@ export function loadCoordinatorConfig(
     apiKeys: rawEnv.COORDINATOR_API_KEYS ?? "",
     trustedProxies: rawEnv.COORDINATOR_TRUSTED_PROXIES ?? "",
     ethereum: {
-      rpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
-      chainId: isMainnet ? 1 : 11_155_111,
-      htlcEscrow: rawEnv[isMainnet ? "ETH_HTLC_ESCROW_MAINNET" : "ETH_HTLC_ESCROW_TESTNET"] ?? "",
-      resolverRegistry: rawEnv[isMainnet ? "ETH_RESOLVER_REGISTRY_MAINNET" : "ETH_RESOLVER_REGISTRY_TESTNET"] ?? "",
+      rpcUrl: chain.ethereum.rpcUrl,
+      chainId: chain.ethereum.chainId,
+      htlcEscrow: chain.ethereum.htlcEscrow ?? "",
+      resolverRegistry: chain.ethereum.resolverRegistry ?? "",
     },
     soroban: {
-      rpcUrl: rawEnv.SOROBAN_RPC_URL ?? (isMainnet ? "https://mainnet.sorobanrpc.com" : "https://soroban-testnet.stellar.org"),
-      horizonUrl: rawEnv.STELLAR_HORIZON_URL ?? (isMainnet ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org"),
-      networkPassphrase: isMainnet
-        ? "Public Global Stellar Network ; September 2015"
-        : "Test SDF Network ; September 2015",
-      htlcContract: rawEnv[isMainnet ? "SOROBAN_HTLC_MAINNET" : "SOROBAN_HTLC_TESTNET"],
-      resolverRegistry: rawEnv[isMainnet ? "SOROBAN_RESOLVER_REGISTRY_MAINNET" : "SOROBAN_RESOLVER_REGISTRY_TESTNET"],
+      rpcUrl: chain.soroban.rpcUrl,
+      horizonUrl: chain.soroban.horizonUrl,
+      networkPassphrase: chain.soroban.networkPassphrase,
+      htlcContract: chain.soroban.htlcContract ?? "",
+      resolverRegistry: chain.soroban.resolverRegistry ?? "",
     },
     solana: {
-      rpcUrl: rawEnv.SOLANA_RPC_URL ?? (isMainnet ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com"),
-      programId: rawEnv[isMainnet ? "SOLANA_HTLC_PROGRAM_MAINNET" : "SOLANA_HTLC_PROGRAM_TESTNET"] ?? "PLACEHOLDER",
-      commitment: rawEnv.SOLANA_COMMITMENT ?? "confirmed",
+      rpcUrl: chain.solana.rpcUrl,
+      programId: chain.solana.programId ?? "PLACEHOLDER",
+      commitment: chain.solana.commitment,
     },
   };
 
@@ -100,6 +102,9 @@ export function loadRelayerConfig(
 
   const network = (rawEnv.NETWORK_MODE ?? rawEnv.NETWORK ?? "testnet") as NetworkMode;
   const isMainnet = network === "mainnet";
+  const chain = loadChainSettings(network, rawEnv, {
+    ethereumRpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
+  });
 
   const mapped = {
     network,
@@ -117,7 +122,7 @@ export function loadRelayerConfig(
     rpcTimeoutMs: rawEnv.RELAYER_RPC_TIMEOUT_MS ?? "30000",
     ethereum: {
       network: rawEnv.ETHEREUM_NETWORK ?? (isMainnet ? "mainnet" : "testnet"),
-      rpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
+      rpcUrl: chain.ethereum.rpcUrl,
       fusionApiUrl: "https://api.1inch.dev/fusion",
       fusionApiKey: rawEnv.ONEINCH_API_KEY ?? "",
       privateKey: rawEnv.RELAYER_PRIVATE_KEY ?? "",
@@ -128,20 +133,18 @@ export function loadRelayerConfig(
     },
     stellar: {
       network: rawEnv.STELLAR_NETWORK ?? network,
-      horizonUrl: rawEnv.STELLAR_HORIZON_URL ?? (isMainnet ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org"),
-      networkPassphrase: rawEnv.STELLAR_NETWORK_PASSPHRASE ?? (isMainnet
-        ? "Public Global Stellar Network ; September 2015"
-        : "Test SDF Network ; September 2015"),
+      horizonUrl: chain.soroban.horizonUrl,
+      networkPassphrase: chain.soroban.networkPassphrase,
       secretKey: rawEnv.RELAYER_STELLAR_SECRET ?? "",
       publicKey: rawEnv.RELAYER_STELLAR_PUBLIC ?? "",
       startLedger: rawEnv.START_LEDGER_STELLAR ?? "0",
       minConfirmations: rawEnv.STELLAR_MIN_CONFIRMATIONS ?? "1",
     },
     fees: {
-      feeRate: rawEnv.RELAYER_FEE_RATE ?? "50",
-      minSwapAmountUSD: rawEnv.MIN_SWAP_AMOUNT_USD ?? "10",
-      maxSwapAmountUSD: rawEnv.MAX_SWAP_AMOUNT_USD ?? "100000",
-      maxOrderAmount: rawEnv.MAX_ORDER_AMOUNT ?? "1000000",
+      feeRate: chain.fees.feeRateBps,
+      minSwapAmountUSD: chain.fees.minSwapAmountUsd,
+      maxSwapAmountUSD: chain.fees.maxSwapAmountUsd,
+      maxOrderAmount: chain.fees.maxOrderAmount,
     },
     security: {
       minTimelockDuration: rawEnv.MIN_TIMELOCK_DURATION ?? "3600",
@@ -172,6 +175,9 @@ export function loadResolverConfig(
 
   const network = (rawEnv.NETWORK_MODE ?? rawEnv.NETWORK ?? "testnet") as NetworkMode;
   const isMainnet = network === "mainnet";
+  const chain = loadChainSettings(network, rawEnv, {
+    ethereumRpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
+  });
 
   const mapped = {
     network,
@@ -179,20 +185,18 @@ export function loadResolverConfig(
     coordinatorUrl: rawEnv.COORDINATOR_URL ?? "http://localhost:3001",
     logLevel: rawEnv.LOG_LEVEL ?? "info",
     ethereum: {
-      rpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
-      chainId: isMainnet ? 1 : 11_155_111,
-      htlcEscrow: rawEnv[isMainnet ? "ETH_HTLC_ESCROW_MAINNET" : "ETH_HTLC_ESCROW_TESTNET"] ?? "",
-      resolverRegistry: rawEnv[isMainnet ? "ETH_RESOLVER_REGISTRY_MAINNET" : "ETH_RESOLVER_REGISTRY_TESTNET"] ?? "",
+      rpcUrl: chain.ethereum.rpcUrl,
+      chainId: chain.ethereum.chainId,
+      htlcEscrow: chain.ethereum.htlcEscrow ?? "",
+      resolverRegistry: chain.ethereum.resolverRegistry ?? "",
       resolverPrivateKey: rawEnv.RESOLVER_ETH_PRIVATE_KEY ?? "",
     },
     soroban: {
-      rpcUrl: rawEnv.SOROBAN_RPC_URL ?? (isMainnet ? "https://mainnet.sorobanrpc.com" : "https://soroban-testnet.stellar.org"),
-      horizonUrl: rawEnv.STELLAR_HORIZON_URL ?? (isMainnet ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org"),
-      networkPassphrase: isMainnet
-        ? "Public Global Stellar Network ; September 2015"
-        : "Test SDF Network ; September 2015",
-      htlc: rawEnv[isMainnet ? "SOROBAN_HTLC_MAINNET" : "SOROBAN_HTLC_TESTNET"] ?? "",
-      resolverRegistry: rawEnv[isMainnet ? "SOROBAN_RESOLVER_REGISTRY_MAINNET" : "SOROBAN_RESOLVER_REGISTRY_TESTNET"] ?? "",
+      rpcUrl: chain.soroban.rpcUrl,
+      horizonUrl: chain.soroban.horizonUrl,
+      networkPassphrase: chain.soroban.networkPassphrase,
+      htlc: chain.soroban.htlcContract ?? "",
+      resolverRegistry: chain.soroban.resolverRegistry ?? "",
       resolverSecret: rawEnv.RESOLVER_STELLAR_SECRET ?? "",
     },
   };

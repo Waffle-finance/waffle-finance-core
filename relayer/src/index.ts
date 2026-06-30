@@ -4,7 +4,7 @@
  */
 
 import { loadRelayerConfig } from '@wafflefinance/config/node';
-import { resolveEthereumRpcUrl } from '@wafflefinance/config';
+import { loadChainSettings, resolveEthereumRpcUrl } from '@wafflefinance/config';
 import { resolve } from 'path';
 import express from 'express';
 import cors from 'cors';
@@ -30,6 +30,12 @@ import {
 
 // Load and validate config using our shared package
 const parsedRelayerConfig = loadRelayerConfig();
+const testnetChainSettings = loadChainSettings('testnet', process.env, {
+  ethereumRpcUrl: resolveEthereumRpcUrl('testnet'),
+});
+const mainnetChainSettings = loadChainSettings('mainnet', process.env, {
+  ethereumRpcUrl: resolveEthereumRpcUrl('mainnet'),
+});
 
 // ✅ NETWORK-AWARE Dynamic Safety Deposit Helper Function
 function calculateDynamicSafetyDeposit(amountInWei: string | bigint, networkMode?: string): bigint {
@@ -82,24 +88,24 @@ function calculateDynamicSafetyDeposit(amountInWei: string | bigint, networkMode
 const NETWORK_CONFIG = {
   testnet: {
     ethereum: {
-      chainId: 11155111, // Sepolia
-      escrowFactory: '0x0ABa862Da2F004bCa6ce2990EbC0f77184B6d3a8', // NEW: Fresh EscrowFactory
-      htlcBridge: '0x3f42E2F5D4C896a9CB62D0128175180a288de38A', // NEW: Fresh HTLCBridge
+      chainId: testnetChainSettings.ethereum.chainId,
+      escrowFactory: testnetChainSettings.ethereum.escrowFactory,
+      htlcBridge: testnetChainSettings.ethereum.htlcBridge,
     },
     stellar: {
-      networkPassphrase: 'Test SDF Network ; September 2015',
-      horizonUrl: 'https://horizon-testnet.stellar.org',
+      networkPassphrase: testnetChainSettings.soroban.networkPassphrase,
+      horizonUrl: testnetChainSettings.soroban.horizonUrl,
     }
   },
   mainnet: {
     ethereum: {
-      chainId: 1, // Ethereum Mainnet
-      escrowFactory: '0xa7bcb4eac8964306f9e3764f67db6a7af6ddf99a', // 1inch Factory
-      htlcBridge: '0x87372d4bba85acf7c2374b4719a1020e507ab73e', // MainnetHTLC (DEPLOYED!)
+      chainId: mainnetChainSettings.ethereum.chainId,
+      escrowFactory: mainnetChainSettings.ethereum.escrowFactory,
+      htlcBridge: mainnetChainSettings.ethereum.htlcBridge,
     },
     stellar: {
-      networkPassphrase: 'Public Global Stellar Network ; September 2015',
-      horizonUrl: 'https://horizon.stellar.org',
+      networkPassphrase: mainnetChainSettings.soroban.networkPassphrase,
+      horizonUrl: mainnetChainSettings.soroban.horizonUrl,
     }
   }
 };
@@ -1073,7 +1079,7 @@ async function initializeRelayer() {
           beneficiary: normalizedEthAddress,
           refundAddress: normalizedEthAddress,
           safetyDeposit: actualSafetyDeposit.toString(),
-          chainId: 11155111, // Sepolia testnet
+          chainId: getNetworkConfig().ethereum.chainId,
           stellarTxHash: ethers.ZeroHash,
           isPartialFillEnabled: orderData.partialFillEnabled || false
         };
@@ -1670,7 +1676,7 @@ async function initializeRelayer() {
         });
         
         // Build transaction with dynamic network
-        const networkPassphrase = dynamicNetwork === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+        const networkPassphrase = getNetworkConfig(dynamicNetwork).stellar.networkPassphrase;
         const transaction = new TransactionBuilder(relayerAccount, {
           fee: BASE_FEE,
           networkPassphrase: networkPassphrase
@@ -2125,7 +2131,7 @@ async function initializeRelayer() {
             refundXlmAmount = storedOrder?.amount ? String(storedOrder.amount) : '0.1';
           }
 
-          const networkPassphraseForRefund = networkModeForRefund === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+          const networkPassphraseForRefund = getNetworkConfig(networkModeForRefund).stellar.networkPassphrase;
           const refundPayment = Operation.payment({
             destination: stellarAddress,
             asset: Asset.native(),
@@ -2269,7 +2275,7 @@ async function initializeRelayer() {
 
       // Build and send refund transaction
       const relayerAccount = await server.loadAccount(relayerPublicKey);
-      const networkPassphrase = refundNetwork === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+      const networkPassphrase = getNetworkConfig(refundNetwork).stellar.networkPassphrase;
 
       const refundPayment = Operation.payment({
         destination: stellarAddress,
@@ -2638,7 +2644,7 @@ async function initializeRelayer() {
             beneficiary: orderData.ethAddress,
             refundAddress: orderData.ethAddress,
             safetyDeposit: actualSafetyDeposit.toString(),
-            chainId: 11155111, // Sepolia
+            chainId: getNetworkConfig().ethereum.chainId,
             stellarTxHash: ethers.ZeroHash,
             isPartialFillEnabled: orderData.partialFillEnabled || false
           };
@@ -3106,7 +3112,7 @@ async function processEscrowToStellar(orderId: string, storedOrder: any) {
     // Build transaction
     const transaction = new TransactionBuilder(relayerAccount, {
       fee: BASE_FEE,
-      networkPassphrase: Networks.PUBLIC // Mainnet
+      networkPassphrase: stellarConfig.networkPassphrase
     })
       .addOperation(payment)
       .addMemo(Memo.text(`EscrowBridge:${orderId.substring(0, 20)}`))
