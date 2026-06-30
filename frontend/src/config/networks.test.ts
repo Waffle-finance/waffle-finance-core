@@ -1,12 +1,11 @@
 /**
  * Tests for network configuration helpers.
  *
- * In the Vitest environment VITE_MAINNET_ENABLED is not set, so
- * isMainnetEnabled() deterministically returns false. This makes
- * the tests stable without needing to patch import.meta.env.
+ * Vitest builds use the typed `test` feature defaults, where mainnet is
+ * disabled. This makes the tests stable without patching import.meta.env.
  *
  * Coverage:
- *  - isMainnetEnabled: returns false when env flag is absent
+ *  - isMainnetEnabled: returns the test build's injected mainnet flag
  *  - resolveNetworkMode: passes testnet through, clamps mainnet when disabled
  *  - isTestnet: returns true in the default (no-URL, no-env) test context
  */
@@ -15,8 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { isMainnetEnabled, resolveNetworkMode, isTestnet } from './networks';
 
 describe('isMainnetEnabled', () => {
-  it('returns false when VITE_MAINNET_ENABLED is not set in the test environment', () => {
-    // In Vitest, VITE_MAINNET_ENABLED is not provided, so the flag evaluates false.
+  it('returns false from the default test feature configuration', () => {
     expect(isMainnetEnabled()).toBe(false);
   });
 });

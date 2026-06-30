@@ -527,7 +527,7 @@ async function initializeRelayer() {
     wakeChainPollers();
   };
 
-  let ensureChainMonitoring: () => Promise<void> = async () => {
+  const ensureChainMonitoring: () => Promise<void> = async () => {
     if (chainMonitoringStarted) return;
     if (!chainMonitoringPromise) {
       chainMonitoringPromise = (async () => {
@@ -1407,7 +1407,7 @@ async function initializeRelayer() {
           console.log('🔍 DEBUG - Raw targetAmount:', storedOrder.targetAmount);
           
           // MORE AGGRESSIVE CLEANING - handle very large numbers
-          let cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
+          const cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
           let targetAmountNum = parseFloat(cleanTargetAmount);
           
           console.log('🔍 DEBUG - Parsed targetAmount:', targetAmountNum);
@@ -1890,7 +1890,7 @@ async function initializeRelayer() {
           console.log('🔍 DEBUG - Raw targetAmount (2nd endpoint):', storedOrder.targetAmount);
           
           // MORE AGGRESSIVE CLEANING - handle very large numbers
-          let cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
+          const cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
           let targetAmountNum = parseFloat(cleanTargetAmount);
           
           console.log('🔍 DEBUG - Parsed targetAmount (2nd endpoint):', targetAmountNum);
@@ -2442,7 +2442,7 @@ async function initializeRelayer() {
     }));
     
     // Function to create ETH HTLC after XLM payment received
-    async function createETHHTLCForOrder(orderData: any, orderId: string) {
+    const createETHHTLCForOrder = async (orderData: any, orderId: string) => {
       console.log('🏭 Creating ETH HTLC for verified XLM payment:', orderId);
       
       try {
@@ -2549,10 +2549,10 @@ async function initializeRelayer() {
         console.error('❌ ETH HTLC creation failed for order:', orderId, error);
         orderData.status = 'eth_htlc_failed';
       }
-    }
+    };
     
     // Function to create escrow for order
-    async function createEscrowForOrder(orderData: any, orderId: string, contract: ethers.Contract, wallet: ethers.Wallet) {
+    const createEscrowForOrder = async (orderData: any, orderId: string, contract: ethers.Contract, wallet: ethers.Wallet) => {
       try {
         console.log(`🏭 Creating escrow for order ${orderId}...`);
         
@@ -2661,7 +2661,7 @@ async function initializeRelayer() {
         console.error(`❌ Failed to create escrow for order ${orderId}:`, error);
         orderData.status = 'escrow_creation_failed';
       }
-    }
+    };
     
     // Dinamik event listeners - Mainnet vs Testnet
     //

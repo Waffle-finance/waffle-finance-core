@@ -21,11 +21,19 @@ const OTHER_ETH_ADDR = "0x8ba1f109551bD432803012645Hac136c8a3e5ea3";
 const VALID_STELLAR_ADDR = "GCKFBEIYTKP6H5HNCFLUOXO47ASPH7HY5PDXDDLGNJYQF5T4G2EWN5TB";
 const VALID_HASHLOCK_BASE = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
+async function createTestOrders(
+  repo: OrdersRepository,
+  count: number,
+  address: string,
+  startAt = 0
+): Promise<void> {
 async function createTestOrders(repo: OrdersRepository, count: number, address: string, startIndex = 0): Promise<void> {
   // Create orders with slight time differences to ensure proper ordering
   for (let i = 0; i < count; i++) {
     const input: AnnounceOrderInput = {
       direction: "eth_to_xlm",
+      hashlock:
+        VALID_HASHLOCK_BASE.slice(0, -4) + (startAt + i).toString(16).padStart(4, '0'),
       hashlock: VALID_HASHLOCK_BASE.slice(0, -4) + (startIndex + i).toString(16).padStart(4, '0'),
       srcChain: "ethereum",
       srcAddress: address,

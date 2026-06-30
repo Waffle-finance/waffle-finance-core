@@ -266,6 +266,8 @@ describe("POST /api/secrets/reveal", () => {
 describe("GET /api/orders/:id", () => {
   it("returns 404 with a message for an unknown order id", async () => {
     const app = await freshApp();
+    const unknownOrderId = `wf_0x${"0".repeat(64)}`;
+    const res = await request(app).get(`/api/orders/${unknownOrderId}`);
     const res = await request(app).get("/api/orders/wf_0x" + "0".repeat(64));
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("not_found");

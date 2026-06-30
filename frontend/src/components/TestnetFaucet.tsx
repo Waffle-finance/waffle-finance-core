@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useToast } from './Toast';
 import { getFaucets, isTestnet } from '../config/networks';
+import { featureFlags } from '../config/feature-flags';
 
 interface TestnetFaucetProps {
   ethAddress?: string;
@@ -12,7 +13,7 @@ export default function TestnetFaucet({ ethAddress, stellarAddress }: TestnetFau
   const toast = useToast();
 
   // Only show faucets on testnet
-  if (!isTestnet()) {
+  if (!featureFlags.testnetFaucets || !isTestnet()) {
     return null;
   }
 

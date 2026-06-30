@@ -178,6 +178,11 @@ export function loadResolverConfig(
     pollIntervalMs: rawEnv.RESOLVER_POLL_INTERVAL_MS ?? "15000",
     coordinatorUrl: rawEnv.COORDINATOR_URL ?? "http://localhost:3001",
     logLevel: rawEnv.LOG_LEVEL ?? "info",
+    rpc: {
+      maxRetries: rawEnv.RESOLVER_RPC_MAX_RETRIES ?? "5",
+      baseDelayMs: rawEnv.RESOLVER_RPC_BASE_DELAY_MS ?? "1000",
+      maxDelayMs: rawEnv.RESOLVER_RPC_MAX_DELAY_MS ?? "30000",
+    },
     ethereum: {
       rpcUrl: resolveEthereumRpcUrl(isMainnet ? "mainnet" : "testnet", rawEnv),
       chainId: isMainnet ? 1 : 11_155_111,

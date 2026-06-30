@@ -94,7 +94,7 @@ export class PostgresStatement {
       // Replace named parameters in order of appearance
       converted = converted.replace(/:(\w+)/g, (match, paramName) => {
         // If we've seen this parameter before, reuse its index
-        if (paramIndexMap.hasOwnProperty(paramName)) {
+        if (Object.prototype.hasOwnProperty.call(paramIndexMap, paramName)) {
           return `$${paramIndexMap[paramName]}`;
         }
 

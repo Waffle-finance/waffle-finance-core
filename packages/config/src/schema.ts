@@ -166,6 +166,11 @@ export const resolverConfigSchema = z.object({
   pollIntervalMs: z.coerce.number().int().positive().default(15000),
   coordinatorUrl: z.string().url().default("http://localhost:3001"),
   logLevel: logLevelSchema,
+  rpc: z.object({
+    maxRetries: z.coerce.number().int().positive().default(5),
+    baseDelayMs: z.coerce.number().int().nonnegative().default(1000),
+    maxDelayMs: z.coerce.number().int().positive().default(30000),
+  }),
   ethereum: z.object({
     rpcUrl: z.string().url(),
     chainId: z.number().int(),

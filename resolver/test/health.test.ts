@@ -16,6 +16,11 @@ const cfg: ResolverConfig = {
   pollIntervalMs: 15_000,
   coordinatorUrl: "http://localhost:3001",
   logLevel: "error",
+  rpc: {
+    maxRetries: 5,
+    baseDelayMs: 1000,
+    maxDelayMs: 30_000,
+  },
   ethereum: {
     rpcUrl: "https://ethereum.example/rpc",
     chainId: 11_155_111,

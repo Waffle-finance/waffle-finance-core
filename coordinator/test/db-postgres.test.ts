@@ -149,6 +149,7 @@ describe("PostgreSQL Database Compatibility", () => {
       dstAmount: "100000000"
     });
 
+    expect(order.publicId).toMatch(/^wf_0x[a-f0-9]{64}$/);
     expect(order.publicId).toMatch(/^wf_0x[0-9a-f]{64}$/);
     expect(order.status).toBe("announced");
     expect(order.hashlock).toBe(VALID_HASHLOCK);

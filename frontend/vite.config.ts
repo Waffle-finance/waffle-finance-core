@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
+import { resolveFeatureFlagConfig } from './src/config/feature-flag-definitions'
 
 const sdkSrc = path.resolve(__dirname, '../packages/sdk/src');
 
@@ -8,7 +9,8 @@ const sdkSrc = path.resolve(__dirname, '../packages/sdk/src');
 export default defineConfig(({ mode }) => {
   // Load env file based on `mode` in the current working directory.
   const env = loadEnv(mode, process.cwd(), '')
-  
+  const featureFlagConfig = resolveFeatureFlagConfig(mode, env)
+
   const isProduction = mode === 'production';
 
   return {
@@ -58,6 +60,8 @@ export default defineConfig(({ mode }) => {
       // Expose environment variables to the client
       __APP_VERSION__: JSON.stringify(process.env.npm_package_version),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+      __DEPLOYMENT_ENVIRONMENT__: JSON.stringify(featureFlagConfig.environment),
+      __FEATURE_FLAGS__: JSON.stringify(featureFlagConfig.flags),
     },
     // Environment variables validation
     envPrefix: 'VITE_',
@@ -76,4 +80,4 @@ export default defineConfig(({ mode }) => {
       setupFiles: './src/test/setup.ts',
     },
   }
-}) 
+})

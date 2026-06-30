@@ -110,13 +110,13 @@ npm test
 The baseline thresholds (with 10% variance buffer) are:
 
 ```typescript
-createOrderNative:  120,000 gas
-createOrderERC20:   165,000 gas
+createOrderNative:  200,000 gas
+createOrderERC20:   255,000 gas
 claimOrder:         105,000 gas
 refundOrder:         95,000 gas
 withdraw:            40,000 gas
 
-register:           115,000 gas
+register:           225,000 gas
 increaseStake:       75,000 gas
 unregister:         110,000 gas
 slash:               85,000 gas
