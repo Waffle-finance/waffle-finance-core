@@ -73,6 +73,9 @@ export function quotesRoutes(quotes: QuoteService): Router {
    * worst staleness across all pairs — if any pair is stale/fallback, the
    * UI should show a "prices may be stale" indicator.
    *
+   * Returns per-chain freshness info so the frontend can make granular
+   * decisions about which pair to refresh.
+   *
    * Response shape:
    *   {
    *     ethUsd:     number,
@@ -83,14 +86,21 @@ export function quotesRoutes(quotes: QuoteService): Router {
    *     source:     "coingecko" | "cache" | "fallback",
    *     staleness:  "fresh" | "stale" | "fallback",
    *     fetchedAt:  number,
-   *     ageMs:      number
+   *     ageMs:      number,
+   *     pairs: [
+   *       { pair, srcChain, dstChain, staleness, ageMs, source }
+   *     ]
    *   }
+   *
+   * Supports ?force=true to bypass the cache and force a fresh fetch.
    */
-  router.get("/prices", async (_req, res, next) => {
+  router.get("/prices", async (req, res, next) => {
     try {
+      const forceRefresh = req.query.force === "true";
+
       const [ethXlm, ethSol] = await Promise.all([
-        quotes.getQuote("ETH-XLM"),
-        quotes.getQuote("ETH-SOL"),
+        quotes.getQuote("ETH-XLM", { forceRefresh }),
+        quotes.getQuote("ETH-SOL", { forceRefresh }),
       ]);
 
       // Coerce nulls to fallback constants so the frontend always gets numbers
@@ -126,6 +136,24 @@ export function quotesRoutes(quotes: QuoteService): Router {
         staleness: worstStaleness,
         fetchedAt: oldestFetchedAt,
         ageMs: Date.now() - oldestFetchedAt,
+        pairs: [
+          {
+            pair: ethXlm.pair,
+            srcChain: ethXlm.srcChain,
+            dstChain: ethXlm.dstChain,
+            staleness: ethXlm.staleness,
+            ageMs: ethXlm.ageMs,
+            source: ethXlm.source,
+          },
+          {
+            pair: ethSol.pair,
+            srcChain: ethSol.srcChain,
+            dstChain: ethSol.dstChain,
+            staleness: ethSol.staleness,
+            ageMs: ethSol.ageMs,
+            source: ethSol.source,
+          },
+        ],
       });
     } catch (err) {
       next(err);
