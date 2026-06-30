@@ -29,12 +29,12 @@ const ORDER_REFUNDED = parseAbiItem(
   "event OrderRefunded(uint256 indexed orderId, address indexed caller, uint256 amount, uint256 safetyDeposit)"
 );
 
-/** How many Ethereum blocks ~24h covers at ~12s/block */
-const ETH_LOOKBACK_BLOCKS = 7_200n;
-/** Soroban ledger lookback (~5s/ledger, 24h) */
-const SOROBAN_LOOKBACK_LEDGERS = 17_280;
-/** Solana slot lookback (~400ms/slot, 24h) */
-const SOLANA_LOOKBACK_SLOTS = 216_000;
+/** How many Ethereum blocks ~48h covers at ~12s/block (increased from 24h for better recovery) */
+const ETH_LOOKBACK_BLOCKS = 14_400n;
+/** Soroban ledger lookback (~5s/ledger, 48h) */
+const SOROBAN_LOOKBACK_LEDGERS = 34_560;
+/** Solana slot lookback (~400ms/slot, 48h) */
+const SOLANA_LOOKBACK_SLOTS = 432_000;
 
 export interface ReconciliationStatus {
   lastRunAt: number | null;
@@ -79,6 +79,9 @@ export class Reconciler {
     let replayed = 0;
 
     try {
+      // Check for gaps between last processed block and current tip
+      await this.detectAndReportGaps();
+      
       replayed += await this.reconcileEthereum();
       replayed += await this.reconcileSoroban();
       replayed += await this.reconcileSolana();
@@ -93,6 +96,32 @@ export class Reconciler {
       reconciliationRuns.inc({ result: "failure" });
       reconciliationErrors.inc();
       this.log.error({ err }, "reconciliation run failed");
+    }
+  }
+
+  private async detectAndReportGaps(): Promise<void> {
+    // Ethereum gap detection
+    if (this.cfg.ethereum.htlcEscrow) {
+      const lastBlock = await this.orders.getLastProcessedBlock("ethereum");
+      const latest = await this.ethClient.getBlockNumber();
+      const gap = Number(latest) - lastBlock;
+      
+      if (gap > 100) {
+        this.log.warn({ chain: "ethereum", lastBlock, latest, gap }, "detected significant block gap");
+      }
+    }
+
+    // Soroban gap detection
+    if (this.cfg.soroban.htlcContract) {
+      const latestLedger = await this.sorobanServer.getLatestLedger();
+      // Note: We don't track last processed ledger per order, so this is a simplified check
+      this.log.debug({ latestLedger: latestLedger.sequence }, "soroban ledger tip");
+    }
+
+    // Solana gap detection
+    if (this.cfg.solana.programId && this.cfg.solana.programId !== "PLACEHOLDER") {
+      const slot = await this.solanaConn.getSlot(this.cfg.solana.commitment);
+      this.log.debug({ slot }, "solana slot tip");
     }
   }
 

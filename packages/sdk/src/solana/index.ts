@@ -51,6 +51,15 @@ import {
 // Re-export the status enum for consumers without pulling it into local scope.
 export { OrderStatus } from "./idl/htlc.js";
 
+// Import shared utilities for hex conversion and U64 LE serialisation.
+import {
+  bufferToHex as sharedBufferToHex,
+  writeU64LE as sharedWriteU64LE,
+  readU64LE as sharedReadU64LE,
+  readI64LE as sharedReadI64LE,
+  hex32ToBuffer,
+} from "../shared-utils/index.js";
+
 /** 0x-prefixed hex string (mirrors viem's HexString). */
 type HexString = `0x${string}`;
 
@@ -113,39 +122,12 @@ export type SolanaSigner = {
 export const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
 
 // ── Serialisation helpers ──────────────────────────────────────────────────
+// Using shared utilities from ../shared-utils/index.js
 
-/** Convert a 0x-prefixed hex string to a Buffer. */
-function hexToBuffer(hex: string): Buffer {
-  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return Buffer.from(clean, "hex");
-}
-
-/** Convert a Buffer to a 0x-prefixed hex string. */
-function bufferToHex(buf: Buffer | Uint8Array): HexString {
-  return ("0x" + Buffer.from(buf).toString("hex")) as HexString;
-}
-
-/** Write a u64 bigint as 8 little-endian bytes into a Buffer at `offset`. */
-function writeU64LE(buf: Buffer, value: bigint, offset: number): void {
-  const lo = Number(value & BigInt(0xffffffff));
-  const hi = Number(value >> BigInt(32));
-  buf.writeUInt32LE(lo, offset);
-  buf.writeUInt32LE(hi, offset + 4);
-}
-
-/** Read a u64 from 8 little-endian bytes. */
-function readU64LE(buf: Buffer, offset: number): bigint {
-  const lo = BigInt(buf.readUInt32LE(offset));
-  const hi = BigInt(buf.readUInt32LE(offset + 4));
-  return (hi << BigInt(32)) | lo;
-}
-
-/** Read a i64 from 8 little-endian bytes. */
-function readI64LE(buf: Buffer, offset: number): bigint {
-  const lo = BigInt(buf.readUInt32LE(offset));
-  const hi = BigInt(buf.readInt32LE(offset + 4)); // signed
-  return (hi << BigInt(32)) | lo;
-}
+const bufferToHex = sharedBufferToHex;
+const writeU64LE = sharedWriteU64LE;
+const readU64LE = sharedReadU64LE;
+const readI64LE = sharedReadI64LE;
 
 // ── PDA derivation ─────────────────────────────────────────────────────────
 
@@ -451,7 +433,7 @@ export class SolanaHTLCClient {
         "Cannot derive orderId in simulation mode — no programId configured."
       );
     }
-    const hashlockBytes = hexToBuffer(hashlockHex);
+    const hashlockBytes = hex32ToBuffer(hashlockHex, "hashlock");
     const [pda] = deriveOrderPda(hashlockBytes, this.programPk);
     return pda.toBase58();
   }
@@ -481,7 +463,7 @@ export class SolanaHTLCClient {
     }
 
     const programPk = this.programPk!;
-    const hashlockBytes = hexToBuffer(input.hashlockHex);
+    const hashlockBytes = hex32ToBuffer(input.hashlockHex, "hashlock");
     const nowSeconds = Math.floor(Date.now() / 1000);
     const timelockAbsolute = nowSeconds + input.timelockSeconds;
 
@@ -520,7 +502,7 @@ export class SolanaHTLCClient {
 
     const programPk = this.programPk!;
     const orderPda = new PublicKey(orderId);
-    const preimageBytes = hexToBuffer(preimage);
+    const preimageBytes = hex32ToBuffer(preimage, "preimage");
 
     const ix = buildClaimOrderInstruction(programPk, {
       claimer:            signer.publicKey,

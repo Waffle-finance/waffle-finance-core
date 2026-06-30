@@ -2,12 +2,14 @@ import type { Logger } from "pino";
 import {
   OrdersRepository,
   type OrderRow,
+  type OrderHistoryResult,
   type AnnounceOrderInput,
   type Chain
 } from "../persistence/orders-repo.js";
 import { canTransition } from "../state-machine/order-machine.js";
 import { ordersTotal } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
+import { HistoryCache } from "./history-cache.js";
 
 // Re-exported so existing importers (routes, services barrel) keep working
 // while the schema itself now lives in the shared validation module.
@@ -17,10 +19,22 @@ export type { AnnounceInput };
 export class OrderValidationError extends Error {}
 
 export class OrderService {
+  private readonly historyCache: HistoryCache;
+
   constructor(
     private readonly repo: OrdersRepository,
-    private readonly log: Logger
-  ) {}
+    private readonly log: Logger,
+    options: { enableCache?: boolean; cacheTtlMs?: number } = {}
+  ) {
+    // Initialize cache if enabled (default: enabled)
+    if (options.enableCache !== false) {
+      this.historyCache = new HistoryCache(log.child({ component: 'history-cache' }), {
+        ttlMs: options.cacheTtlMs
+      });
+    } else {
+      this.historyCache = new HistoryCache(log, { ttlMs: 0 }); // Disabled cache
+    }
+  }
 
   /**
    * Record a new order announcement. The coordinator does NOT lock any
@@ -45,6 +59,11 @@ export class OrderService {
       "order announced"
     );
     ordersTotal.inc({ status: "announced" });
+    
+    // Invalidate cache for both source and destination addresses
+    this.historyCache.invalidateAddress(order.srcAddress);
+    this.historyCache.invalidateAddress(order.dstAddress);
+    
     return order;
   }
 
@@ -54,6 +73,28 @@ export class OrderService {
 
   history(address: string, limit?: number, offset?: number): Promise<OrderRow[]> {
     return this.repo.findByAddress(address, limit, offset);
+  }
+
+  /**
+   * Get order history for an address using cursor-based pagination.
+   * More efficient and consistent than offset pagination for large datasets.
+   */
+  async historyWithCursor(address: string, limit = 50, cursor?: string): Promise<OrderHistoryResult> {
+    // Check cache first
+    const cached = this.historyCache.get(address, limit, cursor);
+    if (cached) {
+      this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache hit for history request");
+      return cached;
+    }
+
+    // Cache miss - fetch from database
+    this.log.debug({ address, limit, cursor: cursor || 'first' }, "Cache miss for history request");
+    const result = await this.repo.findByAddressWithCursor(address, limit, cursor);
+    
+    // Cache the result
+    this.historyCache.set(address, limit, cursor, result);
+    
+    return result;
   }
 
   findByHashlock(hashlock: string): Promise<OrderRow | null> {
@@ -79,6 +120,10 @@ export class OrderService {
     await this.repo.recordSrcLock(input);
     this.log.info({ publicId: input.publicId, srcOrderId: input.orderId }, "src lock recorded");
     ordersTotal.inc({ status: "src_locked" });
+    
+    // Invalidate cache for both addresses since order status changed
+    this.historyCache.invalidateAddress(order.srcAddress);
+    this.historyCache.invalidateAddress(order.dstAddress);
   }
 
   async recordDstLock(input: {
@@ -97,6 +142,10 @@ export class OrderService {
     await this.repo.recordDstLock(input);
     this.log.info({ publicId: input.publicId, dstOrderId: input.orderId }, "dst lock recorded");
     ordersTotal.inc({ status: "dst_locked" });
+    
+    // Invalidate cache for both addresses since order status changed
+    this.historyCache.invalidateAddress(order.srcAddress);
+    this.historyCache.invalidateAddress(order.dstAddress);
   }
 
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
@@ -108,6 +157,10 @@ export class OrderService {
     await this.repo.recordSecretRevealed({ publicId, preimage, txHash, encVersion });
     this.log.info({ publicId }, "secret recorded");
     ordersTotal.inc({ status: "secret_revealed" });
+    
+    // Invalidate cache for both addresses since order status changed
+    this.historyCache.invalidateAddress(order.srcAddress);
+    this.historyCache.invalidateAddress(order.dstAddress);
   }
 
   async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
@@ -119,6 +172,10 @@ export class OrderService {
     await this.repo.setStatus(publicId, status);
     this.log.info({ publicId, status }, "status updated");
     ordersTotal.inc({ status });
+    
+    // Invalidate cache for both addresses since order status changed
+    this.historyCache.invalidateAddress(order.srcAddress);
+    this.historyCache.invalidateAddress(order.dstAddress);
   }
 
   async rollbackSrcLock(publicId: string): Promise<void> {
@@ -167,5 +224,19 @@ export class OrderService {
       }
     }
     return count;
+  }
+
+  /**
+   * Get cache statistics for monitoring
+   */
+  getCacheStats() {
+    return this.historyCache.getStats();
+  }
+
+  /**
+   * Cleanup resources
+   */
+  destroy(): void {
+    this.historyCache.destroy();
   }
 }

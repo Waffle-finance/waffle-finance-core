@@ -161,6 +161,11 @@ export class PostgresStatement {
 
 // ── Migration metadata ───────────────────────────────────────────────────────
 
+// The latest migration file name.  Bump this whenever a new migration is
+// added so startup validation can detect databases that are missing
+// incremental changes.
+export const CURRENT_SCHEMA_VERSION = "006_stale_cleanup.sql";
+
 // Logical migrations that schema.sql covers, in application order.
 // These names are seeded into the schema_migrations table on first open of a
 // SQLite database.  The canonical names match the files under coordinator/migrations/.
@@ -182,7 +187,7 @@ const POSTGRES_MIGRATION_FILES = [
   "003_secret_encryption.sql",
   "004_query_optimizations.sql",
   "005_schema_migrations.sql",
-  "006_stale_cleanup.sql",
+  "006_stale_cleanup_postgres.sql",
 ] as const;
 
 // ── Public helpers ───────────────────────────────────────────────────────────
@@ -232,6 +237,92 @@ export async function getCurrentSchemaVersion(db: Database): Promise<string | nu
   return migrations.at(-1)?.migration ?? null;
 }
 
+/**
+ * The set of migration files expected for a given backend, in application
+ * order.  Callers compare this against the `schema_migrations` table to
+ * detect missing or out-of-order changes.
+ */
+function getExpectedMigrations(backend: "sqlite" | "postgres"): readonly string[] {
+  return backend === "sqlite" ? SQLITE_MIGRATIONS : POSTGRES_MIGRATION_FILES;
+}
+
+/**
+ * Validate that the database schema matches the coordinator's current
+ * expected version.  Throws on any incompatibility so the caller can
+ * fail fast before serving traffic.
+ *
+ * Checks performed:
+ *   1. `schema_migrations` table exists and is readable.
+ *   2. Every migration in the expected sequence has been applied.
+ *   3. Migrations appear in the correct (lexicographic / numeric prefix) order.
+ *   4. The latest applied migration matches `CURRENT_SCHEMA_VERSION`.
+ */
+export async function validateSchemaVersion(db: Database): Promise<void> {
+  const backend = isPostgresDatabase(db) ? "postgres" : "sqlite";
+  const expected = getExpectedMigrations(backend);
+
+  let applied: MigrationRecord[];
+  try {
+    applied = await queryMigrations(db);
+  } catch (err) {
+    throw new Error(
+      `Schema validation failed: could not read schema_migrations table. ` +
+      `The database may be from a newer version or corrupted. ` +
+      `Details: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  const appliedNames = applied.map((r) => r.migration);
+
+  // 1. Detect missing migrations
+  const missing = expected.filter((m) => !appliedNames.includes(m));
+  if (missing.length > 0) {
+    throw new Error(
+      `Database schema is behind the coordinator code. ` +
+      `Missing migrations: ${missing.join(", ")}. ` +
+      `Expected latest version: ${CURRENT_SCHEMA_VERSION}. ` +
+      `This can happen when a deployment runs an older binary against an ` +
+      `upgraded database.`
+    );
+  }
+
+  // 2. Detect extra migrations (applied but not known to this version)
+  const extra = appliedNames.filter((m) => !expected.includes(m));
+  if (extra.length > 0) {
+    throw new Error(
+      `Database schema is ahead of the coordinator code. ` +
+      `Unexpected migrations: ${extra.join(", ")}. ` +
+      `Expected latest version: ${CURRENT_SCHEMA_VERSION}. ` +
+      `Upgrade the coordinator binary before opening this database.`
+    );
+  }
+
+  // 3. Detect ordering problems
+  const sortedExpected = [...expected].sort();
+  const sortedApplied = [...appliedNames].sort();
+  if (
+    expected.length !== appliedNames.length ||
+    expected.some((m, i) => m !== appliedNames[i]) ||
+    sortedExpected.join(",") !== sortedApplied.join(",")
+  ) {
+    throw new Error(
+      `Migration history is out of order. ` +
+      `Expected order: ${expected.join(" -> ")}. ` +
+      `Found: ${appliedNames.join(" -> ")}. ` +
+      `Rollback is not supported; manual schema repair may be required.`
+    );
+  }
+
+  // 4. Verify latest version matches code constant
+  const latest = applied.at(-1)?.migration ?? null;
+  if (latest !== CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `Schema version mismatch. ` +
+      `Database latest: ${latest ?? "(none)"}, code expects: ${CURRENT_SCHEMA_VERSION}.`
+    );
+  }
+}
+
 // ── openDatabase ─────────────────────────────────────────────────────────────
 
 /**
@@ -246,11 +337,13 @@ export async function getCurrentSchemaVersion(db: Database): Promise<string | nu
  * both chains.
  */
 export async function openDatabase(url: string): Promise<Database> {
-  if (url.startsWith("postgres://") || url.startsWith("postgresql://")) {
-    return openPostgresDatabase(url);
-  } else {
-    return openSqliteDatabase(url);
-  }
+  const db =
+    url.startsWith("postgres://") || url.startsWith("postgresql://")
+      ? await openPostgresDatabase(url)
+      : openSqliteDatabase(url);
+
+  await validateSchemaVersion(db);
+  return db;
 }
 
 // ── SQLite ───────────────────────────────────────────────────────────────────
@@ -325,6 +418,8 @@ async function openPostgresDatabase(url: string): Promise<PostgresDatabase> {
       // Fallback to SQLite version if PostgreSQL-specific version doesn't exist.
       if (file === "002_solana_support_postgres.sql") {
         migration = readFileSync(resolve(migrationsDir, "002_solana_support.sql"), "utf8");
+      } else if (file === "006_stale_cleanup_postgres.sql") {
+        migration = readFileSync(resolve(migrationsDir, "006_stale_cleanup.sql"), "utf8");
       } else {
         throw new Error(`Migration file not found: ${file}`);
       }

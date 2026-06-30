@@ -70,6 +70,31 @@ describe('GET /health — basic contract', () => {
   });
 });
 
+describe('GET /healthz and /readyz', () => {
+  it('returns liveness independently of dependency health', async () => {
+    const app = makeApp();
+    const res = await supertest(app).get('/healthz');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.body.service).toBe('wafflefinance-relayer');
+  });
+
+  it('returns readiness checks for chain dependencies', async () => {
+    const app = makeApp();
+    const res = await supertest(app).get('/readyz');
+
+    expect([200, 503]).toContain(res.status);
+    expect(['ok', 'degraded']).toContain(res.body.status);
+    expect(res.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'ethereum_rpc' }),
+        expect.objectContaining({ name: 'stellar_rpc' }),
+      ])
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // /health — status codes
 // ---------------------------------------------------------------------------

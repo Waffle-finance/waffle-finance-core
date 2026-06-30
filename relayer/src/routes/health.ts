@@ -22,6 +22,46 @@ export interface HealthStatus {
   services: Array<{ name: string; status: string; lastCheck: number }>;
 }
 
+export interface ReadinessCheck {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  latencyMs?: number;
+}
+
+function basePayload(metrics: ReturnType<ReturnType<typeof getMonitor>['getMetrics']>) {
+  return {
+    timestamp: Date.now(),
+    uptime: metrics.uptime,
+    version: metrics.version,
+  };
+}
+
+function readinessChecks(): ReadinessCheck[] {
+  const monitor = getMonitor();
+  const metrics = monitor.getMetrics();
+  return [
+    {
+      name: 'ethereum_rpc',
+      ok: metrics.network.ethereum.connected,
+      detail: metrics.network.ethereum.connected ? 'ok' : 'unavailable',
+      latencyMs: metrics.network.ethereum.responseTime,
+    },
+    {
+      name: 'stellar_rpc',
+      ok: metrics.network.stellar.connected,
+      detail: metrics.network.stellar.connected ? 'ok' : 'unavailable',
+      latencyMs: metrics.network.stellar.responseTime,
+    },
+    ...metrics.services.map((service) => ({
+      name: service.name,
+      ok: service.status === 'healthy' || service.status === 'degraded',
+      detail: service.status,
+      latencyMs: service.responseTime,
+    })),
+  ];
+}
+
 export function healthRouter(): Router {
   const router = Router();
 
@@ -33,9 +73,7 @@ export function healthRouter(): Router {
 
       const body: HealthStatus = {
         status,
-        timestamp: Date.now(),
-        uptime: metrics.uptime,
-        version: metrics.version,
+        ...basePayload(metrics),
         services: metrics.services.map((s) => ({
           name: s.name,
           status: s.status,
@@ -53,6 +91,44 @@ export function healthRouter(): Router {
         version: 'unknown',
         services: [],
         error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  router.get('/healthz', (_req: Request, res: Response) => {
+    const metrics = getMonitor().getMetrics();
+    res.json({
+      status: 'ok',
+      service: 'wafflefinance-relayer',
+      ...basePayload(metrics),
+    });
+  });
+
+  router.get('/readyz', (_req: Request, res: Response) => {
+    try {
+      const metrics = getMonitor().getMetrics();
+      const checks = readinessChecks();
+      const ok = checks.every((check) => check.ok);
+      res.status(ok ? 200 : 503).json({
+        status: ok ? 'ok' : 'degraded',
+        service: 'wafflefinance-relayer',
+        ...basePayload(metrics),
+        checks,
+      });
+    } catch (err: unknown) {
+      res.status(503).json({
+        status: 'degraded',
+        service: 'wafflefinance-relayer',
+        timestamp: Date.now(),
+        uptime: 0,
+        version: 'unknown',
+        checks: [
+          {
+            name: 'readiness',
+            ok: false,
+            detail: err instanceof Error ? err.message : String(err),
+          },
+        ],
       });
     }
   });

@@ -14,6 +14,7 @@ import type { SecretService } from "../services/secret-service.js";
 import type { QuoteService } from "../services/quote-service.js";
 import type { ReconciliationStatus } from "../reconciliation/reconciler.js";
 import { requestIdMiddleware, REQUEST_ID_HEADER } from "./middleware/request-id.js";
+import { AbuseDetector } from "./middleware/abuse-detection.js";
 import { sanitizeForLog } from "../utils/sanitize-for-log.js";
 import { SecretRevealError } from "../services/secret-errors.js";
 
@@ -29,6 +30,12 @@ export interface AppDeps {
 
 export function createApp(deps: AppDeps): Express {
   const app = express();
+
+  // Shared abuse detector — tracks IPs hitting rate limits across multiple
+  // routes and surfaces enumeration / bot signals via Prometheus gauges and
+  // structured logs.
+  const abuseDetector = new AbuseDetector({ log: deps.log });
+
   // Request-ID middleware runs first so the ID is available to every subsequent
   // handler, including the pino-http logger which picks it up via the logger
   // mixin bound to the AsyncLocalStorage store.
@@ -71,9 +78,11 @@ export function createApp(deps: AppDeps): Express {
   );
   app.use(metricsRoutes(deps.log));
   // Pass the logger into route factories so rate-limit abuse events are
-  // surfaced through the application's structured log stream.
-  app.use("/api", ordersRoutes(deps.orders, deps.log));
-  app.use("/api", secretsRoutes(deps.secrets, deps.log));
+  // surfaced through the application's structured log stream.  The shared
+  // abuse detector is also threaded through so cross-route enumeration is
+  // tracked automatically.
+  app.use("/api", ordersRoutes(deps.orders, deps.log, abuseDetector));
+  app.use("/api", secretsRoutes(deps.secrets, deps.log, abuseDetector));
   // quotes routes expose /api/quotes/eth-xlm, /api/quotes/eth-sol, and
   // /api/prices (the aggregated endpoint consumed by the BridgeForm).
   app.use("/api", quotesRoutes(deps.quotes));

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { fetchWithRetry } from '../lib/fetchWithRetry';
 
 export interface Transaction {
   id: string;
@@ -206,7 +207,11 @@ export function useTransactionHistoryCache({
         if (ethAddress) params.set('eth', ethAddress);
         if (stellarAddress) params.set('stellar', stellarAddress);
 
-        const res = await fetcher(`${apiBase}/api/orders/history?${params.toString()}`);
+        const res = await fetchWithRetry(`${apiBase}/api/orders/history?${params.toString()}`, {
+          maxRetries: 2,
+          retryDelayMs: 1000,
+          fetcher,
+        });
         if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
 
         const body = await res.json();

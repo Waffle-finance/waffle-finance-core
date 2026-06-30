@@ -12,6 +12,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@wafflefinance/config": "workspace:*",
     "@wafflefinance/contracts": "workspace:*",
     "@wafflefinance/sdk": "workspace:*",
     "@rainbow-me/rainbowkit": "^1.3.0",

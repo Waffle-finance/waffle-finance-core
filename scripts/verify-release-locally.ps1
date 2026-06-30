@@ -56,6 +56,12 @@ if ($LASTEXITCODE -ne 0) { Write-Error-Message "Failed to install dependencies" 
 Write-Success "Dependencies installed"
 Write-Host ""
 
+Write-Info "Validating deployment artifacts..."
+pnpm run validate:deployments
+if ($LASTEXITCODE -ne 0) { Write-Error-Message "Deployment artifact validation failed" }
+Write-Success "Deployment artifacts validated"
+Write-Host ""
+
 # ========================================
 # Contract Artifact Verification
 # ========================================

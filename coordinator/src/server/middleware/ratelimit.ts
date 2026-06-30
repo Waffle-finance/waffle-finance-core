@@ -12,10 +12,14 @@
  *    the middleware safe for high-volume resolver integrations.
  *  - Abuse logging: every 429 response is logged at `warn` level with the
  *    offending IP and route so operators can detect enumeration or DoS attempts.
+ *  - Metrics: emits structured prometheus counters & histograms for every
+ *    decision so abuse patterns are surfaced in the monitoring stack.
  */
 
 import type { Request, Response, NextFunction } from "express";
 import type { Logger } from "pino";
+import { rateLimitDecisions, rateLimitWindowUsage } from "../../metrics.js";
+import type { AbuseDetector } from "./abuse-detection.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +43,11 @@ export interface RateLimitOptions {
    * When empty, X-Forwarded-For is IGNORED to prevent spoofing.
    */
   trustedProxies?: ReadonlySet<string>;
+  /**
+   * Optional abuse detector that tracks cross-route enumeration.
+   * When provided, blocked requests are reported for multi-route analysis.
+   */
+  abuseDetector?: AbuseDetector;
 }
 
 interface Bucket {
@@ -163,6 +172,7 @@ export function makeRateLimiter(opts: RateLimitOptions) {
     if (opts.apiKeys && opts.apiKeys.size > 0) {
       const token = extractBearerToken(req);
       if (token && opts.apiKeys.has(token)) {
+        rateLimitDecisions.inc({ route: opts.name, decision: "bypass" });
         return next();
       }
     }
@@ -174,6 +184,11 @@ export function makeRateLimiter(opts: RateLimitOptions) {
     // ── Bucket increment ────────────────────────────────────────────────────
     const bucket = store.increment(key, opts.windowMs);
 
+    // Record how full the window was before this request (as a ratio 0–1).
+    // This lets operators spot sustained near-limit traffic before blocks occur.
+    const usageRatio = Math.min(bucket.count / opts.max, 1);
+    rateLimitWindowUsage.observe({ route: opts.name }, usageRatio);
+
     // Set standard rate-limit headers (RFC 6585 / draft-ietf-httpapi-ratelimit).
     const remaining = Math.max(0, opts.max - bucket.count);
     const resetSecs = Math.ceil((bucket.resetAt - Date.now()) / 1000);
@@ -183,6 +198,11 @@ export function makeRateLimiter(opts: RateLimitOptions) {
 
     if (bucket.count > opts.max) {
       res.setHeader("Retry-After", resetSecs);
+
+      rateLimitDecisions.inc({ route: opts.name, decision: "block" });
+
+      // Report to the abuse detector for cross-route enumeration tracking.
+      opts.abuseDetector?.recordBlock({ ip, route: opts.name, timestamp: Date.now() });
 
       // Abuse log — contains route name and IP, never echoes user data.
       const msg = `[ratelimit] ${opts.name} — too many requests from ${ip} (${bucket.count}/${opts.max} in ${opts.windowMs}ms window)`;
@@ -200,6 +220,7 @@ export function makeRateLimiter(opts: RateLimitOptions) {
       return;
     }
 
+    rateLimitDecisions.inc({ route: opts.name, decision: "pass" });
     next();
   };
 }

@@ -4,6 +4,40 @@ export const registry = new Registry();
 
 collectDefaultMetrics({ register: registry, prefix: "coordinator_" });
 
+// ── Rate-limit & abuse analytics ──────────────────────────────────────────────
+
+/** Rate-limit decision (pass vs block) per route */
+export const rateLimitDecisions = new Counter({
+  name: "coordinator_rate_limit_decisions_total",
+  help: "Rate-limit decisions by route and outcome (pass|block)",
+  labelNames: ["route", "decision"] as const,
+  registers: [registry]
+});
+
+/** How close a request got to the limit (0 = empty bucket, 1 = at limit) */
+export const rateLimitWindowUsage = new Histogram({
+  name: "coordinator_rate_limit_window_usage_ratio",
+  help: "Bucket fullness ratio when each request arrives (0–1)",
+  labelNames: ["route"] as const,
+  buckets: [0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1],
+  registers: [registry]
+});
+
+/** Blocked IPs *actively* rate-limited in the last window (tracked by abuse detector) */
+export const rateLimitActiveBlocks = new Gauge({
+  name: "coordinator_rate_limit_active_blocks",
+  help: "Number of unique IPs currently rate-limited by route",
+  labelNames: ["route"] as const,
+  registers: [registry]
+});
+
+/** IPs that hit rate limits on ≥2 distinct routes within the abuse window */
+export const rateLimitMultiRouteAbusers = new Gauge({
+  name: "coordinator_rate_limit_multi_route_abusers",
+  help: "IPs hitting rate limits on multiple routes (enumeration signal)",
+  registers: [registry]
+});
+
 /** Total orders by status and direction labels */
 export const ordersTotal = new Counter({
   name: "coordinator_orders_total",

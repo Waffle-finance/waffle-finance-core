@@ -256,6 +256,9 @@ docker stop postgres-test && docker rm postgres-test
 
 # Health check
 curl http://localhost:3001/health
+
+# Seed demo data for local development
+pnpm --filter @wafflefinance/coordinator seed-demo
 ```
 
 The coordinator auto-applies schema migrations on startup. SQLite (`file:./wafflefinance.db`) requires no external database.

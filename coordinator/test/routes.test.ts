@@ -150,6 +150,8 @@ describe("POST /api/orders/announce", () => {
       .send(withoutHashlock);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
   });
 
   it("returns a structured 400 for a mismatched direction/chain combo", async () => {
@@ -159,6 +161,7 @@ describe("POST /api/orders/announce", () => {
       .send({ ...BASE_ANNOUNCE, srcChain: "solana", srcAddress: "11111111111111111111111111111111" });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
     expect(Array.isArray(res.body.details)).toBe(true);
     expect(res.body.details.some((d: { path: unknown[] }) => d.path.includes("srcChain"))).toBe(true);
   });
@@ -229,6 +232,7 @@ describe("POST /api/secrets/reveal", () => {
       });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("unknown_order");
+    expect(typeof res.body.message).toBe("string");
     expect(res.body.retryable).toBe(false);
     // The reveal error must never echo the submitted preimage.
     expect(JSON.stringify(res.body)).not.toContain("ab".repeat(32));
@@ -259,12 +263,25 @@ describe("POST /api/secrets/reveal", () => {
   });
 });
 
+describe("GET /api/orders/:id", () => {
+  it("returns 404 with a message for an unknown order id", async () => {
+    const app = await freshApp();
+    const res = await request(app).get("/api/orders/wf_0x" + "0".repeat(64));
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("not_found");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
+  });
+});
+
 describe("GET /api/secrets/:publicId", () => {
   it("returns 404 for an unknown publicId", async () => {
     const app = await freshApp();
     const res = await request(app).get("/api/secrets/doesnotexist");
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("not_revealed");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
   });
 
   it("returns 429 after the read rate limit (30/min) is exceeded", async () => {
@@ -348,6 +365,7 @@ describe("GET /api/orders/history", () => {
     const res = await request(app).get("/api/orders/history");
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
     expect(Array.isArray(res.body.details)).toBe(true);
   });
 

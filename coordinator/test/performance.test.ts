@@ -54,6 +54,9 @@ describe("OrdersRepository Performance", () => {
     console.log(`Query for ${VALID_ETH_ADDR} took ${(endQuery - startQuery).toFixed(4)}ms`);
     expect(results.length).toBe(50);
     
+    // Guardrail to avoid regressions: the optimized UNION query should be fast
+    expect(endQuery - startQuery).toBeLessThan(50);
+    
     // Verify indexes exist
     // @ts-ignore - access private db for verification
     const db = repo.db;

@@ -57,6 +57,18 @@ async function announce(repo: OrdersRepository): Promise<OrderRow> {
   return repo.announce(BASE_ORDER);
 }
 
+describe("OrdersRepository.announce", () => {
+  it("derives the public order id from the canonical hashlock", async () => {
+    const repo = await freshRepo();
+    const order = await repo.announce({
+      ...BASE_ORDER,
+      hashlock: "0x" + "A".repeat(64)
+    });
+
+    expect(order.publicId).toBe(`wf_${"0x" + "a".repeat(64)}`);
+  });
+});
+
 describe("OrdersRepository.recordSrcLock", () => {
   it("transitions announced -> src_locked and records lock fields", async () => {
     const repo = await freshRepo();
