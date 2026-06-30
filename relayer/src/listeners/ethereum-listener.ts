@@ -7,6 +7,9 @@ import { ethers, Contract, EventLog } from 'ethers';
 import { RELAYER_CONFIG } from '../index.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
 import { sanitizeForLog } from '../utils/sanitize-for-log.js';
+import { CursorStore } from '../utils/cursor-store.js';
+
+const CURSOR_LABEL = 'eth-listener';
 
 // Mock CrossChainOrder interface for now
 interface CrossChainOrder {
@@ -70,9 +73,11 @@ export class EthereumEventListener {
   private isPolling: boolean = false;
   private isActiveFn: () => boolean = () => true;
   private isAttentiveFn: () => boolean = () => true;
+  /** Persists the polling cursor to disk so restarts resume correctly. */
+  private readonly cursorStore: CursorStore;
 
-  constructor() {
-    // Lazy initialization - will be done in startListening()
+  constructor(cursorStore?: CursorStore) {
+    this.cursorStore = cursorStore ?? new CursorStore();
   }
 
   /** Wire idle/active gating before `startListening()`. */
@@ -131,11 +136,18 @@ export class EthereumEventListener {
       if (RELAYER_CONFIG.enableMockMode) {
         console.log('🧪 Mock mode: Simulating event listener (no real blockchain connection)');
       } else {
-        // Start from the current head — we only care about NEW orders,
-        // not history. Historical orders are surfaced via /api/orders.
-        this.lastProcessedBlock = await this.provider!.getBlockNumber();
+        // Restore persisted cursor so restarts resume scanning from where
+        // the relayer left off rather than starting at the current head and
+        // silently skipping blocks that arrived while it was offline.
+        const persisted = this.cursorStore.load(CURSOR_LABEL);
+        if (persisted !== null && typeof persisted === 'number') {
+          this.lastProcessedBlock = persisted;
+          console.log(`📦 Polling from persisted block ${this.lastProcessedBlock} forward`);
+        } else {
+          this.lastProcessedBlock = await this.provider!.getBlockNumber();
+          console.log(`📦 No persisted cursor — polling from block ${this.lastProcessedBlock} forward`);
+        }
         console.log(
-          `📦 Polling from block ${this.lastProcessedBlock} forward ` +
           `(active ${RELAYER_CONFIG.activePollIntervalMs / 1000}s / idle ${RELAYER_CONFIG.idlePollIntervalMs / 1000}s)`
         );
 
@@ -216,6 +228,11 @@ export class EthereumEventListener {
       }
 
       this.lastProcessedBlock = toBlock;
+      try {
+        this.cursorStore.save(CURSOR_LABEL, toBlock);
+      } catch (saveErr: any) {
+        console.warn('[eth-listener] failed to persist cursor:', saveErr?.message ?? saveErr);
+      }
     } catch (err: any) {
       // Don't advance the cursor — we'll retry the same window next
       // tick. Public RPCs occasionally return 429s or transient

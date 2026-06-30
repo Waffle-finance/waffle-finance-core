@@ -156,17 +156,28 @@ export class EthereumListener {
         event: ORDER_CLAIMED,
         fromBlock,
         onLogs: (logs) => {
-          const startedAt = Date.now();
-          for (const log of logs) {
-            if (log.blockNumber !== null) {
-              recordListenerProgress("ethereum", Number(log.blockNumber));
+          void (async () => {
+            const startedAt = Date.now();
+            for (const log of logs) {
+              if (log.blockNumber !== null) {
+                recordListenerProgress("ethereum", Number(log.blockNumber));
+              }
+              const orderId = log.args.orderId!.toString();
+              const preimage = log.args.preimage!;
+              this.log.info({ orderId, preimage }, "ETH order claimed");
+              try {
+                const order = await this.orders.findBySrcOrderId("ethereum", orderId);
+                if (!order) continue;
+                // Idempotent — service ignores if already secret_revealed
+                await this.orders.recordSecret(order.publicId, preimage, log.transactionHash ?? "0x");
+              } catch (err: any) {
+                if (!err?.message?.includes("cannot record")) {
+                  this.log.warn({ err, orderId }, "could not record ETH claimed secret");
+                }
+              }
             }
-            this.log.info(
-              { orderId: log.args.orderId!.toString(), preimage: log.args.preimage },
-              "ETH order claimed"
-            );
-          }
-          observeListenerEventProcessing("ethereum", "OrderClaimed", startedAt);
+            observeListenerEventProcessing("ethereum", "OrderClaimed", startedAt);
+          })();
         }
       })
     );
@@ -177,14 +188,27 @@ export class EthereumListener {
         event: ORDER_REFUNDED,
         fromBlock,
         onLogs: (logs) => {
-          const startedAt = Date.now();
-          for (const log of logs) {
-            if (log.blockNumber !== null) {
-              recordListenerProgress("ethereum", Number(log.blockNumber));
+          void (async () => {
+            const startedAt = Date.now();
+            for (const log of logs) {
+              if (log.blockNumber !== null) {
+                recordListenerProgress("ethereum", Number(log.blockNumber));
+              }
+              const orderId = log.args.orderId!.toString();
+              this.log.info({ orderId }, "ETH order refunded");
+              try {
+                const order = await this.orders.findBySrcOrderId("ethereum", orderId);
+                if (!order) continue;
+                // Idempotent — service ignores if already refunded/completed
+                await this.orders.markStatus(order.publicId, "refunded");
+              } catch (err: any) {
+                if (!err?.message?.includes("cannot transition")) {
+                  this.log.warn({ err, orderId }, "could not mark ETH order refunded");
+                }
+              }
             }
-            this.log.info({ orderId: log.args.orderId!.toString() }, "ETH order refunded");
-          }
-          observeListenerEventProcessing("ethereum", "OrderRefunded", startedAt);
+            observeListenerEventProcessing("ethereum", "OrderRefunded", startedAt);
+          })();
         }
       })
     );
