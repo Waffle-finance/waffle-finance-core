@@ -10,6 +10,7 @@ This document provides operational guidance for deploying, monitoring, and troub
 - [Pre-deployment Validation](#pre-deployment-validation)
 - [Service Dependencies](#service-dependencies)
 - [Incident Response](#incident-response)
+- [Postmortem Process](#postmortem-process)
 - [Rollback Procedures](#rollback-procedures)
 - [Monitoring Guide](#monitoring-guide)
 
@@ -179,6 +180,30 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 1. Check coordinator `SECRET_STORAGE_KEY` is set consistently
 2. Verify coordinator can reach both chains
 3. Run secret recovery via on-chain log replay (coordinator feature)
+
+---
+
+## Postmortem Process
+
+Any SEV-1 or SEV-2 incident that has resolved requires a postmortem. The postmortem must be opened within 24 hours of resolution and merged within eight business days.
+
+| Document | Purpose |
+|---|---|
+| [docs/postmortem/WORKFLOW.md](postmortem/WORKFLOW.md) | End-to-end postmortem process — roles, phases, deadlines, quality bar |
+| [docs/postmortem/TEMPLATE.md](postmortem/TEMPLATE.md) | Fill-in-the-blank postmortem document |
+| [docs/postmortem/examples/](postmortem/examples/) | Worked examples showing the template applied to real incidents |
+| [docs/BUG_TRIAGE.md](BUG_TRIAGE.md) | Severity definitions, triage workflow, and escalation path |
+
+### Quick reference
+
+1. Incident resolved → incident commander opens a `postmortem: YYYY-MM-DD <description>` GitHub issue within 24 h.
+2. Author copies `docs/postmortem/TEMPLATE.md` to `docs/postmortem/YYYY-MM-DD-<slug>.md` on a new branch.
+3. Draft completed within five business days.
+4. PR reviewed by ≥ 2 people and merged within eight business days.
+5. Every action item tracked as a GitHub issue with an owner and due date.
+6. 30-day follow-up to verify action items are on track.
+
+For severity definitions and how to route an active incident, see [Bug Triage](BUG_TRIAGE.md).
 
 ---
 
