@@ -297,6 +297,7 @@ export function useTransactionHistoryCache({
         const res = await fetchWithRetry(`${apiBase}/api/orders/history?${params.toString()}`, {
           maxRetries: 2,
           retryDelayMs: 1000,
+          fetcher,
         });
         if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
 

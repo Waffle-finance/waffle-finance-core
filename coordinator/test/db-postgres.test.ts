@@ -149,7 +149,7 @@ describe("PostgreSQL Database Compatibility", () => {
       dstAmount: "100000000"
     });
 
-    expect(order.publicId).toMatch(/^wf_0x[a-f0-9]{64}$/);
+    expect(order.publicId).toMatch(/^wf_0x[0-9a-f]{64}$/);
     expect(order.status).toBe("announced");
     expect(order.hashlock).toBe(VALID_HASHLOCK);
 
@@ -262,7 +262,7 @@ describe("PostgreSQL Database Compatibility", () => {
   testBoth("should rollback src lock from src_locked to announced", async (db) => {
     const repo = new OrdersRepository(db);
     const order = await repo.announce({
-      direction: "eth_to_xlm", hashlock: "0x" + "b".repeat(64),
+      direction: "eth_to_xlm", hashlock: "0x" + "8".repeat(64),
       srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
       srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
       dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
@@ -287,7 +287,7 @@ describe("PostgreSQL Database Compatibility", () => {
   testBoth("should rollback dst lock from dst_locked to src_locked", async (db) => {
     const repo = new OrdersRepository(db);
     const order = await repo.announce({
-      direction: "eth_to_xlm", hashlock: "0x" + "8".repeat(64),
+      direction: "eth_to_xlm", hashlock: "0x" + "9".repeat(64),
       srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
       srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
       dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
