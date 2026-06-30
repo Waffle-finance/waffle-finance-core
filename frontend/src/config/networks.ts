@@ -3,6 +3,7 @@
  */
 
 import { loadFrontendConfig } from '@wafflefinance/config';
+import { featureFlags } from './feature-flags';
 import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from './rpc-urls';
 
 export type AppNetworkMode = 'mainnet' | 'testnet';
@@ -15,7 +16,7 @@ export const frontendConfig = loadFrontendConfig((import.meta as any).env || {})
  * Re-enable with VITE_MAINNET_ENABLED=true (post v2 audit / mainnet launch).
  */
 export const isMainnetEnabled = (): boolean => {
-  return frontendConfig.mainnetEnabled;
+  return featureFlags.mainnet;
 };
 
 /** Clamp requested mode when mainnet is temporarily disabled. */
@@ -206,7 +207,7 @@ export const getContractAddresses = () => {
 
 export const getFaucets = () => {
   const networkName = (import.meta as any).env?.VITE_NETWORK || 'testnet';
-  if (networkName === 'mainnet') {
+  if (networkName === 'mainnet' || !featureFlags.testnetFaucets) {
     return { ethereum: [], stellar: [] };
   }
   return {
@@ -215,4 +216,4 @@ export const getFaucets = () => {
   };
 };
 
-export const isTestnet = () => readNetworkNameFromEnvOrUrl() !== 'mainnet'; 
+export const isTestnet = () => readNetworkNameFromEnvOrUrl() !== 'mainnet';

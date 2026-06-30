@@ -72,7 +72,7 @@ export function expireAbandonedOrders(
     const status = order?.status;
     if (!status || !PRE_DEPOSIT_STATUSES.has(status)) continue;
     const createdMs = parseOrderCreatedMs(order.created);
-    if (createdMs == null || now - createdMs < maxAgeMs) continue;
+    if (createdMs === null || createdMs === undefined || now - createdMs < maxAgeMs) continue;
     order.status = 'expired';
     count++;
   }

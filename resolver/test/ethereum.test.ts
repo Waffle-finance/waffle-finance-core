@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EthereumListener } from '../src/listeners/ethereum.js';
+import type { ResolverConfig } from '../src/config.js';
 import pino from 'pino';
 
 const mockWatchEvent = vi.fn();
@@ -15,7 +16,9 @@ vi.mock('viem', async (importOriginal) => {
 
 describe('EthereumListener lifecycle', () => {
   const logger = pino({ level: 'silent' });
-  const cfg = { chainId: 1, rpcUrl: 'http://localhost:8545', htlcEscrow: '0x123' as const };
+  const cfg = {
+    ethereum: { chainId: 1, rpcUrl: 'http://localhost:8545', htlcEscrow: '0x123' },
+  } as ResolverConfig;
 
   beforeEach(() => {
     vi.clearAllMocks();

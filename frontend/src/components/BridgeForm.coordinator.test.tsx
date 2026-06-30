@@ -100,7 +100,7 @@ beforeEach(() => {
   Object.defineProperty(window, 'ethereum', { value: mockEthereum, writable: true, configurable: true });
   mockEthereum.request.mockImplementation((req: { method: string }) => {
     if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
-    if (req.method === 'eth_getBalance') return Promise.resolve('0x38D7EA4C68000');
+    if (req.method === 'eth_getBalance') return Promise.resolve('0x8AC7230489E80000');
     return Promise.resolve(null);
   });
   vi.spyOn(console, 'error').mockImplementation(() => {});

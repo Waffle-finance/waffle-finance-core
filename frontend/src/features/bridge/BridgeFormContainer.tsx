@@ -7,6 +7,7 @@ import {
   Memo
 } from '@stellar/stellar-sdk';
 import { isTestnet, getCurrentNetwork } from '../../config/networks';
+import { featureFlags } from '../../config/feature-flags';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
@@ -182,7 +183,6 @@ const PRODUCTION_API_BASE_URL = 'https://oversync-k36vx.ondigitalocean.app';
 const API_BASE_URL = import.meta.env.PROD
   ? ''
   : import.meta.env.VITE_API_BASE_URL || PRODUCTION_API_BASE_URL;
-const ENABLE_MOCK_DATA = import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
 
 export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, signStellarTransaction }: BridgeFormProps): React.JSX.Element {
   const [direction, setDirection] = useState<BridgeDirection>('eth_to_xlm');
@@ -890,7 +890,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             } else {
               console.error('❌ Processing request failed:', processResponse.status);
 
-              if (ENABLE_MOCK_DATA) {
+              if (featureFlags.mockData) {
                 console.log('🧪 Mock data enabled: showing success despite processing failure');
                 updateTransactionStatus(result.orderId, 'completed');
                 setStatusMessage('Completed ✅');
@@ -906,7 +906,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           } catch (processError) {
             console.error('❌ Processing request error:', processError);
 
-            if (ENABLE_MOCK_DATA) {
+            if (featureFlags.mockData) {
               console.log('🧪 Mock data enabled: showing success despite processing error');
               updateTransactionStatus(result.orderId, 'completed');
               setStatusMessage('Completed ✅');
@@ -1599,4 +1599,3 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     </div>
   );
 }
-

@@ -1,4 +1,4 @@
-import type React from 'react';
+import type { JSX } from 'react';
 import BridgeFormContainer, {
   getUnsupportedRouteReason,
   type BridgeFormProps,
@@ -12,7 +12,7 @@ import BridgeFormContainer, {
  * bridge business logic should be added to feature hooks/helpers instead of
  * expanding this wrapper.
  */
-export default function BridgeForm(props: BridgeFormProps): React.JSX.Element {
+export default function BridgeForm(props: BridgeFormProps): JSX.Element {
   return <BridgeFormContainer {...props} />;
 }
 

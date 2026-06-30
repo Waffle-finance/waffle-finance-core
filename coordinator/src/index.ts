@@ -71,11 +71,9 @@ async function main(): Promise<void> {
   const ethListener = new EthereumListener(cfg, orders, log);
   const sorobanListener = new SorobanListener(cfg, orders, log);
   const solanaListener = new SolanaListener(cfg, orders, log);
-  await Promise.all([
-    retryAsync(() => ethListener.start()),
-    retryAsync(() => sorobanListener.start()),
-    retryAsync(() => solanaListener.start()),
-  ]);
+  ethListener.start();
+  sorobanListener.start();
+  solanaListener.start();
 
   const shutdown = async (signal: string) => {
     log.info({ signal }, "shutting down");

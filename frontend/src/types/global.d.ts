@@ -1,8 +1,13 @@
+import type { DeploymentEnvironment, FeatureFlags } from '../config/feature-flag-definitions';
+
 export {};
 
 // ─── Window / browser globals ────────────────────────────────────────────────
 
 declare global {
+  const __DEPLOYMENT_ENVIRONMENT__: DeploymentEnvironment;
+  const __FEATURE_FLAGS__: Readonly<FeatureFlags>;
+
   interface Window {
     ethereum?: {
       request: (args: { method: string; params?: any[] }) => Promise<any>;
@@ -33,10 +38,15 @@ declare global {
     readonly VITE_ETHEREUM_RPC_URL: string;
     readonly VITE_STELLAR_HORIZON_URL: string;
     readonly VITE_NETWORK_MODE: string;
-    readonly VITE_MAINNET_ENABLED: string;
-    readonly VITE_ENABLE_TESTNET_FAUCETS: string;
-    readonly VITE_ENABLE_DEBUG_MODE: string;
-    readonly VITE_ENABLE_MOCK_DATA: string;
+    readonly VITE_DEPLOYMENT_ENV?: DeploymentEnvironment;
+    readonly VITE_FEATURE_MAINNET?: 'true' | 'false';
+    readonly VITE_FEATURE_TESTNET_FAUCETS?: 'true' | 'false';
+    readonly VITE_FEATURE_DEBUG_MODE?: 'true' | 'false';
+    readonly VITE_FEATURE_MOCK_DATA?: 'true' | 'false';
+    readonly VITE_MAINNET_ENABLED?: 'true' | 'false';
+    readonly VITE_ENABLE_TESTNET_FAUCETS?: 'true' | 'false';
+    readonly VITE_ENABLE_DEBUG_MODE?: 'true' | 'false';
+    readonly VITE_ENABLE_MOCK_DATA?: 'true' | 'false';
     readonly VITE_INFURA_API_KEY: string;
     readonly VITE_ONEINCH_API_KEY: string;
   }

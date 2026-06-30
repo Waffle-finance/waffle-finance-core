@@ -9,6 +9,7 @@ import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
 import { isMainnetEnabled } from './config/networks'
+import { featureFlags } from './config/feature-flags'
 import NetworkMismatchBanner from './components/NetworkMismatchBanner'
 import MainnetVersionBanner from './components/MainnetVersionBanner'
 import {
@@ -237,17 +238,19 @@ function App() {
           </div>
 
           <div className="flex items-center gap-2 md:gap-2.5">
-            <nav className="hidden items-center gap-2 md:flex">
-              <a
-                href="https://www.alchemy.com/faucets/ethereum-sepolia"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-[#4f6bff]/40 hover:bg-[#4f6bff]/10 hover:text-white"
-              >
-                Faucet
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            </nav>
+            {featureFlags.testnetFaucets && currentNetwork === 'testnet' && (
+              <nav className="hidden items-center gap-2 md:flex">
+                <a
+                  href="https://www.alchemy.com/faucets/ethereum-sepolia"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-[#4f6bff]/40 hover:bg-[#4f6bff]/10 hover:text-white"
+                >
+                  Faucet
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </nav>
+            )}
 
             {isMainnetEnabled() ? (
               <button
@@ -626,4 +629,3 @@ function App() {
 }
 
 export default App;
-

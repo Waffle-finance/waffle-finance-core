@@ -87,7 +87,7 @@ export interface WatchdogConfig {
 function toMillis(
   value: WatchdogOrder['xlmReceivedAt'] | WatchdogOrder['created']
 ): number | null {
-  if (value == null) return null;
+  if (value === null || value === undefined) return null;
   if (typeof value === 'number') return value > 1e12 ? value : value * 1000;
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : null;

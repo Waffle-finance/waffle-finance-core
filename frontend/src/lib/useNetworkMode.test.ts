@@ -17,6 +17,7 @@
 
 import { renderHook, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import type * as Networks from '../config/networks';
 
 // Keep freighter silent — Freighter API is not available in jsdom.
 vi.mock('@stellar/freighter-api', () => ({
@@ -28,7 +29,7 @@ vi.mock('@stellar/freighter-api', () => ({
 
 // Control the mainnet gate — default to disabled (mirrors CI/test env).
 vi.mock('../config/networks', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../config/networks')>();
+  const actual = await importOriginal<typeof Networks>();
   return {
     ...actual,
     isMainnetEnabled: vi.fn(() => false),

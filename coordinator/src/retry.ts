@@ -26,7 +26,7 @@ export async function retryAsync<T>(
   } = opts;
 
   let attempt = 0;
-  while (true) {
+  for (;;) {
     try {
       return await fn();
     } catch (err) {

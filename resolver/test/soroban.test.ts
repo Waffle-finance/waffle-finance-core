@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SorobanListener } from '../src/listeners/soroban.js';
+import type { ResolverConfig } from '../src/config.js';
 import pino from 'pino';
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
@@ -19,7 +20,10 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
 
 describe('SorobanListener lifecycle', () => {
   const logger = pino({ level: 'silent' });
-  const cfg = { htlc: 'CABC', rpcUrl: 'http://localhost:8000', networkPassphrase: 'Test', chainId: 'testnet' };
+  const cfg = {
+    soroban: { htlc: 'CABC', rpcUrl: 'http://localhost:8000' },
+    rpc: { maxRetries: 1, baseDelayMs: 0, maxDelayMs: 1 },
+  } as ResolverConfig;
 
   beforeEach(() => {
     vi.clearAllMocks();
