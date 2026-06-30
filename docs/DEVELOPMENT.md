@@ -24,6 +24,8 @@ This guide covers every path from a fresh checkout to a running local stack — 
 
 ---
 
+---
+
 ## Stack overview
 
 | Layer | Language / Runtime | Toolchain |
@@ -446,3 +448,10 @@ cp env.example .env
 ### Slow `cargo build` on first run
 
 Soroban SDK dependencies are large. Cargo's download + compile pass typically takes 3–5 minutes on first build; subsequent builds use the incremental cache. The dev container pre-warms this cache during image build.
+
+---
+
+## See also
+
+- [`docs/OPERATIONS.md`](OPERATIONS.md) — deployment checklists, incident response runbooks, and monitoring guidance.
+- [`docs/TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md) — service-level technical debt register: known architectural gaps, planned improvements, and mainnet readiness blockers. If you discover a gap or limitation while working on a feature, please add it there.

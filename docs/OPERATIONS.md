@@ -12,6 +12,7 @@ This document provides operational guidance for deploying, monitoring, and troub
 - [Incident Response](#incident-response)
 - [Rollback Procedures](#rollback-procedures)
 - [Monitoring Guide](#monitoring-guide)
+- [See Also](#see-also)
 
 ---
 
@@ -305,3 +306,10 @@ curl "$COORDINATOR_URL/orders/history?address=0x742d35cF0b7bbF6E175239d74a0e0a3d
 # Get specific order
 curl "$COORDINATOR_URL/orders/demo-xxx" | jq
 ```
+
+---
+
+## See Also
+
+- [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) — local setup, per-package commands, and troubleshooting.
+- [`docs/TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md) — service-level technical debt register. Known operational gaps (lazy listener startup, hardcoded price oracle, missing distributed tracing) are tracked there with proposed next steps.
