@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { RefundDialog } from './RefundDialog';
 import { makeEthereumHTLCClient } from '../../lib/sdk-context';
 import { useNetworkMode } from '../../lib/useNetworkMode';
-import { Address } from 'viem';
+import type { Address } from 'viem';
 import { vi } from 'vitest';
 
 // Mock the makeEthereumHTLCClient function

@@ -6,6 +6,7 @@ import {
   parseEventLogs
 } from "viem";
 import { HTLC_ESCROW_ABI } from "./abi.js";
+import { escrowNativeValue } from "../shared-utils/index.js";
 
 export { HTLC_ESCROW_ABI } from "./abi.js";
 
@@ -45,6 +46,8 @@ export interface OrderData {
   status: 0 | 1 | 2;
   preimageKeccak: Hex;
 }
+
+const NATIVE_ETH_TOKEN = "0x0000000000000000000000000000000000000000";
 
 /**
  * Type-safe wrapper around the WaffleFinance `HTLCEscrow` contract.
@@ -100,10 +103,12 @@ export class EthereumHTLCClient {
     if (!account) {
       throw new Error("walletClient.account is required to send transactions");
     }
-    const value =
-      input.token === "0x0000000000000000000000000000000000000000"
-        ? input.amount + input.safetyDeposit
-        : input.safetyDeposit;
+    const value = escrowNativeValue({
+      token: input.token,
+      nativeToken: NATIVE_ETH_TOKEN,
+      amount: input.amount,
+      safetyDeposit: input.safetyDeposit
+    });
 
     const { request, result } = await this.publicClient.simulateContract({
       address: this.address,

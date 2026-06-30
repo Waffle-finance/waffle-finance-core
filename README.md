@@ -157,11 +157,16 @@ cd soroban && cargo test && cd ..
 # Start coordinator
 pnpm --filter @wafflefinance/coordinator dev
 
+# Seed with demo data for local development (optional)
+pnpm --filter @wafflefinance/coordinator seed-demo
+
 # Start frontend
 pnpm --filter @wafflefinance/frontend dev
 ```
 
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for per-package commands, PostgreSQL setup, Stellar contract deployment, and troubleshooting notes.
+
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for deployment checklists, incident response runbooks, and monitoring guidance.
 
 ---
 
@@ -241,6 +246,8 @@ All suites gate every pull request via GitHub Actions.
 ---
 
 ## Key environment variables
+
+All environment variables across the monorepo packages are consolidated and validated using the shared `@wafflefinance/config` package (under `packages/config`). Invalid or missing values fail fast with clear, actionable validation messages at startup.
 
 | Variable | Used by | Description |
 |---|---|---|

@@ -6,7 +6,7 @@ import {
 } from "viem";
 import { sepolia, mainnet } from "viem/chains";
 import { type Logger } from "pino";
-import type { EthereumConfig } from "../config.js";
+import type { ResolverConfig } from "../config.js";
 
 /**
  * Stream HTLCEscrow events from the configured Ethereum chain.
@@ -19,29 +19,29 @@ import type { EthereumConfig } from "../config.js";
 export class EthereumListener {
   private readonly client: PublicClient;
   private readonly log: Logger;
-  private readonly cfg: EthereumConfig;
+  private readonly cfg: ResolverConfig;
   private unwatchOrderCreated?: () => void;
   private unwatchOrderClaimed?: () => void;
   private unwatchOrderRefunded?: () => void;
 
-  constructor(cfg: EthereumConfig, log: Logger) {
+  constructor(cfg: ResolverConfig, log: Logger) {
     this.cfg = cfg;
     this.log = log.child({ component: "EthereumListener" });
     this.client = createPublicClient({
-      chain: cfg.chainId === 1 ? mainnet : sepolia,
-      transport: http(cfg.rpcUrl)
+      chain: cfg.ethereum.chainId === 1 ? mainnet : sepolia,
+      transport: http(cfg.ethereum.rpcUrl)
     });
   }
 
   async start(handlers: EthereumEventHandlers): Promise<void> {
-    if (!this.cfg.htlcEscrow) {
+    if (!this.cfg.ethereum.htlcEscrow) {
       this.log.warn("ETH_HTLC_ESCROW address not configured — skipping Ethereum listener");
       return;
     }
     await this.stop();
 
-    const address = this.cfg.htlcEscrow;
-    this.log.info({ chainId: this.cfg.chainId, contract: address }, "starting Ethereum listener");
+    const address = this.cfg.ethereum.htlcEscrow;
+    this.log.info({ chainId: this.cfg.ethereum.chainId, contract: address }, "starting Ethereum listener");
 
     const orderCreated = parseAbiItem(
       "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"

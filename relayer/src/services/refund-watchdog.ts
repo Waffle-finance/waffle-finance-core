@@ -146,7 +146,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           const stellarAddress = order.stellarAddress;
           if (!stellarAddress) {
             console.warn(
-              `[refund-watchdog] order ${orderId} stuck but missing` +
+              `[refund-watchdog] orderId=${orderId} stuck but missing` +
               ` stellarAddress; skipping`
             );
             watchdogRefundFailureTotal.inc({
@@ -157,7 +157,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           }
 
           console.log(
-            `[refund-watchdog] refunding ${orderId}` +
+            `[refund-watchdog] orderId=${orderId} refunding` +
             ` — pending for ${Math.round(age / 1000)}s,` +
             ` stellarTx=${order.stellarTxHash}`
           );
@@ -179,7 +179,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           watchdogRefundSuccessTotal.inc({ network_mode: config.networkMode });
 
           console.log(
-            `[refund-watchdog] ✅ refunded ${refund.amount} XLM` +
+            `[refund-watchdog] ✅ orderId=${orderId} refunded ${refund.amount} XLM` +
             ` → ${stellarAddress} (tx=${refund.hash})`
           );
         } catch (err: unknown) {
@@ -194,7 +194,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           });
 
           console.error(
-            `[refund-watchdog] ❌ failed to refund ${orderId}:`,
+            `[refund-watchdog] ❌ orderId=${orderId} failed to refund:`,
             safeErr instanceof Error ? safeErr.message : safeErr
           );
         }

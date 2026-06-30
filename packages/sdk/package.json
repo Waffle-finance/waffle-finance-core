@@ -54,6 +54,10 @@
     "./solana/adapter": {
       "import": "./dist/solana/adapter.js",
       "types": "./dist/solana/adapter.d.ts"
+    },
+    "./shared-utils": {
+      "import": "./dist/shared-utils/index.js",
+      "types": "./dist/shared-utils/index.d.ts"
     }
   },
   "files": [

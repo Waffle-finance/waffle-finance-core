@@ -38,6 +38,9 @@ jobs:
       - name: Validate Workspace (Manifests and Exports)
         run: pnpm run validate:manifests
 
+      - name: Validate Deployment Artifacts
+        run: pnpm run validate:deployments
+
       - name: Typecheck — SDK
         run: pnpm --filter @wafflefinance/sdk exec tsc --noEmit
 

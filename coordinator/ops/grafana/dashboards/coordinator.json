@@ -93,6 +93,85 @@
           "legendFormat": "heap MB"
         }
       ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Rate Limit Block Rate (5m)",
+      "gridPos": { "x": 6, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(rate(coordinator_rate_limit_decisions_total{decision=\"block\"}[5m]))",
+          "legendFormat": "blocks/sec"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["mean"] } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": 0 }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 2 } ] }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Active Blocked IPs",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(coordinator_rate_limit_active_blocks)",
+          "legendFormat": "IPs"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": 0 }, { "color": "yellow", "value": 20 }, { "color": "red", "value": 50 } ] }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Multi-Route Abusers",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "coordinator_rate_limit_multi_route_abusers",
+          "legendFormat": "IPs"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": 0 }, { "color": "red", "value": 1 } ] }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Rate Limit Blocks by Route",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(coordinator_rate_limit_decisions_total{decision=\"block\"}[1m])) by (route)",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Rate Limit Window Usage (p95 per route)",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(coordinator_rate_limit_window_usage_ratio_bucket[5m])) by (le, route))",
+          "legendFormat": "p95 {{route}}"
+        }
+      ]
     }
   ]
 }

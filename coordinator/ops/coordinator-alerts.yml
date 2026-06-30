@@ -323,6 +323,102 @@ groups:
 
 ---
 
+  - name: coordinator_rate_limit
+    interval: 30s
+    rules:
+      - alert: RateLimitBurstTraffic
+        expr: |
+          sum(rate(coordinator_rate_limit_decisions_total{decision="block"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "Sustained rate-limit blocks ({{ $value | humanize }}/sec over 5m)"
+          description: |
+            More than 1 request/sec is being rate-limited across all routes.
+            Possible client misbehaviour, bot traffic, or DoS attempt.
+
+            **Investigate**:
+            - coordinator_rate_limit_decisions_total{decision="block"} by (route)
+            - coordinator_http_request_duration_seconds_count by (route, status_code)
+            - Application logs for repeated 429 responses
+            - If from a single IP, consider a temporary block
+
+      - alert: RateLimitPerRouteSpike
+        expr: |
+          rate(coordinator_rate_limit_decisions_total{decision="block"}[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "Rate-limit spike on {{ $labels.route }} ({{ $value | humanize }}/sec)"
+          description: |
+            Sustained 429 rate on {{ $labels.route }}.
+            Check if a resolver is misconfigured or credentials are compromised.
+
+            **Route**: {{ $labels.route }}
+            **Actions**:
+            1. Review logs for the offending IP(s)
+            2. Verify API keys are not exposed
+            3. Check for automated scanning / enumeration
+
+      - alert: RateLimitBlockRateHigh
+        expr: |
+          sum(rate(coordinator_rate_limit_decisions_total{decision="block"}[5m]))
+          /
+          sum(rate(coordinator_rate_limit_decisions_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: ">10% of rate-limited requests are being blocked ({{ $value | humanizePercentage }})"
+          description: |
+            A high proportion of requests are exceeding rate limits.
+            This may indicate brute-force or enumeration patterns.
+
+            **Impact**: Legitimate users may see 429 errors.
+            **Investigate**: Check abuse detector metrics and application logs.
+
+      - alert: RateLimitMultiRouteAbuse
+        expr: coordinator_rate_limit_multi_route_abusers > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "{{ $value | humanize }} IP(s) hitting rate limits on multiple routes — possible enumeration"
+          description: |
+            One or more IPs have been rate-limited on 2+ distinct routes within
+            the abuse-detection window. This is consistent with enumeration,
+            credential stuffing, or API scanning.
+
+            **Check**:
+            - Application logs for `[abuse]` entries
+            - coordinator_rate_limit_active_blocks by route
+            - Route access patterns for the offending IPs
+
+      - alert: RateLimitActiveBlocksHigh
+        expr: sum(coordinator_rate_limit_active_blocks) > 50
+        for: 10m
+        labels:
+          severity: info
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "{{ $value | humanize }} IPs currently rate-limited"
+          description: |
+            A large number of IPs are in rate-limit penalty box.
+            May indicate broad DoS attack or resolver fleet misconfiguration.
+
+---
+
   - name: coordinator_process
     interval: 30s
     rules:

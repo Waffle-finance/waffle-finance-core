@@ -80,7 +80,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
         refundAmount = Math.max(original - 0.0001, 0).toFixed(7);
       }
     } catch (lookupErr) {
-      console.warn('[xlm-refund] Original tx lookup failed, using fallback amount:', lookupErr);
+      console.warn(`[xlm-refund] orderId=${args.orderId} Original tx lookup failed, using fallback amount:`, lookupErr);
     }
   }
 

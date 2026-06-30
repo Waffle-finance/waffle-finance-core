@@ -10,6 +10,7 @@ import {
   type Keypair,
   type Transaction
 } from "@stellar/stellar-sdk";
+import { hex32ToBuffer } from "../shared-utils/index.js";
 
 export interface SorobanHTLCClientOptions {
   /** Soroban RPC endpoint, e.g. https://soroban-testnet.stellar.org */
@@ -68,14 +69,6 @@ export class SorobanHTLCClient {
       .build();
   }
 
-  private hexToBytesN32(hex: `0x${string}`): Buffer {
-    const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-    if (clean.length !== 64) {
-      throw new Error("hashlock must be exactly 32 bytes (64 hex chars)");
-    }
-    return Buffer.from(clean, "hex");
-  }
-
   /**
    * Build, simulate, sign and submit a `create_order` transaction.
    * Returns the on-chain transaction hash.
@@ -92,7 +85,7 @@ export class SorobanHTLCClient {
       new SorobanAddress(input.asset).toScVal(),
       nativeToScVal(input.amount, { type: "i128" }),
       nativeToScVal(input.safetyDeposit, { type: "i128" }),
-      nativeToScVal(this.hexToBytesN32(input.hashlockHex), { type: "bytes" }),
+      nativeToScVal(hex32ToBuffer(input.hashlockHex, "hashlock"), { type: "bytes" }),
       nativeToScVal(input.timelockSeconds, { type: "u64" })
     );
     return this.simulateSignSubmit(input.sender, op, signer);
@@ -104,11 +97,10 @@ export class SorobanHTLCClient {
     preimageHex: `0x${string}`,
     signer: SorobanSigner
   ): Promise<string> {
-    const clean = preimageHex.startsWith("0x") ? preimageHex.slice(2) : preimageHex;
     const op = this.contract.call(
       "claim_order",
       nativeToScVal(orderId, { type: "u64" }),
-      nativeToScVal(Buffer.from(clean, "hex"), { type: "bytes" }),
+      nativeToScVal(hex32ToBuffer(preimageHex, "preimage"), { type: "bytes" }),
       new SorobanAddress(callerAccountId).toScVal()
     );
     return this.simulateSignSubmit(callerAccountId, op, signer);

@@ -63,6 +63,11 @@ pnpm install --frozen-lockfile=false
 success "Dependencies installed"
 echo ""
 
+info "Validating deployment artifacts..."
+pnpm run validate:deployments
+success "Deployment artifacts validated"
+echo ""
+
 # ========================================
 # Contract Artifact Verification
 # ========================================

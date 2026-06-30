@@ -4,6 +4,7 @@ import { getLogger } from "../logger.js";
 import { EthereumListener } from "../listeners/ethereum.js";
 import { SorobanListener } from "../listeners/soroban.js";
 import { Supervisor, FatalError } from "../supervisor.js";
+import { startResolverHealthServer } from "../health.js";
 
 export async function runCommand(): Promise<void> {
   const cfg = loadConfig();
@@ -24,9 +25,12 @@ export async function runCommand(): Promise<void> {
   }
   log.info("resolver configuration validated");
 
-  const eth = new EthereumListener(cfg.ethereum, log);
-  const stellar = new SorobanListener(cfg.soroban, cfg.pollIntervalMs, log);
+  const eth = new EthereumListener(cfg, log);
+  const stellar = new SorobanListener(cfg, cfg.pollIntervalMs, log);
   const supervisor = new Supervisor({ log, maxRestarts: 5, restartDelayMs: 5_000 });
+  const healthPort = Number(process.env.RESOLVER_HEALTH_PORT ?? 3003);
+  const healthServer = startResolverHealthServer({ cfg, supervisor }, healthPort);
+  log.info({ port: healthPort }, "resolver health server listening");
 
   let shuttingDown = false;
 
@@ -47,6 +51,7 @@ export async function runCommand(): Promise<void> {
     } catch (err) {
       log.warn({ err }, "error stopping Soroban listener");
     }
+    healthServer.close();
 
     // Flush pino's async transport before exiting so the last log lines land.
     await log.flush?.();

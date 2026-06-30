@@ -18,6 +18,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@wafflefinance/config": "workspace:*",
     "@stellar/stellar-sdk": "^13.0.0",
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",

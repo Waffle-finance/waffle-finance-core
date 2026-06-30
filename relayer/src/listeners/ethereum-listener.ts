@@ -6,6 +6,7 @@
 import { ethers, Contract, EventLog } from 'ethers';
 import { RELAYER_CONFIG } from '../index.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
+import { sanitizeForLog } from '../utils/sanitize-for-log.js';
 
 // Mock CrossChainOrder interface for now
 interface CrossChainOrder {
@@ -240,9 +241,9 @@ export class EthereumEventListener {
     event: EventLog
   ): Promise<void> {
     try {
-      console.log('\n🚨 NEW ETHEREUM ORDER DETECTED!');
+      console.log(`\n🚨 orderId=${orderId.toString()} NEW ETHEREUM ORDER DETECTED!`);
       console.log('================================');
-      console.log(`🆔 Order ID: ${orderId.toString()}`);
+      console.log(`🆔 orderId=${orderId.toString()} Order ID: ${orderId.toString()}`);
       console.log(`👤 Sender: ${sender}`);
       console.log(`💰 Token: ${token}`);
       console.log(`💵 Amount: ${ethers.formatUnits(amount.toString(), 18)} tokens`);
@@ -270,7 +271,7 @@ export class EthereumEventListener {
       await this.processCrossChainOrder(crossChainOrder);
 
     } catch (error) {
-      console.error('❌ Error handling OrderCreated event:', sanitizeForLog(error));
+      console.error(`❌ orderId=${orderId.toString()} Error handling OrderCreated event:`, sanitizeForLog(error));
     }
   }
 
@@ -285,12 +286,12 @@ export class EthereumEventListener {
    * fake success messages.
    */
   private async processCrossChainOrder(order: CrossChainOrder): Promise<void> {
-    console.log('🌉 OrderCreated observed on Ethereum:', {
+    console.log(`🌉 orderId=${order.ethereumOrderId} OrderCreated observed on Ethereum:`, {
       ethereumOrderId: order.ethereumOrderId,
       hashLock: order.hashLock
     });
     console.log(
-      '⚠️  v1 placeholder Stellar HTLC path disabled. The v2 coordinator (Phase 4) ' +
+      `⚠️  orderId=${order.ethereumOrderId} v1 placeholder Stellar HTLC path disabled. The v2 coordinator (Phase 4) ` +
       'creates the Soroban HTLC. Until then the user can refund permissionlessly ' +
       'after the timelock.'
     );

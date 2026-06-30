@@ -12,13 +12,18 @@ import { SolanaListener } from "./listeners/solana-listener.js";
 import { Reconciler } from "./reconciliation/reconciler.js";
 import { StaleCleanupService } from "./services/stale-cleanup.js";
 import { createReadinessChecks } from "./readiness.js";
+import { retryAsync } from "./retry.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const log = getLogger(cfg.logLevel);
   log.info({ network: cfg.network, port: cfg.port }, "WaffleFinance coordinator starting");
 
-  const db = await openDatabase(cfg.databaseUrl);
+  const db = await retryAsync(() => openDatabase(cfg.databaseUrl), {
+  maxAttempts: 5,
+  baseDelayMs: 500,
+  jitterMs: 200,
+});
   const repo = new OrdersRepository(db);
   const orders = new OrderService(repo, log);
   const secrets = new SecretService(orders, log, cfg.secretStorageKey ?? undefined);

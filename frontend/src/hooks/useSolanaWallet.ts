@@ -6,6 +6,8 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 
+export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
+
 interface PhantomProvider {
   isPhantom?: boolean;
   publicKey: { toString(): string } | null;
@@ -32,57 +34,116 @@ interface SolanaWalletState {
   address: string | null;
   isLoading: boolean;
   error: string | null;
+  errorCode: string | null;
+  hint: string | null;
+  phase: ConnectionPhase;
+  lastTransitionAt: number | null;
+  isInstalled: boolean;
+}
+
+const INITIAL_STATE: SolanaWalletState = {
+  isConnected: false,
+  address: null,
+  isLoading: false,
+  error: null,
+  errorCode: null,
+  hint: null,
+  phase: 'idle',
+  lastTransitionAt: null,
+  isInstalled: false,
+};
+
+function transition(prev: SolanaWalletState, patch: Partial<SolanaWalletState>): SolanaWalletState {
+  return {
+    ...prev,
+    ...patch,
+    lastTransitionAt: Date.now(),
+    phase: patch.phase ?? prev.phase,
+  };
 }
 
 export function useSolanaWallet() {
-  const [state, setState] = useState<SolanaWalletState>({
-    isConnected: false,
-    address: null,
-    isLoading: false,
-    error: null,
-  });
+  const [state, setState] = useState<SolanaWalletState>(INITIAL_STATE);
+
+  const setError = useCallback((code: string, message: string, hint?: string) => {
+    setState((prev) =>
+      transition(prev, {
+        error: message,
+        errorCode: code,
+        hint: hint ?? prev.hint,
+        phase: 'error',
+        isLoading: false,
+      })
+    );
+  }, []);
 
   // Auto-reconnect on mount if previously trusted
   useEffect(() => {
     const provider = getProvider();
-    if (!provider) return;
+    if (!provider) {
+      setState((prev) => transition(prev, { isInstalled: false }));
+      return;
+    }
+
+    setState((prev) => transition(prev, { isInstalled: true, phase: 'checking' }));
 
     const tryReconnect = async () => {
       try {
         const resp = await provider.connect({ onlyIfTrusted: true });
-        setState(prev => ({
-          ...prev,
-          isConnected: true,
-          address: resp.publicKey.toString(),
-          error: null,
-        }));
+        setState((prev) =>
+          transition(prev, {
+            isConnected: true,
+            address: resp.publicKey.toString(),
+            error: null,
+            errorCode: null,
+            hint: null,
+            phase: 'connected',
+          })
+        );
       } catch {
         // Not previously trusted — skip silently
+        setState((prev) => transition(prev, { phase: 'idle' }));
       }
     };
 
     tryReconnect();
 
     const handleAccountChange = (pubkey: { toString(): string } | null) => {
-      setState(prev => ({
-        ...prev,
-        isConnected: !!pubkey,
-        address: pubkey ? pubkey.toString() : null,
-      }));
+      setState((prev) => {
+        if (!pubkey) {
+          return transition(prev, {
+            isConnected: false,
+            address: null,
+            phase: 'idle',
+          });
+        }
+        return transition(prev, {
+          isConnected: true,
+          address: pubkey.toString(),
+          error: null,
+          errorCode: null,
+          hint: null,
+          phase: 'connected',
+        });
+      });
     };
 
     const handleConnect = (pubkey: { toString(): string } | null) => {
       if (!pubkey) return;
-      setState(prev => ({
-        ...prev,
-        isConnected: true,
-        address: pubkey.toString(),
-        error: null,
-      }));
+      setState((prev) =>
+        transition(prev, {
+          isConnected: true,
+          address: pubkey.toString(),
+          error: null,
+          errorCode: null,
+          hint: null,
+          phase: 'connected',
+        })
+      );
     };
 
     const handleDisconnect = () => {
-      setState(prev => ({ ...prev, isConnected: false, address: null }));
+      setState((prev) => transition(prev, { isConnected: false, address: null, phase: 'idle' }));
     };
 
     provider.on('connect', handleConnect);
@@ -100,35 +161,40 @@ export function useSolanaWallet() {
     const provider = getProvider();
     if (!provider) {
       const msg = 'Phantom wallet not found. Install it at https://phantom.app';
-      setState(prev => ({ ...prev, error: msg }));
+      setError('phantom_unavailable', msg, 'Install the Phantom browser extension and reload the page.');
       window.open('https://phantom.app', '_blank');
       return;
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
+    setState((prev) => transition(prev, { isLoading: true, error: null, errorCode: null, hint: null, phase: 'requesting_permission' }));
     try {
       const resp = await provider.connect();
-      setState({
-        isConnected: true,
-        address: resp.publicKey.toString(),
-        isLoading: false,
-        error: null,
-      });
+      setState((prev) =>
+        transition(prev, {
+          isConnected: true,
+          address: resp.publicKey.toString(),
+          isLoading: false,
+          error: null,
+          errorCode: null,
+          hint: null,
+          phase: 'connected',
+        })
+      );
     } catch (err: any) {
-      setState(prev => ({
-        ...prev,
-        isLoading: false,
-        error: err?.message ?? 'Phantom connection failed',
-      }));
+      setError(
+        'phantom_connect_failed',
+        err?.message ?? 'Phantom connection failed',
+        'Check the Phantom popup. If you denied access, approve it and retry.'
+      );
     }
-  }, []);
+  }, [setError]);
 
   const disconnect = useCallback(async () => {
     const provider = getProvider();
     if (provider) {
       try { await provider.disconnect(); } catch { /* ignore */ }
     }
-    setState({ isConnected: false, address: null, isLoading: false, error: null });
+    setState((prev) => transition(prev, { isConnected: false, address: null, isLoading: false, error: null, errorCode: null, hint: null, phase: 'idle' }));
   }, []);
 
   const isInstalled = !!getProvider();
@@ -138,6 +204,10 @@ export function useSolanaWallet() {
     address: state.address,
     isLoading: state.isLoading,
     error: state.error,
+    errorCode: state.errorCode,
+    hint: state.hint,
+    phase: state.phase,
+    lastTransitionAt: state.lastTransitionAt,
     isInstalled,
     connect,
     disconnect,

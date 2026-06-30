@@ -178,6 +178,36 @@ docker stop postgres-test && docker rm postgres-test
 The SQL translation unit tests always run (without requiring PostgreSQL),
 while the full database integration tests require `TEST_WITH_POSTGRES=true`.
 
+### Known Edge Cases — Postgres SQL Translation
+
+The SQLite-to-Postgres translation layer (`db.ts:PostgresStatement`) uses
+regex-based conversion, which has known limitations:
+
+1. **Named params inside string literals**: `':named_param'` in SQL is still
+   converted because the regex `:(\w+)` cannot distinguish SQL code from
+   string contents. Use parameterized values instead of inline literals.
+
+2. **`LIKE` case sensitivity**: SQLite's `LIKE` is case-insensitive for ASCII;
+   Postgres `LIKE` is case-sensitive. Use `ILIKE` for case-insensitive
+   matching, or `LOWER()` on both sides.
+
+3. **Type coercion**: SQLite is flexible with type mixing (e.g., comparing
+   `INTEGER` to `TEXT`). Postgres is strict. All current queries use
+   consistent types, but custom queries should match column types exactly.
+
+4. **`INTEGER` vs `BIGINT`**: SQLite `INTEGER` is 64-bit; Postgres `INTEGER`
+   is 32-bit. Migration `006_stale_cleanup_postgres.sql` uses `BIGINT` for
+   unix timestamps (`archived_at`). The other Postgres migrations use
+   `BIGSERIAL` / `BIGINT` for id and timestamp columns respectively.
+
+5. **`INSERT OR IGNORE`**: SQLite syntax; Postgres uses
+   `INSERT ... ON CONFLICT DO NOTHING`. This is handled in the migration
+   runner's inline SQL, not through `PostgresStatement`.
+
+6. **Concurrent migration safety**: The Postgres migration runner uses
+   `ON CONFLICT DO NOTHING` when recording applied migrations, which
+   prevents duplicate records under concurrent coordinator starts.
+
 ### Testing with PostgreSQL
 
 To test the coordinator against a PostgreSQL database:
@@ -217,3 +247,15 @@ docker stop wafflefinance-postgres && docker rm wafflefinance-postgres
 
 The schema migrations in `coordinator/migrations/` are applied automatically
 on startup, making it easy to manage database versions.
+
+### Migration Variants
+
+Some migrations have Postgres-specific variants in `coordinator/migrations/`:
+
+- `002_solana_support_postgres.sql` — uses `ALTER TABLE ... DROP/ADD CONSTRAINT`
+  instead of SQLite's table-recreate approach.
+- `006_stale_cleanup_postgres.sql` — uses `BIGINT` for the `archived_at`
+  column instead of `INTEGER`, and `ADD COLUMN IF NOT EXISTS`.
+
+The migration runner falls back to the SQLite variant if a Postgres-specific
+file is not found, so adding a Postgres variant is always safe.

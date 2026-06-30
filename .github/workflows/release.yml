@@ -35,6 +35,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile=false
 
+      - name: Validate deployment manifests
+        run: pnpm run validate:deployments
+
       # ========================================
       # Contract Artifact Verification
       # ========================================
