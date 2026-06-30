@@ -27,12 +27,14 @@ async function createTestOrders(
   address: string,
   startAt = 0
 ): Promise<void> {
+async function createTestOrders(repo: OrdersRepository, count: number, address: string, startIndex = 0): Promise<void> {
   // Create orders with slight time differences to ensure proper ordering
   for (let i = 0; i < count; i++) {
     const input: AnnounceOrderInput = {
       direction: "eth_to_xlm",
       hashlock:
         VALID_HASHLOCK_BASE.slice(0, -4) + (startAt + i).toString(16).padStart(4, '0'),
+      hashlock: VALID_HASHLOCK_BASE.slice(0, -4) + (startIndex + i).toString(16).padStart(4, '0'),
       srcChain: "ethereum",
       srcAddress: address,
       srcAsset: "native",

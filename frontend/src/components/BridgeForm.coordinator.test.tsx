@@ -101,6 +101,7 @@ beforeEach(() => {
   mockEthereum.request.mockImplementation((req: { method: string }) => {
     if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
     if (req.method === 'eth_getBalance') return Promise.resolve('0x8AC7230489E80000');
+    if (req.method === 'eth_getBalance') return Promise.resolve('0xDE0B6B3A7640000'); // 1 ETH
     return Promise.resolve(null);
   });
   vi.spyOn(console, 'error').mockImplementation(() => {});
