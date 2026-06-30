@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import BridgeForm, { getUnsupportedRouteReason } from './BridgeForm';
 
 // Flush the component's async balance effect (an async fetch that settles in a
@@ -264,3 +264,160 @@ describe('BridgeForm cross-chain validation', () => {
     await flush();
   });
 });
+
+describe('BridgeForm transaction error classification and UI display', () => {
+  const ETH = '0x1111111111111111111111111111111111111111';
+  const XLM = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422';
+  const noopSign = async () => 'signed-xdr';
+  const flushTimers = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+  const mockEthereum = { request: vi.fn(), on: vi.fn(), removeListener: vi.fn() };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.defineProperty(window, 'ethereum', { value: mockEthereum, writable: true, configurable: true });
+    
+    mockEthereum.request.mockImplementation((req: { method: string }) => {
+      if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
+      if (req.method === 'eth_getBalance') return Promise.resolve('0xDE0B6B3A7640000');
+      return Promise.resolve(null);
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        ethUsd: 3500,
+        xlmUsd: 0.12,
+        solUsd: 150,
+        xlmPerEth: 29166,
+        staleness: 'fresh',
+        fetchedAt: Date.now(),
+      }),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('displays user rejection error correctly when MetaMask rejects transaction signature', async () => {
+    global.fetch = vi.fn().mockImplementation((url) => {
+      if (url.includes('/api/prices')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ethUsd: 3500, xlmUsd: 0.12, solUsd: 150,
+            xlmPerEth: 29166, staleness: 'fresh', fetchedAt: Date.now()
+          })
+        });
+      }
+      if (url.includes('/api/orders/create')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            orderId: 'order-123',
+            nextStep: 'deposit',
+            approvalTransaction: {
+              to: '0x1234567890123456789012345678901234567890',
+              value: '0x2386f26fc10000',
+              data: '0x'
+            },
+            orderData: {
+              stellarAmount: '100',
+              ethAmount: '0.01',
+              stellarAddress: XLM,
+              ethAddress: ETH
+            }
+          })
+        });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    mockEthereum.request.mockImplementation((req: { method: string }) => {
+      if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
+      if (req.method === 'eth_getBalance') return Promise.resolve('0xDE0B6B3A7640000');
+      if (req.method === 'eth_sendTransaction') {
+        const err = new Error('User rejected the transaction');
+        (err as any).code = 4001;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<BridgeForm ethAddress={ETH} stellarAddress={XLM} signStellarTransaction={noopSign} />);
+    await flush();
+
+    fireEvent.change(screen.getByPlaceholderText('0.0'), { target: { value: '0.05' } });
+    await flushTimers();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Bridge$/i }));
+    });
+    await flushTimers();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Transaction request rejected/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/Please approve the transaction signature/i);
+  });
+
+  it('displays insufficient funds error correctly when MetaMask returns insufficient funds code', async () => {
+    global.fetch = vi.fn().mockImplementation((url) => {
+      if (url.includes('/api/prices')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ethUsd: 3500, xlmUsd: 0.12, solUsd: 150,
+            xlmPerEth: 29166, staleness: 'fresh', fetchedAt: Date.now()
+          })
+        });
+      }
+      if (url.includes('/api/orders/create')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            orderId: 'order-123',
+            nextStep: 'deposit',
+            approvalTransaction: {
+              to: '0x1234567890123456789012345678901234567890',
+              value: '0x2386f26fc10000',
+              data: '0x'
+            },
+            orderData: {
+              stellarAmount: '100',
+              ethAmount: '0.01',
+              stellarAddress: XLM,
+              ethAddress: ETH
+            }
+          })
+        });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    mockEthereum.request.mockImplementation((req: { method: string }) => {
+      if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
+      if (req.method === 'eth_getBalance') return Promise.resolve('0xDE0B6B3A7640000');
+      if (req.method === 'eth_sendTransaction') {
+        const err = new Error('Insufficient funds for gas * price + value');
+        (err as any).code = -32000;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<BridgeForm ethAddress={ETH} stellarAddress={XLM} signStellarTransaction={noopSign} />);
+    await flush();
+
+    fireEvent.change(screen.getByPlaceholderText('0.0'), { target: { value: '0.05' } });
+    await flushTimers();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Bridge$/i }));
+    });
+    await flushTimers();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Insufficient ETH balance/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/Ensure you have enough ETH/i);
+  });
+});
+

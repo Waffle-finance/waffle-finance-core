@@ -177,7 +177,7 @@ describe('BridgeForm — Solana announce coordinator failures', () => {
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('validation_error'));
+    expect(screen.getByRole('alert').textContent).toContain('validation_error');
   });
 
   it('shows an error alert when /api/orders/announce returns 429 (rate limit)', async () => {
@@ -196,7 +196,7 @@ describe('BridgeForm — Solana announce coordinator failures', () => {
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('too_many_requests'));
+    expect(screen.getByRole('alert').textContent).toContain('too_many_requests');
   });
 
   it('shows an error alert when /api/orders/announce throws a network error', async () => {
@@ -214,7 +214,7 @@ describe('BridgeForm — Solana announce coordinator failures', () => {
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('Failed to fetch'));
+    expect(screen.getByRole('alert').textContent).toContain('Failed to fetch');
   });
 
   it('shows an error alert when /api/orders/announce returns 503 (coordinator down)', async () => {
@@ -233,7 +233,7 @@ describe('BridgeForm — Solana announce coordinator failures', () => {
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('service_unavailable'));
+    expect(screen.getByRole('alert').textContent).toContain('service_unavailable');
   });
 
   it('re-enables the submit button after a coordinator failure', async () => {
@@ -291,7 +291,7 @@ describe('BridgeForm — /api/orders/create relayer failures (ETH→XLM)', () =>
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('invalid_request'));
+    expect(screen.getByRole('alert').textContent).toContain('invalid_request');
   });
 
   it('shows alert when /api/orders/create returns 503', async () => {
@@ -309,7 +309,7 @@ describe('BridgeForm — /api/orders/create relayer failures (ETH→XLM)', () =>
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('service_unavailable'));
+    expect(screen.getByRole('alert').textContent).toContain('service_unavailable');
   });
 
   it('shows alert when /api/orders/create throws (network failure)', async () => {
@@ -326,7 +326,7 @@ describe('BridgeForm — /api/orders/create relayer failures (ETH→XLM)', () =>
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('ERR_CONNECTION_REFUSED'));
+    expect(screen.getByRole('alert').textContent).toContain('ERR_CONNECTION_REFUSED');
   });
 });
 
@@ -356,7 +356,7 @@ describe('BridgeForm — retry after coordinator failure', () => {
     await act(async () => { fireEvent.click(getSubmitBtn()); });
     await flushTimers();
 
-    expect(window.alert).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
 
     await waitFor(() => expect(getSubmitBtn()).not.toBeDisabled());
 
@@ -477,7 +477,7 @@ describe('BridgeForm — error message content from coordinator', () => {
       await act(async () => { fireEvent.click(getSubmitBtn()); });
       await flushTimers();
 
-      expect(window.alert).toHaveBeenCalledWith(expect.stringContaining(expectedFragment));
+      expect(screen.getByRole('alert').textContent).toContain(expectedFragment);
     });
   }
 });
@@ -550,6 +550,6 @@ describe('BridgeForm — /api/orders/history failure isolation', () => {
 
     await waitFor(() => expect(screen.getByText('Order Created')).toBeInTheDocument());
 
-    expect(window.alert).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
