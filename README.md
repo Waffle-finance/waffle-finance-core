@@ -168,6 +168,8 @@ See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for per-package commands, Postg
 
 See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for deployment checklists, incident response runbooks, and monitoring guidance.
 
+See [`docs/BUG_TRIAGE_GUIDE.md`](docs/BUG_TRIAGE_GUIDE.md) for bug triage workflows, severity classification, and incident response procedures for contributors.
+
 ---
 
 ## Wallet support
