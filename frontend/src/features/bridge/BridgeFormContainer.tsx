@@ -6,7 +6,7 @@ import {
   TransactionBuilder, 
   Memo
 } from '@stellar/stellar-sdk';
-import { isTestnet, getCurrentNetwork } from '../../config/networks';
+import { isTestnet, getCurrentNetwork, validateNetworkMode } from '../../config/networks';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
@@ -455,6 +455,15 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationErrors({});
+
+    // Runtime guard: validate network mode before submitting
+    const targetMode = networkInfo.isTestnet ? 'testnet' : 'mainnet';
+    try {
+      validateNetworkMode(targetMode);
+    } catch (err: any) {
+      setValidationErrors({ form: err.message || 'Mainnet operations are disabled.' });
+      return;
+    }
 
     const errors: Record<string, string> = {};
     const routeResult = validateRouteWallets(direction, ethAddress, stellarAddress, solanaAddress ?? '');
