@@ -305,3 +305,9 @@ curl "$COORDINATOR_URL/orders/history?address=0x742d35cF0b7bbF6E175239d74a0e0a3d
 # Get specific order
 curl "$COORDINATOR_URL/orders/demo-xxx" | jq
 ```
+
+---
+
+## Known gaps and planned improvements
+
+See [`docs/TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md) for the full service-level technical debt register — architectural gaps, known limitations, and planned improvements across all services, with severity ratings and concrete next steps.
