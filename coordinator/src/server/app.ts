@@ -9,6 +9,7 @@ import { httpRequestDuration } from "../metrics.js";
 import { ordersRoutes } from "./routes/orders.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { quotesRoutes } from "./routes/quotes.js";
+import { telemetryRoutes } from "./routes/telemetry.js";
 import type { OrderService } from "../services/order-service.js";
 import type { SecretService } from "../services/secret-service.js";
 import type { QuoteService } from "../services/quote-service.js";
@@ -83,6 +84,7 @@ export function createApp(deps: AppDeps): Express {
   // tracked automatically.
   app.use("/api", ordersRoutes(deps.orders, deps.log, abuseDetector));
   app.use("/api", secretsRoutes(deps.secrets, deps.log, abuseDetector));
+  app.use("/api", telemetryRoutes(deps.log, abuseDetector));
   // quotes routes expose /api/quotes/eth-xlm, /api/quotes/eth-sol, and
   // /api/prices (the aggregated endpoint consumed by the BridgeForm).
   app.use("/api", quotesRoutes(deps.quotes));
