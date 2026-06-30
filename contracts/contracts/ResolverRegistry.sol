@@ -197,7 +197,12 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
     /// @notice Withdraw the entire stake and remove the resolver.  The
     ///         caller forfeits their `active` status immediately.
     ///
-    /// @dev Strict CEI order is critical here.  All state mutations —
+    /// @dev Access control: self-service — only a registered resolver can call
+    ///      this for themselves (`msg.sender` is used as the key throughout).
+    ///      There is no owner function to forcibly unregister a resolver; the
+    ///      owner can only slash their stake, not eject them.
+    ///
+    ///      Strict CEI order is critical here.  All state mutations —
     ///      clearing _resolvers, removing from _resolverList, and deleting
     ///      _resolverIndex — are committed BEFORE the outgoing safeTransfer.
     ///      This means:
@@ -248,14 +253,24 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
     ///         that can call this; the design intent is that `owner` is
     ///         a DAO or multisig that votes on slashing.
     ///
-    /// @dev Slashing does NOT remove the resolver from the list.  The
+    /// @dev Access control: `onlyOwner` — only the DAO/multisig that controls
+    ///      this registry. The owner CANNOT move funds out of `HTLCEscrow`;
+    ///      the HTLC and registry are separate contracts. A registry compromise
+    ///      therefore cannot steal user funds — at worst it can deactivate
+    ///      resolvers, which only delays new order creation.
+    ///
+    ///      Slashing does NOT remove the resolver from the list. The
     ///      resolver remains registered (their address is in _resolverList
     ///      and _resolverIndex is non-zero) but `active` flips to false if
-    ///      their remaining stake falls below `minStake`.  The resolver can
+    ///      their remaining stake falls below `minStake`. The resolver can
     ///      call `increaseStake` to top up and regain active status.
     ///
     ///      CEI is observed: stake accounting and active-flag update happen
     ///      before the outgoing safeTransfer to slashBeneficiary.
+    ///
+    ///      Invariants maintained: I1–I5 are unchanged (slash only mutates
+    ///      `_resolvers[resolver]`; it does not touch _resolverList or
+    ///      _resolverIndex).
     function slash(address resolver, uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) revert InvalidAmount();
         if (_resolverIndex[resolver] == 0) revert NotRegistered();

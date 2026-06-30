@@ -141,6 +141,17 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // ---------------------------------------------------------------
 
     /// @inheritdoc IHTLCEscrow
+    ///
+    /// @dev Access control: permissioned when `resolverRegistry != address(0)`.
+    ///      The registry check (`isActive(msg.sender)`) is a SOFT sybil gate —
+    ///      it restricts who may *create* orders but has no effect on the claim
+    ///      or refund paths, which remain permissionless regardless of registry
+    ///      state. Clearing the registry (deploy a new escrow with address(0))
+    ///      makes order creation open to everyone.
+    ///
+    ///      Non-custodial guarantee: funds pulled here cannot be moved by any
+    ///      privileged actor. The only exits are `claimOrder` (preimage reveal)
+    ///      and `refundOrder` (timelock expiry), both callable by anyone.
     function createOrder(
         address beneficiary,
         address refundAddress,
@@ -219,6 +230,14 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     }
 
     /// @inheritdoc IHTLCEscrow
+    ///
+    /// @dev Access control: PERMISSIONLESS — any address may call this.
+    ///      Typically called by the beneficiary or an authorised relayer, but
+    ///      the contract enforces no restriction. The safety deposit is paid to
+    ///      `msg.sender` as an incentive for whoever submits the transaction.
+    ///
+    ///      Finality: once this returns successfully the order status is
+    ///      irrevocably `Claimed` and `preimageKeccak` is stored on-chain.
     function claimOrder(uint256 orderId, bytes memory preimage) external nonReentrant {
         Order storage order = _orders[orderId];
         if (order.status != OrderStatus.Funded) {
@@ -255,6 +274,12 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     }
 
     /// @inheritdoc IHTLCEscrow
+    ///
+    /// @dev Access control: PERMISSIONLESS — any address may call this after
+    ///      the timelock has expired. This is the bridge's safety backstop:
+    ///      users can always recover their funds without relying on the
+    ///      resolver, coordinator, or any other trusted party. The safety
+    ///      deposit rewards whoever submits the refund transaction.
     function refundOrder(uint256 orderId) external nonReentrant {
         Order storage order = _orders[orderId];
         if (order.status != OrderStatus.Funded) {

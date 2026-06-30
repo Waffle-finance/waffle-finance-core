@@ -2,15 +2,28 @@ import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
 import { logger } from '../utils/logger';
 
-interface FreighterState {
+export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
+
+export interface FreighterState {
   isConnected: boolean;
   address: string | null;
-  /** Freighter network name, e.g. "TESTNET" / "PUBLIC". Null until known. */
   network: string | null;
-  /** Stellar network passphrase reported by Freighter. Null until known. */
   networkPassphrase: string | null;
   isLoading: boolean;
   error: string | null;
+  errorCode: string | null;
+  hint: string | null;
+  phase: ConnectionPhase;
+  lastTransitionAt: number | null;
+}
+
+function transition(prev: FreighterState, patch: Partial<FreighterState>): FreighterState {
+  return {
+    ...prev,
+    ...patch,
+    lastTransitionAt: Date.now(),
+    phase: patch.phase ?? prev.phase,
+  };
 }
 
 export function useFreighter() {
@@ -21,57 +34,86 @@ export function useFreighter() {
     networkPassphrase: null,
     isLoading: false,
     error: null,
+    errorCode: null,
+    hint: null,
+    phase: 'idle',
+    lastTransitionAt: null,
   });
+
+  const setError = useCallback((code: string, message: string, hint?: string) => {
+    setState((prev) =>
+      transition(prev, {
+        error: message,
+        errorCode: code,
+        hint: hint ?? prev.hint,
+        phase: 'error',
+        isLoading: false,
+      })
+    );
+  }, []);
 
   // Check if Freighter is connected on mount
   useEffect(() => {
     const checkConnection = async () => {
-      logger.walletConnect('Freighter', undefined, { action: 'checking' });
-      
+      console.log('🔍 [freighter] checking connection');
+      setState((prev) => transition(prev, { phase: 'checking' }));
+
       try {
-        // Check if Freighter is available
         if (!freighterApi || typeof freighterApi.isConnected !== 'function') {
-          logger.walletError('Freighter', 'API not available');
+          console.log('❌ [freighter] API unavailable');
+          setError(
+            'freighter_unavailable',
+            'Freighter API not available. Is the extension installed?',
+            'Install Freighter from the Chrome Web Store and reload the page.'
+          );
           return;
         }
-        
+
         const isConnected = await freighterApi.isConnected();
-        logger.event('wallet_state_change', `Freighter connection status: ${isConnected}`, { isConnected });
-        
-        if (isConnected) {
-          const { address } = await freighterApi.getAddress();
-          logger.walletConnect('Freighter', address);
+        console.log('🔍 [freighter] connected:', isConnected);
 
-          let network: string | null = null;
-          let networkPassphrase: string | null = null;
-          try {
-            const net = await freighterApi.getNetwork();
-            network = net.network;
-            networkPassphrase = net.networkPassphrase;
-          } catch {
-            // Network details unavailable — leave null, the watcher will fill in.
-          }
+        if (!isConnected) {
+          setState((prev) => transition(prev, { phase: 'idle' }));
+          return;
+        }
 
-          setState(prev => ({
-            ...prev,
+        const { address } = await freighterApi.getAddress();
+        console.log('🔍 [freighter] address:', address);
+
+        let network: string | null = null;
+        let networkPassphrase: string | null = null;
+        try {
+          const net = await freighterApi.getNetwork();
+          network = net.network;
+          networkPassphrase = net.networkPassphrase;
+        } catch {
+          // Network details unavailable — leave null, the watcher will fill in.
+        }
+
+        setState((prev) =>
+          transition(prev, {
             isConnected: true,
             address,
             network,
             networkPassphrase,
             error: null,
-          }));
-        }
+            errorCode: null,
+            hint: null,
+            phase: 'connected',
+          })
+        );
       } catch (error) {
-        logger.walletError('Freighter', error instanceof Error ? error : String(error), { action: 'connection_check' });
-        setState(prev => ({
-          ...prev,
-          error: error instanceof Error ? error.message : 'Connection check failed',
-        }));
+        console.error('❌ [freighter] connection check failed:', error);
+        setError(
+          'connection_check_failed',
+          error instanceof Error ? error.message : 'Connection check failed',
+          'Refresh the page and try again. If the issue persists, re-login to Freighter.'
+        );
       }
     };
 
     checkConnection();
-  }, []);
+  }, [setError]);
 
   // Poll Freighter for address / network changes (including disconnect). The
   // extension has no event emitter, so we poll on an interval and only update
@@ -82,11 +124,16 @@ export function useFreighter() {
     let cancelled = false;
 
     const markDisconnected = () => {
-      setState(prev =>
-        prev.isConnected || prev.address
-          ? { ...prev, isConnected: false, address: null, network: null, networkPassphrase: null }
-          : prev
-      );
+      setState((prev) => {
+        if (!prev.isConnected && !prev.address) return prev;
+        return transition(prev, {
+          isConnected: false,
+          address: null,
+          network: null,
+          networkPassphrase: null,
+          phase: 'idle',
+        });
+      });
     };
 
     const poll = async () => {
@@ -115,7 +162,7 @@ export function useFreighter() {
         }
 
         if (cancelled) return;
-        setState(prev => {
+        setState((prev) => {
           if (
             prev.isConnected &&
             prev.address === address &&
@@ -124,7 +171,16 @@ export function useFreighter() {
           ) {
             return prev;
           }
-          return { ...prev, isConnected: true, address, network, networkPassphrase, error: null };
+          return transition(prev, {
+            isConnected: true,
+            address,
+            network,
+            networkPassphrase,
+            error: null,
+            errorCode: null,
+            hint: null,
+            phase: 'connected',
+          });
         });
       } catch {
         // Ignore transient polling errors; the next tick re-evaluates.
@@ -136,32 +192,31 @@ export function useFreighter() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [setError]);
 
   // Connect to Freighter
   const connect = useCallback(async () => {
-    logger.event('wallet_connect', 'Connecting to Freighter...');
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
-    
+    console.log('🔌 [freighter] connect requested');
+    setState((prev) => transition(prev, { isLoading: true, error: null, errorCode: null, hint: null }));
+
     try {
-      // Check if Freighter is available
       if (!freighterApi || typeof freighterApi.isConnected !== 'function') {
-        throw new Error('Freighter wallet extension bulunamadı. Lütfen Freighter extension\'ı yükleyin.');
-      }
-      
-      const isAvailable = await freighterApi.isConnected();
-      logger.event('wallet_state_change', `Freighter availability: ${isAvailable}`, { isAvailable });
-      
-      if (!isAvailable) {
-        throw new Error('Freighter wallet is not available. Please install Freighter extension.');
+        throw new Error('Freighter wallet extension not found. Please install Freighter.');
       }
 
-      logger.event('wallet_connect', 'Requesting Freighter permission...');
+      const isAvailable = await freighterApi.isConnected();
+      console.log('🔍 [freighter] availability:', isAvailable);
+
+      if (!isAvailable) {
+        throw new Error('Freighter wallet is not available. Please install Freighter extension.');
+      }      setState((prev) => transition(prev, { phase: 'requesting_permission' }));
+
+      console.log('🔌 [freighter] requesting permission');
       await freighterApi.setAllowed();
-      
-      logger.event('wallet_connect', 'Getting Freighter address...');
+
+      console.log('🔍 [freighter] getting address');
       const { address } = await freighterApi.getAddress();
-      logger.walletConnect('Freighter', address, { action: 'connected_successfully' });
+      console.log('✅ [freighter] connected:', address);
 
       let network: string | null = null;
       let networkPassphrase: string | null = null;
@@ -173,33 +228,36 @@ export function useFreighter() {
         // Non-fatal — network details will be populated by the watcher.
       }
 
-      setState(prev => ({
-        ...prev,
-        isConnected: true,
-        address,
-        network,
-        networkPassphrase,
-        isLoading: false,
-        error: null,
-      }));
+      setState((prev) =>
+        transition(prev, {
+          isConnected: true,
+          address,
+          network,
+          networkPassphrase,
+          isLoading: false,
+          error: null,
+          errorCode: null,
+          hint: null,
+          phase: 'connected',
+        })
+      );
 
       return address;
     } catch (error) {
-      logger.walletError('Freighter', error instanceof Error ? error : String(error));
+      console.error('❌ [freighter] connection error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to connect to Freighter';
-      setState(prev => ({
-        ...prev,
-        isConnected: false,
-        address: null,
-        isLoading: false,
-        error: errorMessage,
-      }));
+      setError(
+        'freighter_connect_failed',
+        errorMessage,
+        'Ensure Freighter is unlocked, the page has permission, and you are on the correct Stellar network.'
+      );
       throw error;
     }
-  }, []);
+  }, [setError]);
 
   // Disconnect from Freighter
   const disconnect = useCallback(() => {
+    console.log('🔌 [freighter] disconnect requested');
     setState({
       isConnected: false,
       address: null,
@@ -207,6 +265,10 @@ export function useFreighter() {
       networkPassphrase: null,
       isLoading: false,
       error: null,
+      errorCode: null,
+      hint: null,
+      phase: 'idle',
+      lastTransitionAt: Date.now(),
     });
   }, []);
 
@@ -216,7 +278,7 @@ export function useFreighter() {
       const networkInfo = await freighterApi.getNetwork();
       return networkInfo;
     } catch (error) {
-      logger.networkError(error instanceof Error ? error : String(error), { action: 'get_network_info' });
+      console.error('❌ [freighter] network info error:', error);
       return null;
     }
   }, []);
@@ -229,6 +291,7 @@ export function useFreighter() {
   ) => {
     const signerAddress = addressOverride ?? state.address;
     if (!signerAddress) {
+      setError('wallet_not_connected', 'Wallet not connected', 'Connect Freighter before signing.');
       throw new Error('Wallet not connected');
     }
 
@@ -240,10 +303,18 @@ export function useFreighter() {
       });
       return result.signedTxXdr;
     } catch (error) {
-      logger.transactionError('unknown', error instanceof Error ? error : String(error));
+      console.error('❌ [freighter] sign error:', error);
+      const msg = error instanceof Error ? error.message : 'Signing failed';
+      setError(
+        'freighter_sign_failed',
+        msg,
+        error instanceof Error && error.message?.includes('User declined')
+          ? 'You rejected the signature request in Freighter.'
+          : 'Check the Freighter popup and try again.'
+      );
       throw error;
     }
-  }, [state.address]);
+  }, [state.address, setError]);
 
   return {
     ...state,
@@ -252,4 +323,4 @@ export function useFreighter() {
     getNetworkInfo,
     signTransaction,
   };
-} 
+}

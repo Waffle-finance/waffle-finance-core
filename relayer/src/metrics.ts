@@ -152,6 +152,21 @@ export const watchdogTickDurationSeconds = new Histogram({
 });
 
 // ---------------------------------------------------------------------------
+// Solana configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Set to 1 when SOLANA_HTLC_PROGRAM is a placeholder (Solana flows
+ * disabled), or 0 when a real program address is configured.
+ * Useful for alerting operators that Solana support is inactive.
+ */
+export const solanaPlaceholderMode = new Gauge({
+  name: 'relayer_solana_placeholder_mode',
+  help: '1 when SOLANA_HTLC_PROGRAM is a placeholder and Solana flows are disabled, 0 when configured',
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
 // Convenience re-export
 // ---------------------------------------------------------------------------
 

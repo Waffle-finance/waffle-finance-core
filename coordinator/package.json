@@ -1,6 +1,6 @@
 {
   "name": "@wafflefinance/coordinator",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Reference coordinator for the WaffleFinance cross-chain bridge. Observes both chains, persists order state, and relays secrets. Holds NO user funds.",
   "type": "module",
@@ -12,9 +12,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "seed-demo": "tsx scripts/seed-demo.ts"
   },
   "dependencies": {
+    "@wafflefinance/config": "workspace:*",
     "@solana/web3.js": "^1.98.4",
     "@stellar/stellar-sdk": "^13.0.0",
     "@types/cors": "^2.8.17",

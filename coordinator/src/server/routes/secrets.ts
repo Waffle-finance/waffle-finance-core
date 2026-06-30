@@ -2,9 +2,12 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Logger } from "pino";
 import type { SecretService } from "../../services/secret-service.js";
+import { SecretRevealError } from "../../services/secret-errors.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
+import type { AbuseDetector } from "../middleware/abuse-detection.js";
+import { validationError, notRevealedError } from "../errors.js";
 
-export function secretsRoutes(secrets: SecretService, log?: Logger): Router {
+export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetector?: AbuseDetector): Router {
   const router = Router();
 
   const apiKeys = loadApiKeys();
@@ -18,7 +21,8 @@ export function secretsRoutes(secrets: SecretService, log?: Logger): Router {
     name: "secrets/reveal",
     log,
     apiKeys,
-    trustedProxies
+    trustedProxies,
+    abuseDetector
   });
 
   // Secret GET endpoint: 30 reads per IP per minute (lenient — it's a public read).
@@ -28,7 +32,8 @@ export function secretsRoutes(secrets: SecretService, log?: Logger): Router {
     name: "secrets/get",
     log,
     apiKeys,
-    trustedProxies
+    trustedProxies,
+    abuseDetector
   });
 
   const revealSchema = z.object({
@@ -44,11 +49,19 @@ export function secretsRoutes(secrets: SecretService, log?: Logger): Router {
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof z.ZodError) {
-        res.status(400).json({ error: "validation_error", details: err.errors });
+        res.status(400).json(validationError(err.errors));
         return;
       }
-      if (err instanceof Error) {
-        res.status(400).json({ error: "secret_error", message: err.message });
+      // Classified reveal failures map to distinct status codes and stable
+      // `error` codes so clients can decide whether to retry or abandon.
+      // The error messages are pre-sanitized in SecretService and never
+      // contain secret material.
+      if (err instanceof SecretRevealError) {
+        res.status(err.httpStatus).json({
+          error: err.code,
+          message: err.message,
+          retryable: err.retryable
+        });
         return;
       }
       next(err);
@@ -60,7 +73,7 @@ export function secretsRoutes(secrets: SecretService, log?: Logger): Router {
       const publicId = req.params["publicId"] ?? "";
       const preimage = await secrets.get(publicId);
       if (!preimage) {
-        res.status(404).json({ error: "not_revealed" });
+        res.status(404).json(notRevealedError());
         return;
       }
       res.json({ publicId, preimage });

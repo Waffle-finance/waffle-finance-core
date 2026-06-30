@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { keccak256, toHex } from "viem";
-import type { OrderService } from "./order-service.js";
+import { OrderValidationError, type OrderService } from "./order-service.js";
 import {
   deriveKey,
   encryptSecret,
   decryptSecret,
   isEncryptedBlob
 } from "../crypto/secret-cipher.js";
+import {
+  UnknownOrderError,
+  InvalidPreimageError,
+  RevealConflictError,
+  SecretStorageError
+} from "./secret-errors.js";
 
 function bufferFromHex(s: string): Buffer {
   return Buffer.from(s.startsWith("0x") ? s.slice(2) : s, "hex");
@@ -81,11 +87,16 @@ export class SecretService {
    *
    * When encryption is enabled the preimage is encrypted with AES-256-GCM
    * before it reaches the database.
+   *
+   * Failures are classified into typed {@link SecretRevealError} subclasses
+   * so callers can distinguish an unknown order, an invalid preimage, a
+   * stale/replayed reveal, and a transient storage failure. See
+   * {@link ./secret-errors.ts} for the full failure model.
    */
   async reveal(publicId: string, preimage: string, txHash: string): Promise<{ ok: true }> {
     const order = await this.orders.get(publicId);
     if (!order) {
-      throw new Error(`unknown order ${publicId}`);
+      throw new UnknownOrderError(`unknown order ${publicId}`);
     }
 
     const buf = bufferFromHex(preimage);
@@ -93,11 +104,13 @@ export class SecretService {
     const kekHash = keccak256Hex(buf);
 
     if (shaHash !== order.hashlock && kekHash !== order.hashlock) {
+      // NOTE: log the hashes (not secret) for debugging, but never include
+      // them in the thrown error message returned to the client.
       this.log.warn(
         { publicId, expected: order.hashlock, sha: shaHash, kek: kekHash },
         "rejected preimage with mismatching hash"
       );
-      throw new Error("preimage does not match order hashlock");
+      throw new InvalidPreimageError("preimage does not match order hashlock");
     }
 
     // Encrypt before persistence if a key is configured.
@@ -108,12 +121,46 @@ export class SecretService {
     // encVersion=1 means AES-256-GCM; null means plaintext.
     const encVersion = this.encKey ? 1 : null;
 
-    await this.orders.recordSecret(publicId, valueToStore, txHash, encVersion);
+    try {
+      await this.orders.recordSecret(publicId, valueToStore, txHash, encVersion);
+    } catch (err) {
+      throw this.classifyStorageFailure(publicId, err);
+    }
+
     this.log.debug(
       { publicId, encrypted: !!this.encKey },
       "secret stored"
     );
     return { ok: true };
+  }
+
+  /**
+   * Map a `recordSecret` failure onto a typed {@link SecretRevealError}.
+   *
+   * `OrderService.recordSecret` raises `OrderValidationError` for two
+   * distinct situations:
+   *   - the order disappeared between our lookup and the write (a race) →
+   *     {@link UnknownOrderError};
+   *   - the order can no longer transition into `secret_revealed` because it
+   *     has advanced to a terminal state (a stale or replayed reveal) →
+   *     {@link RevealConflictError}.
+   *
+   * Anything else is an unexpected persistence error and is reported as a
+   * retryable {@link SecretStorageError}. The underlying error is logged but
+   * never echoed to the client, so DB internals are not exposed.
+   */
+  private classifyStorageFailure(publicId: string, err: unknown): Error {
+    if (err instanceof OrderValidationError) {
+      if (/unknown order/i.test(err.message)) {
+        return new UnknownOrderError(`unknown order ${publicId}`);
+      }
+      return new RevealConflictError(
+        "order is no longer in a state that can accept a secret reveal"
+      );
+    }
+
+    this.log.error({ publicId, err }, "failed to persist revealed secret");
+    return new SecretStorageError("failed to persist revealed secret");
   }
 
   /**

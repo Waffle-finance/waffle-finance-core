@@ -5,6 +5,7 @@ import TransactionHistory from './components/TransactionHistory'
 import { ToastContainer, useToast } from './components/Toast'
 import { useFreighter } from './hooks/useFreighter'
 import { useSolanaWallet } from './hooks/useSolanaWallet'
+import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
 import { isMainnetEnabled } from './config/networks'
@@ -25,10 +26,8 @@ import {
 
 
 function App() {
-  const [ethAddress, setEthAddress] = useState<string>('');
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [connectionError, setConnectionError] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'bridge' | 'history'>('bridge');
   const [showIntro, setShowIntro] = useState(() => {
     return sessionStorage.getItem('wafflefinance:intro-seen') !== 'true';
@@ -37,12 +36,18 @@ function App() {
   const [introClosing, setIntroClosing] = useState(false);
   const introStartedAt = useRef(Date.now());
 
+  const ethWallet = useEthereumWallet();
+  const ethAddress = ethWallet.address || '';
+
   // Freighter hook usage
   const {
     isConnected: stellarConnected,
     address: stellarAddress,
     isLoading: stellarLoading,
     error: stellarError,
+    errorCode: stellarErrorCode,
+    hint: stellarHint,
+    phase: stellarPhase,
     connect: connectFreighter,
     disconnect: disconnectFreighter,
     signTransaction: signStellarTransaction,
@@ -54,6 +59,10 @@ function App() {
     address: solanaAddress,
     isLoading: solanaLoading,
     isInstalled: phantomInstalled,
+    error: solanaError,
+    errorCode: solanaErrorCode,
+    hint: solanaHint,
+    phase: solanaPhase,
     connect: connectPhantom,
     disconnect: disconnectPhantom,
   } = useSolanaWallet();
@@ -96,42 +105,7 @@ function App() {
     };
   }, [showIntro, introLogoReady]);
 
-  // Auto-connect MetaMask if previously connected
-  useEffect(() => {
-    const checkMetaMaskConnection = async () => {
-      if (window.ethereum) {
-        try {
-          const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-          if (accounts.length > 0) {
-            setEthAddress(accounts[0]);
-          }
-        } catch (error) {
-          console.log('Could not check MetaMask connection:', error);
-        }
-      }
-    };
-
-    checkMetaMaskConnection();
-
-    // Listen for account changes
-    if (window.ethereum) {
-      const handleAccountsChanged = (accounts: string[]) => {
-        if (accounts.length > 0) {
-          setEthAddress(accounts[0]);
-        } else {
-          setEthAddress('');
-        }
-      };
-
-      (window.ethereum as any).on('accountsChanged', handleAccountsChanged);
-
-      return () => {
-        if (window.ethereum) {
-          (window.ethereum as any).removeListener('accountsChanged', handleAccountsChanged);
-        }
-      };
-    }
-  }, []);
+  // MetaMask connection is handled by useEthereumWallet hook
 
   // Single source of truth for testnet/mainnet across URL + MetaMask + Freighter.
   // Replaces the previous local `currentNetwork` state and 2s page-reload hack
@@ -167,28 +141,14 @@ function App() {
 
 
 
-  // MetaMask connection
+  // MetaMask connection - Using hook
   const connectMetaMask = async () => {
     setIsConnecting(true);
-    setConnectionError('');
-    
     try {
-      if (!window.ethereum) {
-        throw new Error('MetaMask bulunamadı! Lütfen MetaMask yükleyin.');
-      }
-
-      const accounts = await window.ethereum.request({
-        method: 'eth_requestAccounts'
-      });
-
-      if (accounts.length > 0) {
-        setEthAddress(accounts[0]);
-        setShowWalletMenu(false);
-        toast.success('MetaMask Connected!', `Connected to ${accounts[0].slice(0, 8)}...${accounts[0].slice(-6)}`);
-      }
+      await ethWallet.connect();
+      setShowWalletMenu(false);
     } catch (error: any) {
-      setConnectionError(`MetaMask: ${error.message}`);
-      toast.error('Connection Failed', error.message);
+      console.error('MetaMask connection error:', error);
     } finally {
       setIsConnecting(false);
     }
@@ -200,13 +160,13 @@ function App() {
       await connectFreighter();
       setShowWalletMenu(false);
     } catch (error: any) {
-      setConnectionError(`Freighter: ${error.message}`);
+      console.error('Freighter connection error:', error);
     }
   };
 
   // Wallet disconnect
   const disconnectWallets = () => {
-    setEthAddress('');
+    ethWallet.disconnect();
     disconnectFreighter();
     disconnectPhantom();
     setShowWalletMenu(false);
@@ -215,6 +175,12 @@ function App() {
   const isWalletsConnected = ethAddress && stellarConnected;
   const hasAnyConnection = ethAddress || stellarConnected || solanaConnected;
   const connectionLabel = isWalletsConnected ? 'Connected' : hasAnyConnection ? 'Partial' : 'Connect Wallet';
+  const walletError = [ethWallet.error, stellarError, solanaError].filter(Boolean).join('  ·  ');
+  const walletDiagnostics = [
+    `MetaMask: ${ethWallet.phase}${ethWallet.errorCode ? ` (${ethWallet.errorCode})` : ''}`,
+    `Freighter: ${stellarPhase}${stellarErrorCode ? ` (${stellarErrorCode})` : ''}`,
+    `Phantom: ${solanaPhase}${solanaErrorCode ? ` (${solanaErrorCode})` : ''}`,
+  ];
 
   return (
     <div className="app-shell min-h-screen text-white flex flex-col">
@@ -342,9 +308,25 @@ function App() {
                 <div className="absolute right-0 top-full z-[100] mt-2.5 w-[min(21rem,calc(100vw-2rem))] rounded-2xl border border-[#4f6bff]/22 bg-[#06091a]/96 p-4 shadow-2xl shadow-black/60 backdrop-blur-2xl">
                   <p className="mb-3.5 text-center text-sm font-semibold text-white/90">Connect Wallets</p>
 
-                  {(connectionError || stellarError) && (
+                  {(walletError || stellarError || solanaError) && (
                     <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3">
-                      <p className="text-xs text-red-300">{connectionError || stellarError}</p>
+                      {ethWallet.error && (
+                        <p className="text-xs text-red-300 mb-1"><strong>MetaMask:</strong> {ethWallet.error}</p>
+                      )}
+                      {stellarError && (
+                        <p className="text-xs text-red-300 mb-1"><strong>Freighter:</strong> {stellarError}</p>
+                      )}
+                      {solanaError && (
+                        <p className="text-xs text-red-300"><strong>Phantom:</strong> {solanaError}</p>
+                      )}
+                      {(ethWallet.hint || stellarHint || solanaHint) && (
+                        <p className="text-xs text-slate-400 mt-1">
+                          {ethWallet.hint || stellarHint || solanaHint}
+                        </p>
+                      )}
+                      <p className="mt-2 text-[0.65rem] text-slate-500">
+                        {walletDiagnostics.join(' · ')}
+                      </p>
                     </div>
                   )}
 
@@ -360,13 +342,21 @@ function App() {
                           <div className="text-[0.7rem] text-slate-400">Ethereum</div>
                         </div>
                       </div>
-                      {ethAddress ? (
+                      {ethWallet.isConnected && ethAddress ? (
                         <div className="text-right">
                           <div className="flex items-center gap-1 mb-0.5">
                             <div className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                             <span className="text-[0.7rem] text-emerald-400">Connected</span>
                           </div>
                           <p className="text-[0.7rem] text-slate-400">{ethAddress.substring(0, 6)}…{ethAddress.substring(ethAddress.length - 4)}</p>
+                        </div>
+                      ) : !ethWallet.isInstalled ? (
+                        <div className="text-right">
+                          <div className="flex items-center gap-1 mb-0.5">
+                            <div className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                            <span className="text-[0.7rem] text-red-400">Missing</span>
+                          </div>
+                          <p className="text-[0.7rem] text-slate-400">{ethWallet.hint}</p>
                         </div>
                       ) : (
                         <button
@@ -400,6 +390,14 @@ function App() {
                             <span className="text-[0.7rem] text-emerald-400">Connected</span>
                           </div>
                           <p className="text-[0.7rem] text-slate-400">{stellarAddress.substring(0, 6)}…{stellarAddress.substring(stellarAddress.length - 4)}</p>
+                        </div>
+                      ) : stellarError ? (
+                        <div className="text-right max-w-[10rem]">
+                          <div className="flex items-center gap-1 mb-0.5">
+                            <div className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                            <span className="text-[0.7rem] text-red-400">Error</span>
+                          </div>
+                          <p className="text-[0.65rem] text-slate-400 line-clamp-2">{stellarHint}</p>
                         </div>
                       ) : (
                         <button
@@ -442,6 +440,14 @@ function App() {
                             <span className="text-[0.7rem] text-emerald-400">Connected</span>
                           </div>
                           <p className="text-[0.7rem] text-slate-400">{solanaAddress.substring(0, 6)}…{solanaAddress.substring(solanaAddress.length - 4)}</p>
+                        </div>
+                      ) : solanaError ? (
+                        <div className="text-right max-w-[10rem]">
+                          <div className="flex items-center gap-1 mb-0.5">
+                            <div className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                            <span className="text-[0.7rem] text-red-400">Error</span>
+                          </div>
+                          <p className="text-[0.65rem] text-slate-400 line-clamp-2">{solanaHint}</p>
                         </div>
                       ) : (
                         <button

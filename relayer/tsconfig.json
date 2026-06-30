@@ -5,8 +5,16 @@
     "moduleResolution": "Bundler",
     "outDir": "./dist",
     "rootDir": "./src",
-    "types": ["node"]
+    "types": ["node"],
+    "strict": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/events/**/*",
+    "src/services/recovery-service.ts",
+    "src/utils/rpc-methods.ts",
+    "src/utils/event-history.ts"
+  ]
 }

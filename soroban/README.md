@@ -121,3 +121,7 @@ stellar contract bindings typescript \
 | Admin | Update min safety deposit, set resolver registry address, slash registered resolvers | Move locked HTLC funds; bypass timelock; alter an existing order |
 | Resolver | Stake, register, fill orders permissionlessly | Steal stake of other resolvers; claim without a valid preimage |
 | User | Lock funds, claim with preimage, refund after timeout | Claim without a valid preimage; refund before timeout |
+
+## IDL and Account Schema Reference
+
+For full details on contract entrypoints, data types, and account storage schemas, please refer to the formal IDL documentation at [HTLC IDL Reference](./docs/HTLC_IDL.md). This documentation is essential for SDK and frontend integration.

@@ -1,0 +1,486 @@
+# Prometheus Alert Rules for WaffleFinance Coordinator
+# Production monitoring ruleset covering listeners, reconciliation, database, and order processing
+#
+# To use this in your environment:
+#
+# Option 1: Include in Prometheus config
+#   rule_files:
+#     - /path/to/coordinator-alerts.yml
+#
+# Option 2: Load via Prometheus HTTP API
+#   curl -X POST http://prometheus:9090/api/v1/rules -d @coordinator-alerts.yml
+
+groups:
+  - name: coordinator_listeners
+    interval: 30s
+    rules:
+      - alert: ListenerLagHigh
+        expr: coordinator_listener_lag_blocks > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: listener
+        annotations:
+          summary: "{{ $labels.chain }} listener lag > 100 blocks (current: {{ $value }})"
+          description: |
+            The {{ $labels.chain }} listener is {{ $value | humanize }} blocks behind.
+            
+            **Impact**: Order processing is delayed by up to {{ $value | humanize }} blocks.
+            
+            **Troubleshooting**:
+            1. Check RPC endpoint availability: curl <RPC_URL>/health
+            2. Verify network connectivity
+            3. Review coordinator logs for errors
+            4. If persists > 30m, consider restarting listener
+
+      - alert: ListenerLagCritical
+        expr: coordinator_listener_lag_blocks > 500
+        for: 2m
+        labels:
+          severity: critical
+          service: coordinator
+          component: listener
+        annotations:
+          summary: "CRITICAL: {{ $labels.chain }} listener {{ $value | humanize }} blocks behind"
+          description: |
+            **Immediate action required** — orders are not being processed.
+            
+            **Possible causes**:
+            - RPC endpoint down or unreachable
+            - Coordinator process hung or crashed
+            - High load causing event processing backlog
+            
+            **Actions**:
+            1. Verify coordinator is running: docker ps
+            2. Restart if necessary: docker restart wafflefinance_coordinator
+            3. Check RPC endpoint health
+            4. Review error logs
+
+      - alert: ListenerNoProgress
+        expr: |
+          changes(coordinator_listener_last_block[5m]) == 0 and 
+          coordinator_listener_lag_blocks > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: coordinator
+          component: listener
+        annotations:
+          summary: "{{ $labels.chain }} listener stalled (no block progress in 5m)"
+          description: |
+            The listener has not processed any new blocks in 5 minutes despite lag.
+            Process may be deadlocked or hung.
+            
+            **Immediate Actions**:
+            1. Check if coordinator process is responsive
+            2. Verify database connectivity
+            3. Restart coordinator
+            4. Escalate if issue persists
+
+      - alert: ListenerEventProcessingHigh
+        expr: |
+          histogram_quantile(0.95, 
+            rate(coordinator_listener_event_processing_duration_seconds_bucket[5m])
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: listener
+        annotations:
+          summary: "{{ $labels.chain }} event processing slow (p95: {{ $value | humanizeDuration }})"
+          description: |
+            Event batch processing is slow, accumulating backlog.
+            
+            **Possible causes**:
+            - Slow database queries
+            - High order volume
+            - Resource contention
+            
+            **Investigate**:
+            - coordinator_db_query_duration_seconds (DB latency)
+            - coordinator_active_orders (order backlog)
+            - Node.js CPU/memory usage
+
+---
+
+  - name: coordinator_reconciliation
+    interval: 30s
+    rules:
+      - alert: ReconciliationFailing
+        expr: |
+          (increase(coordinator_reconciliation_runs_total{result="failure"}[1h]) > 5)
+          and
+          (increase(coordinator_reconciliation_runs_total{result="failure"}[1h]) / 
+           increase(coordinator_reconciliation_runs_total[1h]) > 0.1)
+        labels:
+          severity: warning
+          service: coordinator
+          component: reconciliation
+        annotations:
+          summary: "Reconciliation failing ({{ $value | humanize }} failures in 1h)"
+          description: |
+            Reconciliation is failing repeatedly. Missed on-chain events may not be recovered.
+            
+            **Impact**: Stuck orders, unreplayed secrets, unrecovered funds
+            
+            **Investigate**:
+            1. Check RPC connectivity for all chains (Ethereum, Soroban, Solana)
+            2. Verify database is accessible: SELECT 1;
+            3. Review reconciliation error logs
+            4. Confirm sufficient disk space
+
+      - alert: ReconciliationStale
+        expr: |
+          (time() - coordinator_reconciliation_last_run_timestamp_seconds) > 3600
+        labels:
+          severity: critical
+          service: coordinator
+          component: reconciliation
+        annotations:
+          summary: "Reconciliation stale (last run: {{ $value | humanizeDuration }} ago)"
+          description: |
+            Reconciliation has not completed in > 1 hour. Funds may be at risk.
+            
+            **Possible causes**:
+            - Reconciliation hung on RPC call
+            - Database locked
+            - Coordinator crashed
+            
+            **Actions**:
+            1. Check if coordinator is running
+            2. Verify all RPC endpoints are reachable
+            3. Restart coordinator
+            4. Check for long-running database transactions
+
+      - alert: ReconciliationHighEventReplay
+        expr: |
+          rate(coordinator_reconciliation_events_replayed_total[1h]) > 10
+        for: 30m
+        labels:
+          severity: info
+          service: coordinator
+          component: reconciliation
+        annotations:
+          summary: "High reconciliation event replay rate ({{ $value | humanize }}/sec)"
+          description: |
+            Many events are being replayed, indicating frequent missed events.
+            
+            **Possible causes**:
+            - Listener is falling behind and missing events
+            - On-chain state diverged from database
+            
+            **Monitor**: Listener lag and database consistency
+
+---
+
+  - name: coordinator_database
+    interval: 30s
+    rules:
+      - alert: DbQueryLatencyHigh
+        expr: |
+          histogram_quantile(0.95, 
+            rate(coordinator_db_query_duration_seconds_bucket[5m])
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: database
+        annotations:
+          summary: "DB query latency high (p95: {{ $value | humanizeDuration }})"
+          description: |
+            Database queries are slow, impacting coordinator responsiveness.
+            
+            **Investigate**:
+            1. Check database CPU and disk I/O
+            2. Review slow query logs (if available)
+            3. Check for long-running transactions (SHOW PROCESSLIST in PostgreSQL)
+            4. Review query operation: {{ $labels.operation }}
+
+      - alert: DbConnectionPoolExhausted
+        expr: |
+          rate(coordinator_db_query_duration_seconds_bucket[1m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: database
+        annotations:
+          summary: "High database query rate ({{ $value | humanize }}/sec)"
+          description: |
+            Database query rate is unusually high. Consider:
+            - Scaling database
+            - Optimizing queries
+            - Increasing connection pool
+
+---
+
+  - name: coordinator_orders
+    interval: 30s
+    rules:
+      - alert: ActiveOrdersHigh
+        expr: coordinator_active_orders > 5000
+        for: 15m
+        labels:
+          severity: warning
+          service: coordinator
+          component: orders
+        annotations:
+          summary: "High active order count: {{ $value | humanize }} orders"
+          description: |
+            Unusually high number of orders not yet completed.
+            
+            **Possible causes**:
+            - Slow order processing (check listener lag)
+            - RPC congestion
+            - User spike
+            
+            **Monitor**: Listener lag, DB latency, HTTP latency
+            
+            **Action**: If trending upward continuously, scale coordinator resources
+
+      - alert: SwapCompletionSlow
+        expr: |
+          histogram_quantile(0.95, 
+            rate(coordinator_swap_duration_seconds_bucket[1h])
+          ) > 3600
+        for: 30m
+        labels:
+          severity: warning
+          service: coordinator
+          component: orders
+        annotations:
+          summary: "Swap completion p95 > 1h (current: {{ $value | humanizeDuration }})"
+          description: |
+            Orders are taking longer than expected to complete.
+            
+            **Monitor**:
+            - Listener lag (blocks behind)
+            - Reconciliation health
+            - Database latency
+            - On-chain confirmation times
+
+      - alert: OrderFailureRateHigh
+        expr: |
+          (increase(coordinator_orders_total{status="refunded"}[1h]) +
+           increase(coordinator_orders_total{status="failed"}[1h])) /
+          increase(coordinator_orders_total[1h]) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          service: coordinator
+          component: orders
+        annotations:
+          summary: "Order failure rate high: {{ $value | humanizePercentage }}"
+          description: |
+            More than 5% of orders are being refunded or failing.
+            
+            **Investigate**:
+            - User error (incorrect inputs)
+            - On-chain issues (insufficient liquidity, timelock expiration)
+            - Coordinator bugs
+
+---
+
+  - name: coordinator_http
+    interval: 30s
+    rules:
+      - alert: HttpErrorRateHigh
+        expr: |
+          (sum(rate(coordinator_http_request_duration_seconds_bucket{status_code=~"5.."}[5m]))
+           / sum(rate(coordinator_http_request_duration_seconds_bucket[5m]))) > 0.001
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: http
+        annotations:
+          summary: "HTTP error rate > 0.1% (current: {{ $value | humanizePercentage }})"
+          description: |
+            API is returning errors. Review application logs.
+            
+            **Route**: {{ $labels.route }}
+
+      - alert: HttpLatencyHigh
+        expr: |
+          histogram_quantile(0.95, 
+            rate(coordinator_http_request_duration_seconds_bucket{route!="/health"}[5m])
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: http
+        annotations:
+          summary: "HTTP latency high (p95: {{ $value | humanizeDuration }})"
+          description: |
+            API responses are slow. May indicate resource contention or database issues.
+            
+            **Route**: {{ $labels.route }}
+            **Method**: {{ $labels.method }}
+
+---
+
+  - name: coordinator_rate_limit
+    interval: 30s
+    rules:
+      - alert: RateLimitBurstTraffic
+        expr: |
+          sum(rate(coordinator_rate_limit_decisions_total{decision="block"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "Sustained rate-limit blocks ({{ $value | humanize }}/sec over 5m)"
+          description: |
+            More than 1 request/sec is being rate-limited across all routes.
+            Possible client misbehaviour, bot traffic, or DoS attempt.
+
+            **Investigate**:
+            - coordinator_rate_limit_decisions_total{decision="block"} by (route)
+            - coordinator_http_request_duration_seconds_count by (route, status_code)
+            - Application logs for repeated 429 responses
+            - If from a single IP, consider a temporary block
+
+      - alert: RateLimitPerRouteSpike
+        expr: |
+          rate(coordinator_rate_limit_decisions_total{decision="block"}[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "Rate-limit spike on {{ $labels.route }} ({{ $value | humanize }}/sec)"
+          description: |
+            Sustained 429 rate on {{ $labels.route }}.
+            Check if a resolver is misconfigured or credentials are compromised.
+
+            **Route**: {{ $labels.route }}
+            **Actions**:
+            1. Review logs for the offending IP(s)
+            2. Verify API keys are not exposed
+            3. Check for automated scanning / enumeration
+
+      - alert: RateLimitBlockRateHigh
+        expr: |
+          sum(rate(coordinator_rate_limit_decisions_total{decision="block"}[5m]))
+          /
+          sum(rate(coordinator_rate_limit_decisions_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: ">10% of rate-limited requests are being blocked ({{ $value | humanizePercentage }})"
+          description: |
+            A high proportion of requests are exceeding rate limits.
+            This may indicate brute-force or enumeration patterns.
+
+            **Impact**: Legitimate users may see 429 errors.
+            **Investigate**: Check abuse detector metrics and application logs.
+
+      - alert: RateLimitMultiRouteAbuse
+        expr: coordinator_rate_limit_multi_route_abusers > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "{{ $value | humanize }} IP(s) hitting rate limits on multiple routes — possible enumeration"
+          description: |
+            One or more IPs have been rate-limited on 2+ distinct routes within
+            the abuse-detection window. This is consistent with enumeration,
+            credential stuffing, or API scanning.
+
+            **Check**:
+            - Application logs for `[abuse]` entries
+            - coordinator_rate_limit_active_blocks by route
+            - Route access patterns for the offending IPs
+
+      - alert: RateLimitActiveBlocksHigh
+        expr: sum(coordinator_rate_limit_active_blocks) > 50
+        for: 10m
+        labels:
+          severity: info
+          service: coordinator
+          component: rate-limit
+        annotations:
+          summary: "{{ $value | humanize }} IPs currently rate-limited"
+          description: |
+            A large number of IPs are in rate-limit penalty box.
+            May indicate broad DoS attack or resolver fleet misconfiguration.
+
+---
+
+  - name: coordinator_process
+    interval: 30s
+    rules:
+      - alert: MemoryUsageHigh
+        expr: |
+          coordinator_process_resident_memory_bytes > 500_000_000
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: process
+        annotations:
+          summary: "Coordinator memory usage high ({{ $value | humanize1024 }}B)"
+          description: |
+            Process memory is elevated. Possible memory leak.
+            
+            **Actions**:
+            1. Monitor for continued growth
+            2. Restart if approaching limit
+            3. Enable heap snapshots if growth confirmed
+
+      - alert: MemoryUsageCritical
+        expr: |
+          coordinator_process_resident_memory_bytes > 1_000_000_000
+        for: 5m
+        labels:
+          severity: critical
+          service: coordinator
+          component: process
+        annotations:
+          summary: "CRITICAL: Memory usage > 1GB"
+          description: |
+            Out of memory errors imminent. Restart coordinator immediately.
+
+      - alert: CpuUsageHigh
+        expr: |
+          rate(coordinator_process_cpu_seconds_total[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: coordinator
+          component: process
+        annotations:
+          summary: "Coordinator CPU usage high ({{ $value | humanizePercentage }})"
+          description: |
+            Process is using significant CPU. Consider scaling or investigating performance.
+
+---
+
+  - name: coordinator_readiness
+    interval: 30s
+    rules:
+      - alert: HealthCheckFailing
+        expr: |
+          up{job="coordinator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: coordinator
+          component: health
+        annotations:
+          summary: "Coordinator health check failing"
+          description: |
+            Coordinator is unreachable or not responding to health checks.
+            **Action**: Restart and verify network connectivity.

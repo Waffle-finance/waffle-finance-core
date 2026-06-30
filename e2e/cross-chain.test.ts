@@ -343,4 +343,249 @@ describe("cross-chain HTLC differential harness", () => {
       expect(soroban.getOrder(sorobanId).status).toBe("Claimed");
     });
   });
+
+  // ── Stuck refund paths and order expiry backstop ──────────────────────────
+  //
+  // These scenarios validate the bridge's safety guarantee: regardless of
+  // resolver or relayer failure, users can always recover locked funds once
+  // the timelock expires. The tests advance simulated time to trigger expiry
+  // without any external dependency.
+
+  describe("stuck refund paths and expiry backstop", () => {
+    // ── Scenario 1: Resolver fails before creating the destination lock ──────
+    //
+    // The user locks funds on the source chain. The resolver sees the order
+    // but fails (crash, insufficient balance, network partition) before
+    // creating the destination lock. Only a source-side order exists.
+    // After the source timelock expires, the user should be able to refund.
+
+    describe("resolver fails before destination lock (source-only stuck order)", () => {
+      it.each<{ label: string; factory: () => HtlcSim }>([
+        { label: "EVM source",     factory: () => new EvmHtlcSim()     },
+        { label: "Soroban source", factory: () => new SorobanHtlcSim() },
+        { label: "Solana source",  factory: () => new SolanaHtlcSim()  },
+      ])("$label: user can refund source lock after expiry when resolver never locked destination", ({ factory }) => {
+        const secret = generateSecret();
+        const source = factory();
+
+        const srcId = source.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: TIMELOCK_SECONDS,
+        });
+
+        // Resolver never creates the destination lock — simulates a crash or
+        // insufficient-funds failure on the destination chain.
+
+        // Before expiry: refund must be blocked.
+        expect(() => source.refundOrder(srcId)).toThrow(/NotExpired/);
+        expect(source.getOrder(srcId).status).toBe("Funded");
+
+        // Advance past expiry — this is the backstop the bridge always provides.
+        source.advanceTime(TIMELOCK_SECONDS + 1);
+
+        // User (or any permissionless caller) refunds the source lock.
+        expect(() => source.refundOrder(srcId)).not.toThrow();
+        expect(source.getOrder(srcId).status).toBe("Refunded");
+      });
+    });
+
+    // ── Scenario 2: Resolver locks destination but then goes offline ─────────
+    //
+    // Both legs are locked. The user never claims the destination (e.g. the
+    // relayer is down and the user's wallet is not watching). Neither leg is
+    // claimed. After the shorter destination timelock expires the resolver can
+    // reclaim the destination funds; after the longer source timelock expires
+    // the user can reclaim the source funds.
+
+    describe("both legs locked, neither claimed — full stuck-order refund sequence", () => {
+      it("sol_to_eth: resolver refunds ETH destination, then user refunds Solana source", () => {
+        const secret = generateSecret();
+        const solana = new SolanaHtlcSim();
+        const evm    = new EvmHtlcSim();
+
+        const solanaId = solana.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: SOL_SRC_TIMELOCK_SECONDS, // 24 h
+        });
+        const evmId = evm.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: ETH_DST_TIMELOCK_SECONDS, // 12 h
+        });
+
+        // Resolver goes offline; neither party claims within the destination window.
+        const afterDstExpiry = ETH_DST_TIMELOCK_SECONDS + 1;
+        evm.advanceTime(afterDstExpiry);
+
+        // Resolver can still refund its ETH (it doesn't need user cooperation).
+        expect(() => evm.refundOrder(evmId)).not.toThrow();
+        expect(evm.getOrder(evmId).status).toBe("Refunded");
+
+        // Source order is still live — user cannot refund yet.
+        solana.advanceTime(afterDstExpiry);
+        expect(() => solana.refundOrder(solanaId)).toThrow(/NotExpired/);
+        expect(solana.getOrder(solanaId).status).toBe("Funded");
+
+        // Advance the rest of the source window.
+        const remaining = SOL_SRC_TIMELOCK_SECONDS - afterDstExpiry + 1;
+        solana.advanceTime(remaining);
+
+        // User (or any caller) refunds Solana source.
+        expect(() => solana.refundOrder(solanaId)).not.toThrow();
+        expect(solana.getOrder(solanaId).status).toBe("Refunded");
+      });
+
+      it("eth_to_stellar: both EVM and Soroban source locks refunded independently after expiry", () => {
+        const secret  = generateSecret();
+        const evm     = new EvmHtlcSim();
+        const soroban = new SorobanHtlcSim();
+
+        const evmId     = evm.createOrder({     hashlock: secret.sha256, timelockSeconds: SOL_SRC_TIMELOCK_SECONDS });
+        const sorobanId = soroban.createOrder({ hashlock: secret.sha256, timelockSeconds: ETH_DST_TIMELOCK_SECONDS });
+
+        // Advance past both timelocks.
+        evm.advanceTime(SOL_SRC_TIMELOCK_SECONDS + 1);
+        soroban.advanceTime(ETH_DST_TIMELOCK_SECONDS + 1);
+
+        expect(() => evm.refundOrder(evmId)).not.toThrow();
+        expect(() => soroban.refundOrder(sorobanId)).not.toThrow();
+
+        expect(evm.getOrder(evmId).status).toBe("Refunded");
+        expect(soroban.getOrder(sorobanId).status).toBe("Refunded");
+      });
+    });
+
+    // ── Scenario 3: Coordinator/relayer-assisted backstop refund ────────────
+    //
+    // The coordinator (or an independent relayer) monitors pending orders and
+    // calls refundOrder once the timelock has passed. This is a fully
+    // permissionless operation: the coordinator does not need any special
+    // privileges, and the user's funds are never at risk even if the
+    // coordinator is offline.
+
+    describe("coordinator-assisted backstop refund (permissionless trigger)", () => {
+      it("coordinator triggers refund on Solana after detecting stuck source-only order", () => {
+        const secret = generateSecret();
+        const solana = new SolanaHtlcSim();
+
+        const srcId = solana.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: SOL_SRC_TIMELOCK_SECONDS,
+        });
+
+        // Coordinator polls orders. At this point the order is Funded and has
+        // not yet expired — coordinator must not refund early.
+        expect(solana.getOrder(srcId).status).toBe("Funded");
+        expect(() => solana.refundOrder(srcId)).toThrow(/NotExpired/);
+
+        // Time passes. Coordinator's next reconciliation run happens after expiry.
+        solana.advanceTime(SOL_SRC_TIMELOCK_SECONDS + 1);
+
+        // Coordinator submits the permissionless refund on behalf of the user.
+        expect(() => solana.refundOrder(srcId)).not.toThrow();
+        expect(solana.getOrder(srcId).status).toBe("Refunded");
+      });
+
+      it("coordinator triggers refund on EVM after detecting stuck destination lock", () => {
+        const secret = generateSecret();
+        const evm    = new EvmHtlcSim();
+
+        const dstId = evm.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: ETH_DST_TIMELOCK_SECONDS,
+        });
+
+        // Coordinator sees the destination lock but no claim event arrives within
+        // the window. After expiry it submits the refund.
+        evm.advanceTime(ETH_DST_TIMELOCK_SECONDS + 1);
+
+        expect(() => evm.refundOrder(dstId)).not.toThrow();
+        expect(evm.getOrder(dstId).status).toBe("Refunded");
+      });
+
+      it("coordinator refund on all three chains simultaneously for a three-way stuck order", () => {
+        const secret  = generateSecret();
+        const solana  = new SolanaHtlcSim();
+        const evm     = new EvmHtlcSim();
+        const soroban = new SorobanHtlcSim();
+
+        const solanaId  = solana.createOrder({  hashlock: secret.sha256, timelockSeconds: TIMELOCK_SECONDS });
+        const evmId     = evm.createOrder({     hashlock: secret.sha256, timelockSeconds: TIMELOCK_SECONDS });
+        const sorobanId = soroban.createOrder({ hashlock: secret.sha256, timelockSeconds: TIMELOCK_SECONDS });
+
+        // All three locked, none claimed. Coordinator advances time on all three.
+        solana.advanceTime(TIMELOCK_SECONDS + 1);
+        evm.advanceTime(TIMELOCK_SECONDS + 1);
+        soroban.advanceTime(TIMELOCK_SECONDS + 1);
+
+        // Coordinator submits refunds on all chains — all permissionless.
+        expect(() => solana.refundOrder(solanaId)).not.toThrow();
+        expect(() => evm.refundOrder(evmId)).not.toThrow();
+        expect(() => soroban.refundOrder(sorobanId)).not.toThrow();
+
+        expect(solana.getOrder(solanaId).status).toBe("Refunded");
+        expect(evm.getOrder(evmId).status).toBe("Refunded");
+        expect(soroban.getOrder(sorobanId).status).toBe("Refunded");
+      });
+    });
+
+    // ── Scenario 4: Duplicate refund attempt (idempotency guard) ────────────
+    //
+    // Once a refund has been executed, a second attempt must be rejected.
+    // This prevents double-spend in case of network re-submission.
+
+    describe("refund idempotency — second refund attempt rejected", () => {
+      it.each<{ label: string; factory: () => HtlcSim }>([
+        { label: "EVM",     factory: () => new EvmHtlcSim()     },
+        { label: "Soroban", factory: () => new SorobanHtlcSim() },
+        { label: "Solana",  factory: () => new SolanaHtlcSim()  },
+      ])("$label: second refundOrder on an already-refunded order is rejected", ({ factory }) => {
+        const secret = generateSecret();
+        const chain  = factory();
+
+        const id = chain.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: TIMELOCK_SECONDS,
+        });
+
+        chain.advanceTime(TIMELOCK_SECONDS + 1);
+        chain.refundOrder(id);
+        expect(chain.getOrder(id).status).toBe("Refunded");
+
+        // A second call — e.g. from a re-submitted transaction — must fail.
+        expect(() => chain.refundOrder(id)).toThrow(/OrderNotRefundable/);
+      });
+    });
+
+    // ── Scenario 5: Claim attempt after expiry, then refund succeeds ─────────
+    //
+    // Edge case: the secret arrives too late (after the timelock). The claim
+    // must be rejected and the refund path must remain open.
+
+    describe("claim-after-expiry then refund succeeds", () => {
+      it.each<{ label: string; factory: () => HtlcSim }>([
+        { label: "EVM",     factory: () => new EvmHtlcSim()     },
+        { label: "Soroban", factory: () => new SorobanHtlcSim() },
+        { label: "Solana",  factory: () => new SolanaHtlcSim()  },
+      ])("$label: expired claim is rejected, then refund completes cleanly", ({ factory }) => {
+        const secret = generateSecret();
+        const chain  = factory();
+
+        const id = chain.createOrder({
+          hashlock: secret.sha256,
+          timelockSeconds: TIMELOCK_SECONDS,
+        });
+
+        chain.advanceTime(TIMELOCK_SECONDS + 1);
+
+        // Late-arriving claim must be rejected — order is expired.
+        expect(() => chain.claimOrder(id, secret.preimage)).toThrow(/Expired/);
+        // Order state must still be Funded (claim was rejected, not partially applied).
+        expect(chain.getOrder(id).status).toBe("Funded");
+
+        // Refund path is still intact.
+        expect(() => chain.refundOrder(id)).not.toThrow();
+        expect(chain.getOrder(id).status).toBe("Refunded");
+      });
+    });
+  });
 });

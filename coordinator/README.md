@@ -26,6 +26,31 @@ bridge.
 - Fabricate order or secret data. If the underlying chain does not
   respond, the endpoint returns the real error.
 
+## Secret reveal failure modes
+
+`POST /api/secrets/reveal` classifies failures so clients can decide whether
+to retry or abandon an attempt. Each failure returns a stable `error` code, an
+appropriate HTTP status, and a `retryable` flag:
+
+| `error` code       | HTTP | `retryable` | Meaning / client action |
+| ------------------ | ---- | ----------- | ----------------------- |
+| `validation_error` | 400  | n/a         | Malformed request body (missing/invalid fields). Fix the request. |
+| `invalid_preimage` | 400  | `false`     | The preimage does not hash (sha256 or keccak256) to the order hashlock. Abandon — the secret is wrong. |
+| `unknown_order`    | 404  | `false`     | No order exists for the supplied `publicId`. Abandon or check the id. |
+| `reveal_conflict`  | 409  | `false`     | The order has moved past the point where a reveal is accepted (stale/replayed reveal). Abandon. |
+| `storage_failure`  | 500  | `true`      | The preimage was valid but could not be persisted (transient DB error). Retry. |
+
+Error responses never include the submitted preimage, the on-chain secret, or
+the storage encryption key — only the `publicId` and a category description.
+The typed error model lives in [`src/services/secret-errors.ts`](src/services/secret-errors.ts)
+and is extensible: add a `SecretRevealError` subclass and the route layer maps
+it automatically.
+
+## Secure Logging
+
+Preimages (pre-claim) are secret material. The hashlock is NOT secret and shouldn't be redacted.
+Rule for contributors: **Never let a raw Error or request/response body reach a log or HTTP response outside the classified SecretRevealError path without passing through `sanitizeForLog()` first.**
+
 ## Quick start
 
 ```bash
@@ -139,6 +164,36 @@ docker stop postgres-test && docker rm postgres-test
 The SQL translation unit tests always run (without requiring PostgreSQL),
 while the full database integration tests require `TEST_WITH_POSTGRES=true`.
 
+### Known Edge Cases — Postgres SQL Translation
+
+The SQLite-to-Postgres translation layer (`db.ts:PostgresStatement`) uses
+regex-based conversion, which has known limitations:
+
+1. **Named params inside string literals**: `':named_param'` in SQL is still
+   converted because the regex `:(\w+)` cannot distinguish SQL code from
+   string contents. Use parameterized values instead of inline literals.
+
+2. **`LIKE` case sensitivity**: SQLite's `LIKE` is case-insensitive for ASCII;
+   Postgres `LIKE` is case-sensitive. Use `ILIKE` for case-insensitive
+   matching, or `LOWER()` on both sides.
+
+3. **Type coercion**: SQLite is flexible with type mixing (e.g., comparing
+   `INTEGER` to `TEXT`). Postgres is strict. All current queries use
+   consistent types, but custom queries should match column types exactly.
+
+4. **`INTEGER` vs `BIGINT`**: SQLite `INTEGER` is 64-bit; Postgres `INTEGER`
+   is 32-bit. Migration `006_stale_cleanup_postgres.sql` uses `BIGINT` for
+   unix timestamps (`archived_at`). The other Postgres migrations use
+   `BIGSERIAL` / `BIGINT` for id and timestamp columns respectively.
+
+5. **`INSERT OR IGNORE`**: SQLite syntax; Postgres uses
+   `INSERT ... ON CONFLICT DO NOTHING`. This is handled in the migration
+   runner's inline SQL, not through `PostgresStatement`.
+
+6. **Concurrent migration safety**: The Postgres migration runner uses
+   `ON CONFLICT DO NOTHING` when recording applied migrations, which
+   prevents duplicate records under concurrent coordinator starts.
+
 ### Testing with PostgreSQL
 
 To test the coordinator against a PostgreSQL database:
@@ -178,3 +233,15 @@ docker stop wafflefinance-postgres && docker rm wafflefinance-postgres
 
 The schema migrations in `coordinator/migrations/` are applied automatically
 on startup, making it easy to manage database versions.
+
+### Migration Variants
+
+Some migrations have Postgres-specific variants in `coordinator/migrations/`:
+
+- `002_solana_support_postgres.sql` — uses `ALTER TABLE ... DROP/ADD CONSTRAINT`
+  instead of SQLite's table-recreate approach.
+- `006_stale_cleanup_postgres.sql` — uses `BIGINT` for the `archived_at`
+  column instead of `INTEGER`, and `ADD COLUMN IF NOT EXISTS`.
+
+The migration runner falls back to the SQLite variant if a Postgres-specific
+file is not found, so adding a Postgres variant is always safe.

@@ -150,6 +150,8 @@ describe("POST /api/orders/announce", () => {
       .send(withoutHashlock);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
   });
 
   it("returns a structured 400 for a mismatched direction/chain combo", async () => {
@@ -159,6 +161,7 @@ describe("POST /api/orders/announce", () => {
       .send({ ...BASE_ANNOUNCE, srcChain: "solana", srcAddress: "11111111111111111111111111111111" });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
     expect(Array.isArray(res.body.details)).toBe(true);
     expect(res.body.details.some((d: { path: unknown[] }) => d.path.includes("srcChain"))).toBe(true);
   });
@@ -218,7 +221,7 @@ describe("POST /api/secrets/reveal", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 for an unknown order (secret not accepted)", async () => {
+  it("returns a classified 404 for an unknown order (secret not accepted)", async () => {
     const app = await freshApp();
     const res = await request(app)
       .post("/api/secrets/reveal")
@@ -227,8 +230,12 @@ describe("POST /api/secrets/reveal", () => {
         preimage: "0x" + "ab".repeat(32),
         txHash: "0xabc"
       });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("secret_error");
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("unknown_order");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.retryable).toBe(false);
+    // The reveal error must never echo the submitted preimage.
+    expect(JSON.stringify(res.body)).not.toContain("ab".repeat(32));
   });
 
   it("returns 429 after the reveal rate limit (5/min) is exceeded", async () => {
@@ -239,12 +246,12 @@ describe("POST /api/secrets/reveal", () => {
       txHash: "0xabc"
     };
 
-    // First 5 attempts return 400 (unknown order), not 429.
+    // First 5 attempts return 404 (unknown order), not 429.
     for (let i = 0; i < 5; i++) {
       const res = await request(app)
         .post("/api/secrets/reveal")
         .send(payload);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
     }
 
     // The 6th attempt must be rate-limited.
@@ -256,12 +263,25 @@ describe("POST /api/secrets/reveal", () => {
   });
 });
 
+describe("GET /api/orders/:id", () => {
+  it("returns 404 with a message for an unknown order id", async () => {
+    const app = await freshApp();
+    const res = await request(app).get("/api/orders/wf_0x" + "0".repeat(64));
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("not_found");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
+  });
+});
+
 describe("GET /api/secrets/:publicId", () => {
   it("returns 404 for an unknown publicId", async () => {
     const app = await freshApp();
     const res = await request(app).get("/api/secrets/doesnotexist");
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("not_revealed");
+    expect(typeof res.body.message).toBe("string");
+    expect(res.body.message.length).toBeGreaterThan(0);
   });
 
   it("returns 429 after the read rate limit (30/min) is exceeded", async () => {
@@ -297,9 +317,9 @@ describe("API key bypass", () => {
           .post("/api/secrets/reveal")
           .set("Authorization", "Bearer test-key-abc123")
           .send(payload);
-        // 400 = unknown order, not rate-limited
-        expect(res.status).toBe(400);
-        expect(res.body.error).toBe("secret_error");
+        // 404 = unknown order, not rate-limited
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe("unknown_order");
       }
     } finally {
       if (originalKeys === undefined) {
@@ -345,6 +365,7 @@ describe("GET /api/orders/history", () => {
     const res = await request(app).get("/api/orders/history");
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("validation_error");
+    expect(typeof res.body.message).toBe("string");
     expect(Array.isArray(res.body.details)).toBe(true);
   });
 
@@ -404,5 +425,54 @@ describe("Rate-limit response headers", () => {
     expect(res.headers["x-ratelimit-limit"]).toBeDefined();
     expect(res.headers["x-ratelimit-remaining"]).toBeDefined();
     expect(res.headers["x-ratelimit-reset"]).toBeDefined();
+  });
+});
+
+import { SecretStorageError } from "../src/services/secret-errors.js";
+
+describe("Global Error Handler", () => {
+  it("sanitizes hex strings from generic Error in response and logs", async () => {
+    const app = await freshApp();
+    const logSpy = vi.spyOn(log, 'error');
+    
+    const mockService = vi.spyOn(OrderService.prototype, "history").mockImplementation(() => {
+      const err: any = new Error("leak message: 0xabcdef1234567890abcdef");
+      err.customSecret = "0x1234567890abcdef123456";
+      throw err;
+    });
+
+    const res = await request(app).get("/api/orders/history").query({ address: VALID_ETH_ADDR });
+    
+    expect(res.status).toBe(500);
+    expect(res.body.message).toBe("leak message: [REDACTED_SECRET]");
+    
+    expect(logSpy).toHaveBeenCalled();
+    const loggedError = logSpy.mock.calls[0][0].err;
+    expect(loggedError.message).toBe("leak message: [REDACTED_SECRET]");
+    expect(loggedError.customSecret).toBe("[REDACTED_SECRET]");
+    
+    mockService.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("leaves SecretRevealError subclasses intact", async () => {
+    const app = await freshApp();
+    const logSpy = vi.spyOn(log, 'error');
+    
+    const mockService = vi.spyOn(OrderService.prototype, "history").mockImplementation(() => {
+      throw new SecretStorageError("safe message: 0xabcdef1234567890abcdef");
+    });
+
+    const res = await request(app).get("/api/orders/history").query({ address: VALID_ETH_ADDR });
+    
+    expect(res.status).toBe(500);
+    expect(res.body.message).toBe("safe message: 0xabcdef1234567890abcdef");
+    
+    expect(logSpy).toHaveBeenCalled();
+    const loggedError = logSpy.mock.calls[0][0].err;
+    expect(loggedError.message).toBe("safe message: 0xabcdef1234567890abcdef");
+    
+    mockService.mockRestore();
+    logSpy.mockRestore();
   });
 });

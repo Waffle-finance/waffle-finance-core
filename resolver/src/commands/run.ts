@@ -3,6 +3,8 @@ import { validateResolverConfig, ConfigValidationError } from "../validation.js"
 import { getLogger } from "../logger.js";
 import { EthereumListener } from "../listeners/ethereum.js";
 import { SorobanListener } from "../listeners/soroban.js";
+import { Supervisor, FatalError } from "../supervisor.js";
+import { startResolverHealthServer } from "../health.js";
 
 export async function runCommand(): Promise<void> {
   const cfg = loadConfig();
@@ -23,38 +25,84 @@ export async function runCommand(): Promise<void> {
   }
   log.info("resolver configuration validated");
 
-  const eth = new EthereumListener(cfg.ethereum, log);
-  const stellar = new SorobanListener(cfg.soroban, cfg.pollIntervalMs, log);
+  const eth = new EthereumListener(cfg, log);
+  const stellar = new SorobanListener(cfg, cfg.pollIntervalMs, log);
+  const supervisor = new Supervisor({ log, maxRestarts: 5, restartDelayMs: 5_000 });
+  const healthPort = Number(process.env.RESOLVER_HEALTH_PORT ?? 3003);
+  const healthServer = startResolverHealthServer({ cfg, supervisor }, healthPort);
+  log.info({ port: healthPort }, "resolver health server listening");
 
-  await eth.start({
-    onOrderCreated: (e) => {
-      log.info({ orderId: e.orderId.toString(), hashlock: e.hashlock, amount: e.amount.toString() }, "ETH order created");
-      // Resolver fill logic will be added in Phase 5 once the SDK exposes the
-      // counterpart Soroban submission helper. Until then this resolver is
-      // observe-only and the reference coordinator handles secret relay.
-    },
-    onOrderClaimed: (e) => {
-      log.info({ orderId: e.orderId.toString(), preimage: e.preimage }, "ETH order claimed");
-    },
-    onOrderRefunded: (e) => {
-      log.info({ orderId: e.orderId.toString() }, "ETH order refunded");
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    log.info({ signal }, "shutting down");
+    supervisor.stop();
+
+    try {
+      await eth.stop();
+    } catch (err) {
+      log.warn({ err }, "error stopping Ethereum listener");
     }
-  });
-
-  await stellar.start({
-    onContractEvent: (e) => {
-      log.info({ ledger: e.ledger, txHash: e.txHash, topics: e.topics.length }, "Soroban event");
+    try {
+      stellar.stop();
+    } catch (err) {
+      log.warn({ err }, "error stopping Soroban listener");
     }
-  });
+    healthServer.close();
 
-  const shutdown = async () => {
-    log.info("shutting down");
-    await eth.stop();
-    stellar.stop();
+    // Flush pino's async transport before exiting so the last log lines land.
+    await log.flush?.();
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 
-  log.info("resolver running; press Ctrl-C to exit");
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+  const listeners = {
+    async start() {
+      await eth.start({
+        onOrderCreated: (e) => {
+          log.info(
+            { orderId: e.orderId.toString(), hashlock: e.hashlock, amount: e.amount.toString() },
+            "ETH order created"
+          );
+        },
+        onOrderClaimed: (e) => {
+          log.info({ orderId: e.orderId.toString(), preimage: e.preimage }, "ETH order claimed");
+        },
+        onOrderRefunded: (e) => {
+          log.info({ orderId: e.orderId.toString() }, "ETH order refunded");
+        }
+      });
+
+      await stellar.start({
+        onContractEvent: (e) => {
+          log.info(
+            { ledger: e.ledger, txHash: e.txHash, topics: e.topics.length },
+            "Soroban event"
+          );
+        }
+      });
+    },
+    async stop() {
+      await eth.stop();
+      stellar.stop();
+    }
+  };
+
+  try {
+    log.info("resolver running; press Ctrl-C to exit");
+    await supervisor.run(listeners);
+  } catch (err) {
+    if (err instanceof FatalError) {
+      log.error({ err }, "fatal error — resolver exiting");
+    } else {
+      log.error({ err }, "supervisor exhausted restarts — resolver exiting");
+    }
+    await log.flush?.();
+    process.exit(1);
+  }
 }

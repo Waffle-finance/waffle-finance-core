@@ -9,13 +9,14 @@ import {
   type MigrationRecord,
 } from "../src/persistence/db.js";
 
-// The five logical migrations that schema.sql covers (in name-sort order).
+// The logical migrations that schema.sql covers (in name-sort order).
 const EXPECTED_MIGRATIONS = [
   "001_initial.sql",
   "002_solana_support.sql",
   "003_secret_encryption.sql",
   "004_query_optimizations.sql",
   "005_schema_migrations.sql",
+  "006_stale_cleanup.sql",
 ];
 
 async function freshDb() {
@@ -97,7 +98,7 @@ describe("Schema migration logging — SQLite", () => {
   it("getCurrentSchemaVersion returns the last migration name", async () => {
     const db = await freshDb();
     const version = await getCurrentSchemaVersion(db);
-    expect(version).toBe("005_schema_migrations.sql");
+    expect(version).toBe("006_stale_cleanup.sql");
   });
 
   it("getCurrentSchemaVersion returns null for an empty migrations table", async () => {

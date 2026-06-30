@@ -2,17 +2,20 @@
  * Network Configuration for WaffleFinance
  */
 
+import { loadFrontendConfig } from '@wafflefinance/config';
 import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from './rpc-urls';
 
 export type AppNetworkMode = 'mainnet' | 'testnet';
+
+// Central configuration entry point for the frontend dApp
+export const frontendConfig = loadFrontendConfig((import.meta as any).env || {});
 
 /**
  * When false, the dApp is testnet-only. Mainnet toggle shows "Mainnet Coming".
  * Re-enable with VITE_MAINNET_ENABLED=true (post v2 audit / mainnet launch).
  */
 export const isMainnetEnabled = (): boolean => {
-  const raw = (import.meta as any).env?.VITE_MAINNET_ENABLED;
-  return raw === 'true' || raw === true;
+  return frontendConfig.mainnetEnabled;
 };
 
 /** Clamp requested mode when mainnet is temporarily disabled. */
@@ -34,10 +37,7 @@ function readNetworkNameFromEnvOrUrl(): AppNetworkMode {
     }
   }
 
-  const envNetwork = (import.meta as any).env?.VITE_NETWORK;
-  if (envNetwork === 'mainnet' || envNetwork === 'testnet') {
-    networkName = envNetwork;
-  }
+  networkName = frontendConfig.network;
 
   return resolveNetworkMode(networkName);
 }

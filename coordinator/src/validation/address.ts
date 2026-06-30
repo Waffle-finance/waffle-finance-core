@@ -18,6 +18,8 @@ export const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
 export const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 /** The Ethereum zero address — never a valid counterparty. */
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+/** Order ID pattern: wf_0x followed by 64 hex chars. */
+export const ORDER_ID_PATTERN = /^wf_0x[0-9a-fA-F]{64}$/;
 
 /**
  * Returns an error message if `addr` is not well-formed for `chain`, else null.
@@ -66,4 +68,16 @@ export const historyAddressSchema = z
   .min(1, "address is required")
   .refine(isSupportedAddress, {
     message: `address must be a valid ${SUPPORTED_ADDRESS_FORMATS}`
+  });
+
+/**
+ * Schema for validating order IDs in API paths. Uses the canonical format
+ * wf_0x{64 hex chars}.
+ */
+export const orderIdSchema = z
+  .string({ required_error: "order ID is required", invalid_type_error: "order ID must be a string" })
+  .trim()
+  .min(1, "order ID is required")
+  .refine((id) => ORDER_ID_PATTERN.test(id), {
+    message: `order ID must match format wf_0x{64 hex chars}`
   });

@@ -1,6 +1,6 @@
 {
   "name": "@wafflefinance/e2e",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Cross-chain differential test harness (EVM HTLCEscrow ↔ Soroban wafflefinance-htlc). Verifies the sha256 hashlock and preimage semantics round-trip across both chain clients using the shared @wafflefinance/sdk secret helpers.",
   "type": "module",
   "private": true,

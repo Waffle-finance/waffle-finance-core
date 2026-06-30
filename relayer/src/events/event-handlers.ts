@@ -6,6 +6,7 @@
 import { EventEmitter } from 'events';
 import { OrdersService } from './orders.js';
 import ProgressiveFillManager from './partial-fills.js';
+import { sanitizeForLog } from '../utils/sanitize-for-log.js';
 
 // 1inch Fusion+ compliant event types
 export enum EventType {
@@ -320,12 +321,14 @@ export class FusionEventManager extends EventEmitter {
           listener.lastNotified = Date.now();
           notifiedCount++;
         } catch (error) {
-          console.error(`❌ Error notifying listener ${listener.id}:`, error);
+          const hashTag = eventMessage.metadata.orderHash ? ` orderHash=${eventMessage.metadata.orderHash}` : '';
+          console.error(`❌${hashTag} Error notifying listener ${listener.id}:`, sanitizeForLog(error));
         }
       }
     });
 
-    console.log(`📡 Event ${eventType} broadcasted to ${notifiedCount} listeners`);
+    const hashTag = metadata.orderHash ? ` orderHash=${metadata.orderHash}` : '';
+    console.log(`📡${hashTag} Event ${eventType} broadcasted to ${notifiedCount} listeners`);
 
     // Also emit through EventEmitter for internal use
     this.emit(eventType, eventMessage);
@@ -416,7 +419,7 @@ export class FusionEventManager extends EventEmitter {
    * Trigger test events for development
    */
   triggerTestEvents(orderHash: string): void {
-    console.log(`🧪 Triggering test events for order: ${orderHash}`);
+    console.log(`🧪 orderHash=${orderHash} Triggering test events for order: ${orderHash}`);
 
     // Order created
     this.emitEvent(EventType.OrderCreated, {

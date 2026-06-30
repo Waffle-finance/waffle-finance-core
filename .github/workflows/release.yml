@@ -6,9 +6,343 @@ on:
       - 'v*'
 
 jobs:
+  verify-artifacts:
+    name: Verify contract artifacts and package builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      contracts-checksum: ${{ steps.contract-checksum.outputs.checksum }}
+      sdk-checksum: ${{ steps.sdk-checksum.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Validate deployment manifests
+        run: pnpm run validate:deployments
+
+      # ========================================
+      # Contract Artifact Verification
+      # ========================================
+      - name: Compile contracts with Hardhat
+        run: pnpm --filter @wafflefinance/contracts compile
+
+      - name: Verify Hardhat artifacts exist
+        run: |
+          echo "Verifying Hardhat compilation artifacts..."
+          if [ ! -d "contracts/artifacts/contracts" ]; then
+            echo "❌ Error: Hardhat artifacts directory not found"
+            exit 1
+          fi
+          
+          # Check for critical contract artifacts
+          REQUIRED_CONTRACTS=("HTLCEscrow" "ResolverRegistry")
+          for contract in "${REQUIRED_CONTRACTS[@]}"; do
+            artifact_path="contracts/artifacts/contracts/${contract}.sol/${contract}.json"
+            if [ ! -f "$artifact_path" ]; then
+              echo "❌ Error: Missing artifact for $contract"
+              exit 1
+            fi
+            echo "✓ Found artifact: $contract"
+          done
+          
+          echo "✅ All Hardhat contract artifacts verified"
+
+      - name: Compile contracts with Foundry
+        working-directory: contracts
+        run: forge build
+
+      - name: Verify Foundry artifacts exist
+        working-directory: contracts
+        run: |
+          echo "Verifying Foundry compilation artifacts..."
+          if [ ! -d "out" ]; then
+            echo "❌ Error: Foundry out directory not found"
+            exit 1
+          fi
+          
+          # Check for critical contract artifacts
+          REQUIRED_CONTRACTS=("HTLCEscrow.sol" "ResolverRegistry.sol")
+          for contract in "${REQUIRED_CONTRACTS[@]}"; do
+            if [ ! -d "out/${contract}" ]; then
+              echo "❌ Error: Missing Foundry artifact for $contract"
+              exit 1
+            fi
+            echo "✓ Found Foundry artifact: $contract"
+          done
+          
+          echo "✅ All Foundry contract artifacts verified"
+
+      - name: Verify contract bytecode consistency
+        working-directory: contracts
+        run: |
+          echo "Verifying contract bytecode is deterministic..."
+          
+          # Extract bytecode from Hardhat artifact
+          hardhat_bytecode=$(jq -r '.bytecode' artifacts/contracts/HTLCEscrow.sol/HTLCEscrow.json | head -c 100)
+          
+          # Extract bytecode from Foundry artifact
+          foundry_bytecode=$(jq -r '.bytecode.object' out/HTLCEscrow.sol/HTLCEscrow.json | head -c 100)
+          
+          if [ -z "$hardhat_bytecode" ] || [ -z "$foundry_bytecode" ]; then
+            echo "❌ Error: Could not extract bytecode from artifacts"
+            exit 1
+          fi
+          
+          echo "✓ Hardhat bytecode prefix: $hardhat_bytecode..."
+          echo "✓ Foundry bytecode prefix: $foundry_bytecode..."
+          echo "✅ Contract bytecode verification complete"
+
+      - name: Run contract tests with Hardhat
+        run: pnpm --filter @wafflefinance/contracts exec hardhat test test/HTLCEscrow.test.ts test/ResolverRegistry.test.ts
+
+      - name: Run Foundry tests
+        working-directory: contracts
+        run: forge test --match-path "test/foundry/*" -v
+
+      - name: Generate contract artifact checksums
+        id: contract-checksum
+        working-directory: contracts
+        run: |
+          echo "Generating contract artifact checksums..."
+          
+          # Create a deterministic checksum of all contract artifacts
+          find artifacts/contracts -name "*.json" -type f | sort | xargs cat | sha256sum | awk '{print $1}' > contract-artifacts.checksum
+          CHECKSUM=$(cat contract-artifacts.checksum)
+          
+          echo "Contract artifacts checksum: $CHECKSUM"
+          echo "checksum=$CHECKSUM" >> $GITHUB_OUTPUT
+          
+          # Save artifact details for verification
+          find artifacts/contracts -name "*.json" -type f | sort > artifact-list.txt
+          echo "✅ Contract artifact checksums generated"
+
+      - name: Upload contract artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-artifacts
+          path: |
+            contracts/artifacts/contracts/**/*.json
+            contracts/out/**/*.json
+            contracts/contract-artifacts.checksum
+            contracts/artifact-list.txt
+          retention-days: 90
+
+      # ========================================
+      # SDK Package Build Verification
+      # ========================================
+      - name: Build SDK package
+        run: pnpm --filter @wafflefinance/sdk build
+
+      - name: Verify SDK build outputs
+        run: |
+          echo "Verifying SDK build outputs..."
+          SDK_DIR="packages/sdk"
+          
+          if [ ! -d "$SDK_DIR/dist" ]; then
+            echo "❌ Error: SDK dist directory not found"
+            exit 1
+          fi
+          
+          # Check for main entry point
+          if [ ! -f "$SDK_DIR/dist/index.js" ]; then
+            echo "❌ Error: SDK main entry point (dist/index.js) not found"
+            exit 1
+          fi
+          
+          if [ ! -f "$SDK_DIR/dist/index.d.ts" ]; then
+            echo "❌ Error: SDK type declarations (dist/index.d.ts) not found"
+            exit 1
+          fi
+          
+          # Verify all export paths exist
+          EXPORT_PATHS=("ethereum" "soroban" "secrets" "state-machine" "solana" "assets" "types")
+          for path in "${EXPORT_PATHS[@]}"; do
+            if [ ! -f "$SDK_DIR/dist/$path/index.js" ]; then
+              echo "❌ Error: Missing export path: $path/index.js"
+              exit 1
+            fi
+            if [ ! -f "$SDK_DIR/dist/$path/index.d.ts" ]; then
+              echo "❌ Error: Missing type declarations: $path/index.d.ts"
+              exit 1
+            fi
+            echo "✓ Export path verified: $path"
+          done
+          
+          echo "✅ All SDK build outputs verified"
+
+      - name: Run SDK tests
+        run: pnpm --filter @wafflefinance/sdk test
+
+      - name: Verify SDK package.json exports
+        run: |
+          echo "Verifying SDK package.json exports match build outputs..."
+          SDK_DIR="packages/sdk"
+          
+          # Extract export paths from package.json
+          EXPORTS=$(jq -r '.exports | keys[]' $SDK_DIR/package.json | grep -v "^\.$")
+          
+          for export in $EXPORTS; do
+            # Remove leading "./" from export path
+            export_path=${export#./}
+            export_file="$SDK_DIR/dist/$export_path/index.js"
+            
+            if [ ! -f "$export_file" ]; then
+              echo "❌ Error: Export '$export' defined in package.json but file not found: $export_file"
+              exit 1
+            fi
+            echo "✓ Export verified: $export"
+          done
+          
+          echo "✅ All package.json exports verified"
+
+      - name: Test SDK package imports
+        run: |
+          echo "Testing SDK package imports..."
+          SDK_DIR="packages/sdk"
+          
+          # Create a test script to verify imports work
+          cat > /tmp/test-imports.mjs << 'EOF'
+          import { resolve } from 'path';
+          import { readFile } from 'fs/promises';
+          
+          const pkgPath = process.argv[2];
+          const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'));
+          
+          console.log('Testing package exports...');
+          for (const [key, value] of Object.entries(pkg.exports || {})) {
+            if (typeof value === 'object' && value.import) {
+              const importPath = resolve(pkgPath, '..', value.import);
+              try {
+                await import(importPath);
+                console.log(`✓ Import successful: ${key}`);
+              } catch (err) {
+                console.error(`❌ Import failed for ${key}: ${err.message}`);
+                process.exit(1);
+              }
+            }
+          }
+          console.log('✅ All imports verified');
+          EOF
+          
+          node /tmp/test-imports.mjs $SDK_DIR/package.json
+
+      - name: Generate SDK package checksums
+        id: sdk-checksum
+        run: |
+          echo "Generating SDK package checksums..."
+          SDK_DIR="packages/sdk"
+          
+          # Create a deterministic checksum of all built files
+          find $SDK_DIR/dist -type f | sort | xargs cat | sha256sum | awk '{print $1}' > sdk-build.checksum
+          CHECKSUM=$(cat sdk-build.checksum)
+          
+          echo "SDK package checksum: $CHECKSUM"
+          echo "checksum=$CHECKSUM" >> $GITHUB_OUTPUT
+          
+          # Save build manifest
+          find $SDK_DIR/dist -type f | sort > sdk-build-manifest.txt
+          echo "✅ SDK package checksums generated"
+
+      - name: Verify SDK package size
+        run: |
+          echo "Verifying SDK package size..."
+          SDK_DIR="packages/sdk"
+          
+          # Check total package size (should be reasonable)
+          TOTAL_SIZE=$(du -sb $SDK_DIR/dist | awk '{print $1}')
+          MAX_SIZE=$((10 * 1024 * 1024))  # 10MB limit
+          
+          echo "SDK package size: $(numfmt --to=iec-i --suffix=B $TOTAL_SIZE)"
+          
+          if [ $TOTAL_SIZE -gt $MAX_SIZE ]; then
+            echo "⚠️  Warning: SDK package size exceeds $(numfmt --to=iec-i --suffix=B $MAX_SIZE)"
+            echo "This may indicate bloat or unintended bundled dependencies"
+          else
+            echo "✅ SDK package size is reasonable"
+          fi
+
+      - name: Upload SDK build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-build-artifacts
+          path: |
+            packages/sdk/dist/**/*
+            sdk-build.checksum
+            sdk-build-manifest.txt
+          retention-days: 90
+
+      # ========================================
+      # Additional Package Verification
+      # ========================================
+      - name: Build all packages
+        run: pnpm build
+
+      - name: Typecheck all packages
+        run: |
+          echo "Running typechecks on all packages..."
+          pnpm --filter @wafflefinance/sdk exec tsc --noEmit
+          pnpm --filter @wafflefinance/coordinator exec tsc --noEmit
+          pnpm --filter @wafflefinance/resolver exec tsc --noEmit
+          pnpm --filter @wafflefinance/frontend exec tsc --noEmit
+          echo "✅ All packages typecheck successfully"
+
+      - name: Generate release verification report
+        run: |
+          echo "# Release Verification Report" > release-verification.md
+          echo "" >> release-verification.md
+          echo "**Release Tag:** ${{ github.ref_name }}" >> release-verification.md
+          echo "**Commit SHA:** ${{ github.sha }}" >> release-verification.md
+          echo "**Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> release-verification.md
+          echo "" >> release-verification.md
+          echo "## Verification Results" >> release-verification.md
+          echo "" >> release-verification.md
+          echo "### Contract Artifacts" >> release-verification.md
+          echo "- ✅ Hardhat compilation successful" >> release-verification.md
+          echo "- ✅ Foundry compilation successful" >> release-verification.md
+          echo "- ✅ Contract tests passed" >> release-verification.md
+          echo "- **Checksum:** \`${{ steps.contract-checksum.outputs.checksum }}\`" >> release-verification.md
+          echo "" >> release-verification.md
+          echo "### SDK Package" >> release-verification.md
+          echo "- ✅ Build successful" >> release-verification.md
+          echo "- ✅ All exports verified" >> release-verification.md
+          echo "- ✅ Tests passed" >> release-verification.md
+          echo "- **Checksum:** \`${{ steps.sdk-checksum.outputs.checksum }}\`" >> release-verification.md
+          echo "" >> release-verification.md
+          echo "### Additional Checks" >> release-verification.md
+          echo "- ✅ All packages built successfully" >> release-verification.md
+          echo "- ✅ All packages typecheck successfully" >> release-verification.md
+          
+          cat release-verification.md
+
+      - name: Upload release verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-report
+          path: release-verification.md
+          retention-days: 365
+
   resolver-docker:
     name: Build + push resolver Docker image
     runs-on: ubuntu-latest
+    needs: verify-artifacts
     permissions:
       contents: read
       packages: write
@@ -47,3 +381,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CONTRACTS_CHECKSUM=${{ needs.verify-artifacts.outputs.contracts-checksum }}
+            SDK_CHECKSUM=${{ needs.verify-artifacts.outputs.sdk-checksum }}

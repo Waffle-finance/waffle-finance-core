@@ -524,6 +524,117 @@ describe("HTLCEscrow v2", () => {
     });
   });
 
+  describe("claimOrder — digest mode differential", () => {
+    async function createSingleOrder(
+      escrow: HTLCEscrow,
+      sender: any,
+      beneficiary: any,
+      hashlock: string
+    ): Promise<void> {
+      await escrow
+        .connect(sender)
+        .createOrder(
+          beneficiary.address,
+          sender.address,
+          ZERO_ADDR,
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: AMOUNT + SAFETY_DEPOSIT }
+        );
+    }
+
+    it("keccak256 hashlock: rejects a wrong preimage", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.keccak256(preimage);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+
+      const wrongPreimage = randomBytes32();
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, wrongPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("sha256 hashlock: stores preimageKeccak as keccak256 of the claimed preimage", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+
+      const order = await escrow.getOrder(1);
+      expect(order.preimageKeccak).to.equal(ethers.keccak256(preimage));
+    });
+
+    it("keccak256 hashlock: stores preimageKeccak as keccak256 of the claimed preimage", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.keccak256(preimage);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+
+      const order = await escrow.getOrder(1);
+      expect(order.preimageKeccak).to.equal(ethers.keccak256(preimage));
+    });
+
+    it("rejects a preimage that is not exactly 32 bytes", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+
+      const shortPreimage = ethers.hexlify(ethers.randomBytes(16));
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, shortPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+
+      const longPreimage = ethers.hexlify(ethers.randomBytes(64));
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, longPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("sha256 hashlock: passing keccak256(secret) as preimage is rejected", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const secret = randomBytes32();
+      const hashlock = ethers.sha256(secret);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+
+      // Neither sha256 nor keccak256 of keccak256(secret) equals sha256(secret).
+      const wrongPreimage = ethers.keccak256(secret);
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, wrongPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("keccak256 hashlock: passing sha256(secret) as preimage is rejected", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const secret = randomBytes32();
+      const hashlock = ethers.keccak256(secret);
+
+      await createSingleOrder(escrow, sender, beneficiary, hashlock);
+
+      // Neither sha256 nor keccak256 of sha256(secret) equals keccak256(secret).
+      const wrongPreimage = ethers.sha256(secret);
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, wrongPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+  });
+
   describe("native payout failure handling", () => {
     async function setupOrder(beneficiary: string) {
       const [sender] = await ethers.getSigners();

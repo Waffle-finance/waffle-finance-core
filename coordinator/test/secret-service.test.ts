@@ -24,8 +24,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { openDatabase } from "../src/persistence/db.js";
 import { OrdersRepository } from "../src/persistence/orders-repo.js";
-import { OrderService } from "../src/services/order-service.js";
+import { OrderService, OrderValidationError } from "../src/services/order-service.js";
 import { SecretService } from "../src/services/secret-service.js";
+import {
+  SecretRevealError,
+  UnknownOrderError,
+  InvalidPreimageError,
+  RevealConflictError,
+  SecretStorageError
+} from "../src/services/secret-errors.js";
 import {
   deriveKey,
   encryptSecret,
@@ -422,5 +429,103 @@ describe("SecretService: keccak256 hashlock compatibility", () => {
     const publicId = await seedOrder(orders, hashlock);
     await expect(secrets.reveal(publicId, preimage, "0xtxhash")).resolves.toEqual({ ok: true });
     expect(await secrets.get(publicId)).toBe(preimage);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Failure classification — each reveal failure maps to a distinct typed error
+// ---------------------------------------------------------------------------
+
+describe("SecretService: reveal failure classification", () => {
+  it("throws UnknownOrderError for an order that does not exist", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+    const secrets = new SecretService(orders, log);
+
+    const err = await secrets
+      .reveal("nonexistent", "0x" + "a".repeat(64), "0xtx")
+      .catch((e) => e);
+
+    expect(err).toBeInstanceOf(UnknownOrderError);
+    expect(err).toBeInstanceOf(SecretRevealError);
+    expect(err.code).toBe("unknown_order");
+    expect(err.httpStatus).toBe(404);
+    expect(err.retryable).toBe(false);
+  });
+
+  it("throws InvalidPreimageError when the preimage does not match the hashlock", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+    const secrets = new SecretService(orders, log);
+
+    const { hashlock } = makePreimage();
+    const publicId = await seedOrder(orders, hashlock);
+    const wrongPreimage = "0x" + "c".repeat(64);
+
+    const err = await secrets.reveal(publicId, wrongPreimage, "0xtx").catch((e) => e);
+
+    expect(err).toBeInstanceOf(InvalidPreimageError);
+    expect(err.code).toBe("invalid_preimage");
+    expect(err.httpStatus).toBe(400);
+    expect(err.retryable).toBe(false);
+    // SECURITY: the rejected preimage must never appear in the error message.
+    expect(err.message).not.toContain(wrongPreimage);
+    expect(err.message).not.toContain("c".repeat(64));
+  });
+
+  it("throws RevealConflictError when the order cannot accept a reveal (stale/replayed)", async () => {
+    // Stub OrderService so recordSecret rejects with a state-transition error,
+    // mirroring a reveal that arrives after the order moved to a terminal state.
+    const { preimage, hashlock } = makePreimage();
+    const stubOrders = {
+      get: async () => ({ hashlock }),
+      recordSecret: async () => {
+        throw new OrderValidationError("cannot record secret from status refunded");
+      }
+    } as unknown as OrderService;
+    const secrets = new SecretService(stubOrders, log);
+
+    const err = await secrets.reveal("order-1", preimage, "0xtx").catch((e) => e);
+
+    expect(err).toBeInstanceOf(RevealConflictError);
+    expect(err.code).toBe("reveal_conflict");
+    expect(err.httpStatus).toBe(409);
+    expect(err.retryable).toBe(false);
+  });
+
+  it("throws UnknownOrderError when recordSecret races and reports an unknown order", async () => {
+    const { preimage, hashlock } = makePreimage();
+    const stubOrders = {
+      get: async () => ({ hashlock }),
+      recordSecret: async () => {
+        throw new OrderValidationError("unknown order order-1");
+      }
+    } as unknown as OrderService;
+    const secrets = new SecretService(stubOrders, log);
+
+    const err = await secrets.reveal("order-1", preimage, "0xtx").catch((e) => e);
+
+    expect(err).toBeInstanceOf(UnknownOrderError);
+    expect(err.code).toBe("unknown_order");
+  });
+
+  it("throws a retryable SecretStorageError on an unexpected persistence failure", async () => {
+    const { preimage, hashlock } = makePreimage();
+    const stubOrders = {
+      get: async () => ({ hashlock }),
+      recordSecret: async () => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+    } as unknown as OrderService;
+    const secrets = new SecretService(stubOrders, log);
+
+    const err = await secrets.reveal("order-1", preimage, "0xtx").catch((e) => e);
+
+    expect(err).toBeInstanceOf(SecretStorageError);
+    expect(err.code).toBe("storage_failure");
+    expect(err.httpStatus).toBe(500);
+    expect(err.retryable).toBe(true);
+    // The raw DB error string must not leak into the client-facing message.
+    expect(err.message).not.toContain("SQLITE_BUSY");
   });
 });
