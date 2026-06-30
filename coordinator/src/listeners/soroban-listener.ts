@@ -3,26 +3,37 @@ import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
+import { CursorStore } from "../utils/cursor-store.js";
+
+const CURSOR_LABEL = "soroban-listener";
 
 /**
  * Polls the Soroban RPC for HTLC contract events and feeds them into
  * the OrderService.
+ *
+ * The event cursor is persisted to disk on every successful poll so the
+ * listener resumes exactly where it left off after a process restart,
+ * avoiding both missed events and expensive full re-scans.
  */
 export class SorobanListener {
   private readonly server: rpc.Server;
   private readonly log: Logger;
+  private readonly cursorStore: CursorStore;
+  /** Opaque pagination cursor returned by the Soroban RPC. */
   private cursor: string | undefined;
   private stopped = false;
 
   constructor(
     private readonly cfg: CoordinatorConfig,
     private readonly orders: OrderService,
-    log: Logger
+    log: Logger,
+    cursorStore?: CursorStore
   ) {
     this.log = log.child({ component: "SorobanListener" });
     this.server = new rpc.Server(cfg.soroban.rpcUrl, {
       allowHttp: cfg.soroban.rpcUrl.startsWith("http://")
     });
+    this.cursorStore = cursorStore ?? new CursorStore();
   }
 
   start(): void {
@@ -31,7 +42,17 @@ export class SorobanListener {
       return;
     }
     const contractId = this.cfg.soroban.htlcContract;
-    this.log.info({ contract: contractId }, "starting");
+
+    // Restore persisted cursor so we resume from where we left off rather
+    // than re-scanning from the current ledger on every restart.
+    const persisted = this.cursorStore.load(CURSOR_LABEL);
+    if (persisted !== null && typeof persisted === "string") {
+      this.cursor = persisted;
+      this.log.info({ contract: contractId, cursor: this.cursor }, "starting (cursor restored)");
+    } else {
+      this.log.info({ contract: contractId }, "starting (no persisted cursor — will scan from current ledger)");
+    }
+
     void this.loop(contractId);
   }
 
@@ -44,6 +65,9 @@ export class SorobanListener {
       try {
         const startedAt = Date.now();
         const latest = await this.server.getLatestLedger();
+        // When we have a cursor we pass it directly and omit startLedger;
+        // when we have neither we seed from (latestLedger - 1) to avoid
+        // re-scanning the entire ledger history.
         const startLedger = this.cursor === undefined ? latest.sequence - 1 : undefined;
         let processedLedger = startLedger ?? latest.sequence;
         const events = await this.server.getEvents({
@@ -63,7 +87,16 @@ export class SorobanListener {
         }
         recordListenerProgress("soroban", processedLedger, latest.sequence);
         observeListenerEventProcessing("soroban", "poll", startedAt);
-        if (events.cursor) this.cursor = events.cursor;
+
+        if (events.cursor) {
+          this.cursor = events.cursor;
+          // Persist after a successful poll so restarts resume from here.
+          try {
+            this.cursorStore.save(CURSOR_LABEL, this.cursor);
+          } catch (saveErr) {
+            this.log.warn({ err: saveErr }, "failed to persist Soroban cursor");
+          }
+        }
       } catch (err) {
         this.log.warn({ err }, "Soroban poll failed");
       }

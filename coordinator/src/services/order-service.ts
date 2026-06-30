@@ -114,8 +114,13 @@ export class OrderService {
   }): Promise<void> {
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
-    if (!canTransition(order.status, "src_locked") && order.status !== "src_locked") {
-      throw new OrderValidationError(`cannot record src lock from status ${order.status}`);
+    // Idempotent: if the order is already src_locked (or has advanced past it),
+    // a duplicate event (listener replay, reconciler overlap, restart catch-up)
+    // is silently ignored rather than throwing.  The repository layer also
+    // handles terminal statuses as a no-op, so this guard just avoids the
+    // confusing error message on re-application.
+    if (!canTransition(order.status, "src_locked")) {
+      return;
     }
     await this.repo.recordSrcLock(input);
     this.log.info({ publicId: input.publicId, srcOrderId: input.orderId }, "src lock recorded");
@@ -136,8 +141,9 @@ export class OrderService {
   }): Promise<void> {
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
-    if (!canTransition(order.status, "dst_locked") && order.status !== "dst_locked") {
-      throw new OrderValidationError(`cannot record dst lock from status ${order.status}`);
+    // Idempotent: silently ignore if the order is already dst_locked or further.
+    if (!canTransition(order.status, "dst_locked")) {
+      return;
     }
     await this.repo.recordDstLock(input);
     this.log.info({ publicId: input.publicId, dstOrderId: input.orderId }, "dst lock recorded");
@@ -151,8 +157,10 @@ export class OrderService {
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
-    if (!canTransition(order.status, "secret_revealed") && order.status !== "secret_revealed") {
-      throw new OrderValidationError(`cannot record secret from status ${order.status}`);
+    // Idempotent: if the preimage is already recorded (or the order has
+    // moved past secret_revealed), silently skip rather than throwing.
+    if (!canTransition(order.status, "secret_revealed")) {
+      return;
     }
     await this.repo.recordSecretRevealed({ publicId, preimage, txHash, encVersion });
     this.log.info({ publicId }, "secret recorded");

@@ -16,6 +16,7 @@ import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './listeners/contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './utils/adaptive-poll.js';
 import { fetchIncomingEthPayments } from './listeners/eth-incoming-monitor.js';
+import { OrderJournal } from './utils/order-journal.js';
 import {
   expireAbandonedOrders,
   hasAwaitingXlmPayment,
@@ -464,9 +465,14 @@ async function initializeRelayer() {
     console.warn('🔧 Maintenance mode is active');
   }
 
-  // Global order storage (in production this would be a database).
-  // Declared early so chain pollers can skip RPC when nothing is in flight.
-  const activeOrders = new Map<string, any>();
+  // Global order storage — backed by a JSON-file journal so in-flight orders
+  // survive process restarts.  The watchdog can then refund orders that were
+  // awaiting ETH when the relayer was offline.
+  const orderJournal = new OrderJournal();
+  const activeOrders = orderJournal.load();
+  if (activeOrders.size > 0) {
+    console.log(`📂 Rehydrated ${activeOrders.size} in-flight order(s) from journal`);
+  }
   const chainPollers: AdaptivePollHandle[] = [];
   let escrowFactoryPoller: ContractEventPollerHandle | null = null;
   let chainMonitoringStarted = false;
@@ -486,6 +492,14 @@ async function initializeRelayer() {
     orderData: Record<string, unknown>
   ): Promise<void> => {
     activeOrders.set(orderId, orderData);
+    // Persist synchronously — the journal write is atomic so a crash here
+    // at most loses the order added in this call (which has not yet been
+    // acted on by the watchdog anyway).
+    try {
+      orderJournal.persist(activeOrders);
+    } catch (journalErr: any) {
+      console.warn('[order-journal] persist failed:', journalErr?.message ?? journalErr);
+    }
     if (!needsChainMonitoring(activeOrders)) return;
     await ensureChainMonitoring();
     wakeChainPollers();
@@ -512,6 +526,8 @@ async function initializeRelayer() {
     if (expired > 0) {
       console.log(`⏱️ Expired ${expired} abandoned pre-deposit order(s)`);
     }
+    // Flush any in-place mutations (watchdog refunds, status updates) to disk.
+    try { orderJournal.persist(activeOrders); } catch { /* best-effort */ }
     if (chainMonitoringStarted && !needsChainMonitoring(activeOrders)) {
       void stopChainMonitoring();
     }
