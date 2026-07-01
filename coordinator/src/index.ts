@@ -27,7 +27,9 @@ async function main(): Promise<void> {
   const repo = new OrdersRepository(db);
   const orders = new OrderService(repo, log);
   const secrets = new SecretService(orders, log, cfg.secretStorageKey ?? undefined);
-  const quotes = new QuoteService(log);
+  const quotes = new QuoteService(log, {
+    proactiveRefreshIntervalMs: 15_000,
+  });
 
   const reconciler = new Reconciler(cfg, orders, log);
   const staleCleanup = new StaleCleanupService(repo, log);
@@ -79,6 +81,7 @@ async function main(): Promise<void> {
     log.info({ signal }, "shutting down");
     clearInterval(reconcileInterval);
     clearInterval(expiryInterval);
+    quotes.stop();
     ethListener.stop();
     sorobanListener.stop();
     solanaListener.stop();

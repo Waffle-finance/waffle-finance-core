@@ -20,6 +20,9 @@ export type QuoteStaleness = "fresh" | "stale" | "fallback";
  *   - "fresh"    — within freshTtlMs
  *   - "stale"    — within staleTtlMs but a background refresh has been kicked
  *   - "fallback" — beyond maxStaleTtlMs or never fetched; hardcoded price used
+ *
+ * `chain` identifies which blockchain the asset is on, enabling per-chain
+ * freshness evaluation in the frontend.
  */
 export interface QuoteSnapshot {
   pair: string;
@@ -35,6 +38,22 @@ export interface QuoteSnapshot {
   fetchedAt: number;
   /** How many milliseconds old is this snapshot, measured at response time. */
   ageMs: number;
+  /** The source chain for this pair (e.g. "ethereum" for the src leg). */
+  srcChain: string;
+  /** The destination chain for this pair (e.g. "stellar" for the dst leg). */
+  dstChain: string;
+}
+
+/** Cache statistics exposed for monitoring / debugging. */
+export interface QuoteCacheStats {
+  totalEntries: number;
+  entries: Array<{
+    pair: string;
+    ageMs: number;
+    staleness: QuoteStaleness;
+    isFallback: boolean;
+  }>;
+  nextProactiveRefreshInMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +68,12 @@ interface CacheEntry {
   fetchedAt: number;
   /** Whether this entry came from a live API call or is a hardcoded fallback. */
   isFallback: boolean;
+  /** Source chain identifier (e.g. "ethereum"). */
+  srcChain: string;
+  /** Destination chain identifier (e.g. "stellar"). */
+  dstChain: string;
+  /** Number of refreshes this entry has gone through. */
+  refreshCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,11 +114,35 @@ export interface QuoteServiceOptions {
    * Default: 5 minutes.
    */
   maxStaleTtlMs?: number;
+
+  /**
+   * Chain-specific TTL overrides keyed by chain name.
+   * Allows specific chains to have tighter or looser freshness windows.
+   * Example: { solana: { freshTtlMs: 10_000, staleTtlMs: 30_000 } }
+   */
+  perChainTtls?: Record<string, {
+    freshTtlMs?: number;
+    staleTtlMs?: number;
+    maxStaleTtlMs?: number;
+  }>;
+
+  /**
+   * Interval for proactive background refresh timer.
+   * When set, the service will periodically refresh all cached entries before
+   * they expire, reducing stale-serving latency.
+   * Default: 0 (disabled — only reactive refresh).
+   */
+  proactiveRefreshIntervalMs?: number;
 }
 
 const DEFAULT_FRESH_TTL_MS = 15_000;
 const DEFAULT_STALE_TTL_MS = 60_000;
 const DEFAULT_MAX_STALE_TTL_MS = 5 * 60_000;
+
+const PAIR_CHAIN_MAP: Record<string, { srcChain: string; dstChain: string }> = {
+  "ETH-XLM": { srcChain: "ethereum", dstChain: "stellar" },
+  "ETH-SOL": { srcChain: "ethereum", dstChain: "solana" },
+};
 
 // ---------------------------------------------------------------------------
 // QuoteService
@@ -117,6 +166,8 @@ export class QuoteService {
   private readonly freshTtlMs: number;
   private readonly staleTtlMs: number;
   private readonly maxStaleTtlMs: number;
+  private readonly perChainTtls: NonNullable<QuoteServiceOptions["perChainTtls"]>;
+  private readonly proactiveRefreshIntervalMs: number;
 
   /** In-memory cache — one entry per pair key. */
   private readonly cache = new Map<string, CacheEntry>();
@@ -128,11 +179,106 @@ export class QuoteService {
    */
   private readonly inflight = new Map<string, Promise<CacheEntry>>();
 
+  /** Proactive refresh timer handle, if enabled. */
+  private proactiveTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(log: Logger, opts: QuoteServiceOptions = {}) {
     this.log = log;
     this.freshTtlMs = opts.freshTtlMs ?? DEFAULT_FRESH_TTL_MS;
     this.staleTtlMs = opts.staleTtlMs ?? DEFAULT_STALE_TTL_MS;
     this.maxStaleTtlMs = opts.maxStaleTtlMs ?? DEFAULT_MAX_STALE_TTL_MS;
+    this.perChainTtls = opts.perChainTtls ?? {};
+    this.proactiveRefreshIntervalMs = opts.proactiveRefreshIntervalMs ?? 0;
+
+    if (this.proactiveRefreshIntervalMs > 0) {
+      this._startProactiveRefresh();
+    }
+  }
+
+  /**
+   * Stop the proactive refresh timer. Call during shutdown to prevent
+   * stale timer callbacks after the service is no longer needed.
+   */
+  stop(): void {
+    if (this.proactiveTimer !== null) {
+      clearInterval(this.proactiveTimer);
+      this.proactiveTimer = null;
+    }
+  }
+
+  /**
+   * Return cache statistics for monitoring.
+   */
+  getStats(): QuoteCacheStats {
+    const now = Date.now();
+    const entries = Array.from(this.cache.entries()).map(([pair, entry]) => ({
+      pair,
+      ageMs: now - entry.fetchedAt,
+      staleness: this._stalenessFor(entry) as QuoteStaleness,
+      isFallback: entry.isFallback,
+    }));
+
+    return {
+      totalEntries: this.cache.size,
+      entries,
+      nextProactiveRefreshInMs: this.proactiveTimer !== null
+        ? this.proactiveRefreshIntervalMs
+        : -1,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-chain TTL helpers
+  // -------------------------------------------------------------------------
+
+  private _chainForPair(pair: string): string | null {
+    const chains = PAIR_CHAIN_MAP[pair];
+    return chains?.srcChain ?? null;
+  }
+
+  private _effectiveFreshTtl(pair: string): number {
+    const chain = this._chainForPair(pair);
+    const override = chain ? this.perChainTtls[chain]?.freshTtlMs : undefined;
+    return override ?? this.freshTtlMs;
+  }
+
+  private _effectiveStaleTtl(pair: string): number {
+    const chain = this._chainForPair(pair);
+    const override = chain ? this.perChainTtls[chain]?.staleTtlMs : undefined;
+    return override ?? this.staleTtlMs;
+  }
+
+  private _effectiveMaxStaleTtl(pair: string): number {
+    const chain = this._chainForPair(pair);
+    const override = chain ? this.perChainTtls[chain]?.maxStaleTtlMs : undefined;
+    return override ?? this.maxStaleTtlMs;
+  }
+
+  // -------------------------------------------------------------------------
+  // Proactive refresh
+  // -------------------------------------------------------------------------
+
+  private _startProactiveRefresh(): void {
+    this.proactiveTimer = setInterval(() => {
+      for (const [pair] of this.cache) {
+        const freshTtl = this._effectiveFreshTtl(pair);
+        const staleTtl = this._effectiveStaleTtl(pair);
+        const entry = this.cache.get(pair);
+        if (!entry) continue;
+        const age = Date.now() - entry.fetchedAt;
+
+        // Proactively refresh when we're past 80% of the fresh window
+        // or past 50% of the stale window — this keeps data fresh without
+        // blocking user-facing requests.
+        if (age >= freshTtl * 0.8 && age < staleTtl) {
+          this._triggerBackgroundRefresh(pair);
+        }
+      }
+    }, this.proactiveRefreshIntervalMs);
+
+    if (this.proactiveTimer && typeof this.proactiveTimer === "object") {
+      this.proactiveTimer.unref?.();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -146,9 +292,12 @@ export class QuoteService {
    * - If stale: returns from cache and triggers a background refresh.
    * - If expired / cold: blocks on a live fetch (de-duped).
    * - On upstream failure with no valid cache: returns hardcoded fallback.
+   *
+   * @param pair The pair key (e.g. "ETH-XLM").
+   * @param options Optional overrides (e.g. force refresh).
    */
-  async getQuote(pair: string): Promise<QuoteSnapshot> {
-    const entry = await this._resolve(pair);
+  async getQuote(pair: string, options?: { forceRefresh?: boolean }): Promise<QuoteSnapshot> {
+    const entry = await this._resolve(pair, options);
     return this._toSnapshot(entry);
   }
 
@@ -179,34 +328,43 @@ export class QuoteService {
   // SWR resolution logic
   // -------------------------------------------------------------------------
 
-  private async _resolve(pair: string): Promise<CacheEntry> {
+  private async _resolve(pair: string, options?: { forceRefresh?: boolean }): Promise<CacheEntry> {
     const now = Date.now();
     const cached = this.cache.get(pair);
 
+    if (options?.forceRefresh) {
+      return this._blockingFetch(pair);
+    }
+
     if (cached) {
       const age = now - cached.fetchedAt;
+      const freshTtl = this._effectiveFreshTtl(pair);
+      const staleTtl = this._effectiveStaleTtl(pair);
+      const maxStaleTtl = this._effectiveMaxStaleTtl(pair);
 
-      if (age < this.freshTtlMs) {
-        // Fully fresh — serve immediately, no upstream touch.
+      if (age < freshTtl) {
         return cached;
       }
 
-      if (age < this.staleTtlMs) {
-        // Stale-but-acceptable — serve immediately and kick off background
-        // refresh immediately (non-blocking, void the promise).
+      if (age < staleTtl) {
         this._triggerBackgroundRefresh(pair);
         return cached;
       }
 
-      if (age < this.maxStaleTtlMs) {
-        // Past stale window but within max — same pattern.
+      if (age < maxStaleTtl) {
         this._triggerBackgroundRefresh(pair);
         return cached;
       }
     }
 
-    // Cold start or beyond maxStaleTtl — block the caller on a live fetch.
-    // De-dupe: concurrent callers share the same inflight promise.
+    return this._blockingFetch(pair);
+  }
+
+  /**
+   * Block the caller on a live upstream fetch (de-duped across concurrent
+   * callers so a burst collapses into a single network round-trip).
+   */
+  private async _blockingFetch(pair: string): Promise<CacheEntry> {
     const existing = this.inflight.get(pair);
     if (existing) return existing;
 
@@ -251,12 +409,18 @@ export class QuoteService {
     } catch (err) {
       this.log.warn({ err, pair }, "upstream price fetch failed");
 
-      // If we have a previous (possibly stale) entry, refresh its timestamp
-      // just enough to prevent thundering-herd storms while clearly marking
-      // it as a fallback.
+      // If we have a previous entry, mark it as fallback and refresh its
+      // timestamp to prevent thundering-herd storms. The maxStaleTtl will
+      // still cause subsequent callers to block on a live fetch if this
+      // fallback entry itself becomes too old.
       const stale = this.cache.get(pair);
       if (stale) {
-        const refreshed: CacheEntry = { ...stale, fetchedAt: Date.now(), isFallback: true };
+        const refreshed: CacheEntry = {
+          ...stale,
+          fetchedAt: Date.now(),
+          isFallback: true,
+          refreshCount: stale.refreshCount + 1,
+        };
         this.cache.set(pair, refreshed);
         return refreshed;
       }
@@ -293,6 +457,7 @@ export class QuoteService {
       throw new Error(`CoinGecko returned invalid prices for ${pair}: src=${srcUsd} dst=${dstUsd}`);
     }
 
+    const chains = PAIR_CHAIN_MAP[pair] ?? { srcChain: "unknown", dstChain: "unknown" };
     return {
       pair,
       srcUsd,
@@ -300,6 +465,9 @@ export class QuoteService {
       rate: srcUsd / dstUsd,
       fetchedAt: Date.now(),
       isFallback: false,
+      srcChain: chains.srcChain,
+      dstChain: chains.dstChain,
+      refreshCount: 0,
     };
   }
 
@@ -307,20 +475,30 @@ export class QuoteService {
   // Snapshot projection
   // -------------------------------------------------------------------------
 
+  private _stalenessFor(entry: CacheEntry): string {
+    if (entry.isFallback) return "fallback";
+    const now = Date.now();
+    const ageMs = now - entry.fetchedAt;
+    const freshTtl = this._effectiveFreshTtl(entry.pair);
+    if (ageMs < freshTtl) return "fresh";
+    return "stale";
+  }
+
   private _toSnapshot(entry: CacheEntry): QuoteSnapshot {
     const now = Date.now();
     const ageMs = now - entry.fetchedAt;
+    const freshTtl = this._effectiveFreshTtl(entry.pair);
 
     let staleness: QuoteStaleness;
     if (entry.isFallback) {
       staleness = "fallback";
-    } else if (ageMs < this.freshTtlMs) {
+    } else if (ageMs < freshTtl) {
       staleness = "fresh";
     } else {
       staleness = "stale";
     }
 
-    const source: QuoteSource = entry.isFallback ? "fallback" : ageMs < this.freshTtlMs ? "coingecko" : "cache";
+    const source: QuoteSource = entry.isFallback ? "fallback" : ageMs < freshTtl ? "coingecko" : "cache";
 
     return {
       pair: entry.pair,
@@ -331,6 +509,8 @@ export class QuoteService {
       staleness,
       fetchedAt: entry.fetchedAt,
       ageMs,
+      srcChain: entry.srcChain,
+      dstChain: entry.dstChain,
     };
   }
 
@@ -340,6 +520,7 @@ export class QuoteService {
 
   private _hardcodedFallback(pair: string): CacheEntry {
     const prices = FALLBACK_PRICES[pair] ?? { srcUsd: null, dstUsd: null };
+    const chains = PAIR_CHAIN_MAP[pair] ?? { srcChain: "unknown", dstChain: "unknown" };
     return {
       pair,
       srcUsd: prices.srcUsd,
@@ -349,6 +530,9 @@ export class QuoteService {
         : null,
       fetchedAt: Date.now(),
       isFallback: true,
+      srcChain: chains.srcChain,
+      dstChain: chains.dstChain,
+      refreshCount: 0,
     };
   }
 

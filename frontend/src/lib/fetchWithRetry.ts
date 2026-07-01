@@ -2,12 +2,30 @@
  * Retry-aware fetch wrapper with exponential backoff and stale-while-revalidate support
  */
 
-interface FetchWithRetryOptions extends RequestInit {
+export interface CacheOptions {
+  /** TTL for "fresh" data — served immediately without refresh (default: 15s). */
+  freshTtlMs?: number;
+  /** TTL for "stale" data — served immediately, background refresh triggered (default: 60s). */
+  staleTtlMs?: number;
+  /** Absolute max age — beyond this, caller blocks on a live fetch (default: 5min). */
+  maxStaleTtlMs?: number;
+  /** Bypass cache entirely and force a fresh fetch. */
+  bypassCache?: boolean;
+}
+
+export type CacheStaleness = "fresh" | "stale" | "expired";
+
+export interface FetchWithRetryOptions extends RequestInit {
   maxRetries?: number;
   retryDelayMs?: number;
   retryableStatuses?: number[];
   onRetry?: (attempt: number, error: Error) => void;
   fetcher?: typeof fetch;
+}
+
+interface StaleWhileRevalidateOptions extends FetchWithRetryOptions {
+  cache?: CacheOptions;
+  parser?: (response: Response) => Promise<any>;
 }
 
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
@@ -20,7 +38,6 @@ function sleep(ms: number): Promise<void> {
 
 function isRetryableError(error: unknown): boolean {
   if (error instanceof TypeError && error.message.includes('fetch')) {
-    // Network errors (offline, DNS, etc.)
     return true;
   }
   return false;
@@ -48,7 +65,7 @@ export async function fetchWithRetry(
       if (retryableStatuses.includes(response.status)) {
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
         lastError = error;
-        
+
         if (attempt < maxRetries) {
           onRetry?.(attempt + 1, error);
           await sleep(retryDelayMs * Math.pow(2, attempt));
@@ -75,87 +92,160 @@ export async function fetchWithRetry(
 
 /**
  * Stale-while-revalidate fetch: returns cached data immediately if available,
- * then fetches fresh data in the background
+ * then fetches fresh data in the background.
+ *
+ * Supports three-tier staleness: fresh / stale / expired.
+ * Cache TTL is configurable per-key via `cacheOptions`.
  */
 export async function fetchWithStaleWhileRevalidate<T>(
   url: string,
   cacheKey: string,
-  options: FetchWithRetryOptions = {},
-  parser: (response: Response) => Promise<T> = (r) => r.json()
-): Promise<{ data: T; isStale: boolean }> {
-  // Try to get cached data
-  const cached = getCachedData<T>(cacheKey);
-  
-  // Start background refresh
-  const refreshPromise = fetchWithRetry(url, options)
-    .then(async (response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await parser(response);
-      setCachedData(cacheKey, data);
-      return data;
-    })
-    .catch((error) => {
-      console.warn(`Background refresh failed for ${cacheKey}:`, error);
-      throw error;
-    });
+  options: StaleWhileRevalidateOptions = {}
+): Promise<{ data: T; isStale: boolean; staleness: CacheStaleness }> {
+  const cacheOpts: Required<CacheOptions> = {
+    freshTtlMs: options.cache?.freshTtlMs ?? 15_000,
+    staleTtlMs: options.cache?.staleTtlMs ?? 60_000,
+    maxStaleTtlMs: options.cache?.maxStaleTtlMs ?? 5 * 60 * 1000,
+    bypassCache: options.cache?.bypassCache ?? false,
+  };
 
-  // Return cached data immediately if available
-  if (cached) {
-    return { data: cached, isStale: true };
+  // Bypass cache if requested
+  if (cacheOpts.bypassCache) {
+    try {
+      const freshData = await doFetchAndCache(url, cacheKey, options);
+      return { data: freshData, isStale: false, staleness: "fresh" };
+    } catch (error) {
+      // Fallback: try cache even in bypass mode
+      const cached = getCachedDataWithAge<T>(cacheKey);
+      if (cached !== null) {
+        console.warn(`Bypass fetch failed for ${cacheKey}, serving cached fallback`);
+        return { data: cached.data, isStale: true, staleness: "stale" };
+      }
+      throw error;
+    }
   }
 
-  // Otherwise wait for fresh data
+  // Normal path: check cache
+  const cached = getCachedDataWithAge<T>(cacheKey);
+  if (cached !== null) {
+    let isStale: boolean;
+    let staleness: CacheStaleness;
+
+    if (cached.ageMs < cacheOpts.freshTtlMs) {
+      isStale = false;
+      staleness = "fresh";
+    } else if (cached.ageMs < cacheOpts.staleTtlMs) {
+      isStale = true;
+      staleness = "stale";
+    } else if (cached.ageMs < cacheOpts.maxStaleTtlMs) {
+      isStale = true;
+      staleness = "stale";
+    } else {
+      isStale = true;
+      staleness = "expired";
+    }
+
+    if (staleness !== "expired") {
+      // Start background refresh for stale data
+      if (staleness === "stale") {
+        refreshInBackground(url, cacheKey, options);
+      }
+      return { data: cached.data, isStale, staleness };
+    }
+
+    // Data is expired — remove it so we don't serve truly ancient data
+    removeCachedData(cacheKey);
+  }
+
+  // No cache hit or expired: wait for fresh data
   try {
-    const freshData = await refreshPromise;
-    return { data: freshData, isStale: false };
+    const freshData = await doFetchAndCache(url, cacheKey, options);
+    return { data: freshData, isStale: false, staleness: "fresh" };
   } catch (error) {
-    // If refresh fails and we have cached data, use it
-    if (cached) {
-      return { data: cached, isStale: true };
+    // Last resort: check if any cached data survived (e.g. remove failed)
+    const lastResort = getCachedDataWithAge<T>(cacheKey);
+    if (lastResort !== null) {
+      console.warn(`Fetch failed for ${cacheKey}, serving stale cache as fallback`);
+      return { data: lastResort.data, isStale: true, staleness: "stale" };
     }
     throw error;
   }
 }
 
-const CACHE_PREFIX = 'wafflefinance_api_cache_v1';
-const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+async function refreshInBackground<T>(
+  url: string,
+  cacheKey: string,
+  options: StaleWhileRevalidateOptions
+): Promise<void> {
+  try {
+    await doFetchAndCache(url, cacheKey, options);
+  } catch {
+    // Background refresh failures are intentionally swallowed
+  }
+}
 
-function getCachedData<T>(key: string): T | null {
+async function doFetchAndCache<T>(
+  url: string,
+  cacheKey: string,
+  options: StaleWhileRevalidateOptions
+): Promise<T> {
+  const response = await fetchWithRetry(url, options);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await (options.parser?.(response) ?? response.json());
+  setCachedData(cacheKey, data);
+  return data as T;
+}
+
+const CACHE_PREFIX = 'wafflefinance_api_cache_v2';
+
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+interface CacheEntryWithAge<T> {
+  data: T;
+  ageMs: number;
+}
+
+function getCachedDataWithAge<T>(key: string): CacheEntryWithAge<T> | null {
   try {
     const item = localStorage.getItem(`${CACHE_PREFIX}:${key}`);
     if (!item) return null;
 
-    const { data, timestamp } = JSON.parse(item);
-    const age = Date.now() - timestamp;
+    const entry = JSON.parse(item) as CacheEntry<T>;
+    if (!entry || typeof entry.timestamp !== 'number') return null;
 
-    if (age > DEFAULT_CACHE_TTL_MS) {
-      localStorage.removeItem(`${CACHE_PREFIX}:${key}`);
-      return null;
-    }
-
-    return data as T;
-  } catch (error) {
-    console.warn('Failed to parse cached data:', error);
+    return {
+      data: entry.data,
+      ageMs: Date.now() - entry.timestamp,
+    };
+  } catch {
     return null;
   }
 }
 
 function setCachedData<T>(key: string, data: T): void {
   try {
-    const item = {
-      data,
-      timestamp: Date.now(),
-    };
-    localStorage.setItem(`${CACHE_PREFIX}:${key}`, JSON.stringify(item));
+    const entry: CacheEntry<T> = { data, timestamp: Date.now() };
+    localStorage.setItem(`${CACHE_PREFIX}:${key}`, JSON.stringify(entry));
   } catch (error) {
     console.warn('Failed to cache data:', error);
+  }
+}
+
+function removeCachedData(key: string): void {
+  try {
+    localStorage.removeItem(`${CACHE_PREFIX}:${key}`);
+  } catch {
+    // Silently ignore
   }
 }
 
 export function clearApiCache(): void {
   const keys = Object.keys(localStorage);
   for (const key of keys) {
-    if (key.startsWith(CACHE_PREFIX)) {
+    if (key.startsWith(CACHE_PREFIX) || key.startsWith('wafflefinance_api_cache_v1')) {
       localStorage.removeItem(key);
     }
   }
