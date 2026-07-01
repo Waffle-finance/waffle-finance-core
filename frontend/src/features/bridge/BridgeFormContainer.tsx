@@ -73,7 +73,7 @@ function destinationAddressForRoute(
 }
 
 const ETH_TO_XLM_RATE = 10000;
-const MAINNET_CHAIN_ID = '0x1';
+const toHexChainId = (chainId: number) => `0x${BigInt(chainId).toString(16)}`;
 
 // Helper function to save transaction to localStorage for history
 const saveTransactionToHistory = (transaction: {
@@ -177,7 +177,6 @@ const updateTransactionStatus = (orderId: string, status: 'pending' | 'completed
   }
 };
 
-const SEPOLIA_CHAIN_ID = '0xaa36a7'; // 11155111 in hex
 const PRODUCTION_API_BASE_URL = 'https://oversync-k36vx.ondigitalocean.app';
 const API_BASE_URL = import.meta.env.PROD
   ? ''
@@ -194,7 +193,8 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       isTestnet: isTestnetMode,
       ethereum: currentNetwork.ethereum,
       stellar: currentNetwork.stellar,
-      expectedChainId: isTestnetMode ? SEPOLIA_CHAIN_ID : MAINNET_CHAIN_ID
+      solana: currentNetwork.solana,
+      expectedChainId: toHexChainId(currentNetwork.ethereum.id)
     };
   });
 
@@ -208,7 +208,8 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
         isTestnet: isTestnetMode,
         ethereum: currentNetwork.ethereum,
         stellar: currentNetwork.stellar,
-        expectedChainId: isTestnetMode ? SEPOLIA_CHAIN_ID : MAINNET_CHAIN_ID
+        solana: currentNetwork.solana,
+        expectedChainId: toHexChainId(currentNetwork.ethereum.id)
       });
     };
 
@@ -284,10 +285,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     };
 
     const fetchSolBalance = async (addr: string): Promise<string> => {
-      const rpcUrl = networkInfo.isTestnet
-        ? 'https://api.devnet.solana.com'
-        : 'https://api.mainnet-beta.solana.com';
-      const res = await fetch(rpcUrl, {
+      const res = await fetch(networkInfo.solana.rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [addr] }),
@@ -315,7 +313,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
 
     loadBalance();
     return () => { cancelled = true; };
-  }, [direction, ethAddress, stellarAddress, solanaAddress, networkInfo.stellar.horizonUrl, networkInfo.isTestnet]);
+  }, [direction, ethAddress, stellarAddress, solanaAddress, networkInfo.stellar.horizonUrl, networkInfo.solana.rpcUrl]);
   
   // Fetch live prices from the relayer whenever the user is about to need a
   // quote. The relayer caches CoinGecko responses for 60s, so a flurry of
@@ -516,20 +514,20 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           if (switchError.code === 4902) {
             // Network not added yet
             const networkConfig = networkInfo.isTestnet ? {
-                chainId: SEPOLIA_CHAIN_ID,
+                chainId: networkInfo.expectedChainId,
                 chainName: 'Sepolia Testnet',
-                rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
-                blockExplorerUrls: ['https://sepolia.etherscan.io'],
+                rpcUrls: [networkInfo.ethereum.rpcUrl],
+                blockExplorerUrls: [networkInfo.ethereum.explorerUrl],
                 nativeCurrency: {
                   name: 'SepoliaETH',
                   symbol: 'SEP',
                   decimals: 18
                 }
             } : {
-              chainId: MAINNET_CHAIN_ID,
+              chainId: networkInfo.expectedChainId,
               chainName: 'Ethereum Mainnet',
-              rpcUrls: ['https://ethereum-rpc.publicnode.com'],
-              blockExplorerUrls: ['https://etherscan.io'],
+              rpcUrls: [networkInfo.ethereum.rpcUrl],
+              blockExplorerUrls: [networkInfo.ethereum.explorerUrl],
               nativeCurrency: {
                 name: 'Ether',
                 symbol: 'ETH',

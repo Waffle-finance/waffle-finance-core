@@ -1,19 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
-import { isMainnetEnabled, isTestnet, resolveNetworkMode } from '../config/networks';
-import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from '../config/rpc-urls';
+import { getNetworkConfigForMode, isMainnetEnabled, isTestnet, resolveNetworkMode } from '../config/networks';
 
 export type NetworkMode = 'testnet' | 'mainnet';
-
-const ETH_MAINNET_CHAIN_ID_HEX = '0x1';
-const ETH_SEPOLIA_CHAIN_ID_HEX = '0xaa36a7';
-
-const STELLAR_MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
-const STELLAR_TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015';
-
-const MAINNET_RPC_URL = resolveViteMainnetRpcUrl();
-
-const SEPOLIA_RPC_URL = resolveViteSepoliaRpcUrl();
 
 /** Normalize eth_chainId responses (0xaa36a7 vs 11155111 vs mixed case). */
 function normalizeChainId(chainId: string | null): string | null {
@@ -44,11 +33,11 @@ function readModeFromUrl(): NetworkMode {
 }
 
 function expectedEthChainIdHex(mode: NetworkMode): string {
-  return mode === 'mainnet' ? ETH_MAINNET_CHAIN_ID_HEX : ETH_SEPOLIA_CHAIN_ID_HEX;
+  return `0x${BigInt(getNetworkConfigForMode(mode).ethereum.id).toString(16)}`;
 }
 
 function expectedStellarPassphrase(mode: NetworkMode): string {
-  return mode === 'mainnet' ? STELLAR_MAINNET_PASSPHRASE : STELLAR_TESTNET_PASSPHRASE;
+  return getNetworkConfigForMode(mode).stellar.networkPassphrase;
 }
 
 function eqHexChainId(a: string | null, b: string): boolean {
@@ -216,27 +205,29 @@ export function useNetworkMode(opts: {
       if (err?.code === 4902) {
         try {
           if (next === 'mainnet') {
+            const current = getNetworkConfigForMode(next);
             await window.ethereum.request({
               method: 'wallet_addEthereumChain',
               params: [
                 {
                   chainId: target,
                   chainName: 'Ethereum Mainnet',
-                  rpcUrls: [MAINNET_RPC_URL],
-                  blockExplorerUrls: ['https://etherscan.io'],
+                  rpcUrls: [current.ethereum.rpcUrl],
+                  blockExplorerUrls: [current.ethereum.explorerUrl],
                   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
                 },
               ],
             });
           } else {
+            const current = getNetworkConfigForMode(next);
             await window.ethereum.request({
               method: 'wallet_addEthereumChain',
               params: [
                 {
                   chainId: target,
                   chainName: 'Sepolia Testnet',
-                  rpcUrls: [SEPOLIA_RPC_URL],
-                  blockExplorerUrls: ['https://sepolia.etherscan.io'],
+                  rpcUrls: [current.ethereum.rpcUrl],
+                  blockExplorerUrls: [current.ethereum.explorerUrl],
                   nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
                 },
               ],

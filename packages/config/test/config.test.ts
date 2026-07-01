@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { loadChainSettings } from "../src/chains.js";
 import {
   loadCoordinatorConfig,
   loadResolverConfig,
@@ -6,6 +7,49 @@ import {
 } from "../src/node.js";
 
 describe("Consolidated Environment Configuration Validation", () => {
+  describe("Chain Settings", () => {
+    it("overrides default chain settings from mock environment values", () => {
+      const config = loadChainSettings("testnet", {
+        ETHEREUM_RPC_URL: "https://rpc.custom.example",
+        TESTNET_ETHEREUM_CHAIN_ID: "424242",
+        TESTNET_ETHEREUM_EXPLORER_URL: "https://explorer.custom.example",
+        ETH_HTLC_ESCROW_TESTNET: "0x1111111111111111111111111111111111111111",
+        ETH_ESCROW_FACTORY_TESTNET: "0x2222222222222222222222222222222222222222",
+        ETH_HTLC_BRIDGE_TESTNET: "0x3333333333333333333333333333333333333333",
+        SOROBAN_RPC_URL: "https://soroban.custom.example",
+        STELLAR_HORIZON_URL: "https://horizon.custom.example",
+        STELLAR_NETWORK_PASSPHRASE: "Custom Local Network ; 2026",
+        SOROBAN_HTLC_TESTNET: "CBZX_CUSTOM_HTLC",
+        SOLANA_RPC_URL: "https://solana.custom.example",
+        SOLANA_HTLC_PROGRAM_TESTNET: "CustomSolanaProgram111111111111111111111111111",
+        RELAYER_FEE_RATE: "75",
+      });
+
+      expect(config.ethereum.chainId).toBe(424242);
+      expect(config.ethereum.rpcUrl).toBe("https://rpc.custom.example");
+      expect(config.ethereum.explorerUrl).toBe("https://explorer.custom.example");
+      expect(config.ethereum.htlcEscrow).toBe("0x1111111111111111111111111111111111111111");
+      expect(config.ethereum.escrowFactory).toBe("0x2222222222222222222222222222222222222222");
+      expect(config.ethereum.htlcBridge).toBe("0x3333333333333333333333333333333333333333");
+      expect(config.soroban.rpcUrl).toBe("https://soroban.custom.example");
+      expect(config.soroban.horizonUrl).toBe("https://horizon.custom.example");
+      expect(config.soroban.networkPassphrase).toBe("Custom Local Network ; 2026");
+      expect(config.soroban.htlcContract).toBe("CBZX_CUSTOM_HTLC");
+      expect(config.solana.rpcUrl).toBe("https://solana.custom.example");
+      expect(config.solana.programId).toBe("CustomSolanaProgram111111111111111111111111111");
+      expect(config.fees.feeRateBps).toBe(75);
+    });
+
+    it("fails fast for malformed custom chain settings", () => {
+      expect(() =>
+        loadChainSettings("testnet", {
+          ETHEREUM_RPC_URL: "not-a-url",
+          ETH_ESCROW_FACTORY_TESTNET: "not-an-address",
+        })
+      ).toThrow();
+    });
+  });
+
   describe("Coordinator Configuration", () => {
     it("should successfully load valid default configuration", () => {
       const validEnv = {
@@ -39,6 +83,24 @@ describe("Consolidated Environment Configuration Validation", () => {
       };
 
       expect(() => loadCoordinatorConfig(invalidEnv)).toThrow(/must be a 0x-prefixed 20-byte address/);
+    });
+
+    it("should use custom chain settings for core coordinator fields", () => {
+      const env = {
+        NETWORK_MODE: "testnet",
+        ETHEREUM_RPC_URL: "https://ethereum-custom.example",
+        TESTNET_ETHEREUM_CHAIN_ID: "424242",
+        SOROBAN_RPC_URL: "https://soroban-custom.example",
+        STELLAR_HORIZON_URL: "https://horizon-custom.example",
+        STELLAR_NETWORK_PASSPHRASE: "Custom Coordinator Network ; 2026",
+        SOLANA_RPC_URL: "https://solana-custom.example",
+      };
+
+      const config = loadCoordinatorConfig(env);
+      expect(config.ethereum.chainId).toBe(424242);
+      expect(config.soroban.networkPassphrase).toBe("Custom Coordinator Network ; 2026");
+      expect(config.soroban.rpcUrl).toBe("https://soroban-custom.example");
+      expect(config.solana.rpcUrl).toBe("https://solana-custom.example");
     });
   });
 

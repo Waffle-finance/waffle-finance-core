@@ -3,9 +3,11 @@ import {
   type FrontendConfig,
   type NetworkMode,
 } from "./schema.js";
+import { loadChainSettings } from "./chains.js";
 
 export { ZodError, z } from "zod";
 export * from "./schema.js";
+export * from "./chains.js";
 export * from "./ethereum-rpc-url.js";
 
 /**
@@ -17,6 +19,7 @@ export function loadFrontendConfig(
   rawEnv: Record<string, any>
 ): FrontendConfig {
   const network = (rawEnv.VITE_NETWORK ?? rawEnv.VITE_NETWORK_MODE ?? "testnet") as NetworkMode;
+  loadChainSettings(network, rawEnv, { vite: true });
 
   const mapped = {
     network,

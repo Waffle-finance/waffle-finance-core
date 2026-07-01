@@ -2,13 +2,22 @@
  * Network Configuration for WaffleFinance
  */
 
-import { loadFrontendConfig } from '@wafflefinance/config';
+import { loadChainSettings, loadFrontendConfig } from '@wafflefinance/config';
 import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from './rpc-urls';
 
 export type AppNetworkMode = 'mainnet' | 'testnet';
 
 // Central configuration entry point for the frontend dApp
 export const frontendConfig = loadFrontendConfig((import.meta as any).env || {});
+const rawFrontendEnv = ((import.meta as any).env || {}) as Record<string, string | undefined>;
+const testnetChainSettings = loadChainSettings('testnet', rawFrontendEnv, {
+  vite: true,
+  ethereumRpcUrl: resolveViteSepoliaRpcUrl(),
+});
+const mainnetChainSettings = loadChainSettings('mainnet', rawFrontendEnv, {
+  vite: true,
+  ethereumRpcUrl: resolveViteMainnetRpcUrl(),
+});
 
 /**
  * When false, the dApp is testnet-only. Mainnet toggle shows "Mainnet Coming".
@@ -66,14 +75,21 @@ export interface StellarNetworkConfig {
   testnet: boolean;
 }
 
+export interface SolanaNetworkConfig {
+  name: string;
+  displayName: string;
+  rpcUrl: string;
+  testnet: boolean;
+}
+
 export const ETHEREUM_NETWORKS: Record<string, NetworkConfig> = {
   mainnet: {
-    id: 1,
+    id: mainnetChainSettings.ethereum.chainId,
     name: 'ethereum',
     displayName: 'Ethereum Mainnet',
-    rpcUrl: resolveViteMainnetRpcUrl(),
-    explorerUrl: 'https://etherscan.io',
-    escrowFactory: '0xa7bCb4EAc8964306F9e3764f67Db6A7af6DdF99A', // 1inch Escrow Factory
+    rpcUrl: mainnetChainSettings.ethereum.rpcUrl,
+    explorerUrl: mainnetChainSettings.ethereum.explorerUrl,
+    escrowFactory: mainnetChainSettings.ethereum.escrowFactory ?? undefined,
     nativeCurrency: {
       name: 'Ether',
       symbol: 'ETH',
@@ -82,12 +98,12 @@ export const ETHEREUM_NETWORKS: Record<string, NetworkConfig> = {
     testnet: false,
   },
   sepolia: {
-    id: 11155111,
+    id: testnetChainSettings.ethereum.chainId,
     name: 'sepolia',
     displayName: 'Sepolia Testnet',
-    rpcUrl: resolveViteSepoliaRpcUrl(),
-    explorerUrl: 'https://sepolia.etherscan.io',
-    escrowFactory: '0x3f344ACDd17a0c4D21096da895152820f595dc8A', // Testnet HTLC Bridge
+    rpcUrl: testnetChainSettings.ethereum.rpcUrl,
+    explorerUrl: testnetChainSettings.ethereum.explorerUrl,
+    escrowFactory: testnetChainSettings.ethereum.escrowFactory ?? testnetChainSettings.ethereum.htlcBridge ?? undefined,
     nativeCurrency: {
       name: 'Sepolia Ether',
       symbol: 'SEP',
@@ -114,17 +130,32 @@ export const STELLAR_NETWORKS: Record<string, StellarNetworkConfig> = {
   mainnet: {
     name: 'mainnet',
     displayName: 'Stellar Mainnet',
-    horizonUrl: 'https://horizon.stellar.org',
-    networkPassphrase: 'Public Global Stellar Network ; September 2015',
+    horizonUrl: mainnetChainSettings.soroban.horizonUrl,
+    networkPassphrase: mainnetChainSettings.soroban.networkPassphrase,
     explorerUrl: 'https://stellarchain.io',
     testnet: false,
   },
   testnet: {
     name: 'testnet',
     displayName: 'Stellar Testnet',
-    horizonUrl: 'https://horizon-testnet.stellar.org',
-    networkPassphrase: 'Test SDF Network ; September 2015',
+    horizonUrl: testnetChainSettings.soroban.horizonUrl,
+    networkPassphrase: testnetChainSettings.soroban.networkPassphrase,
     explorerUrl: 'https://testnet.stellarchain.io',
+    testnet: true,
+  },
+};
+
+export const SOLANA_NETWORKS: Record<string, SolanaNetworkConfig> = {
+  mainnet: {
+    name: 'mainnet-beta',
+    displayName: 'Solana Mainnet',
+    rpcUrl: mainnetChainSettings.solana.rpcUrl,
+    testnet: false,
+  },
+  testnet: {
+    name: 'devnet',
+    displayName: 'Solana Devnet',
+    rpcUrl: testnetChainSettings.solana.rpcUrl,
     testnet: true,
   },
 };
@@ -132,13 +163,13 @@ export const STELLAR_NETWORKS: Record<string, StellarNetworkConfig> = {
 export const CONTRACT_ADDRESSES = {
   ethereum: {
     mainnet: {
-      htlcBridge: '0x0000000000000000000000000000000000000000', // Will use 1inch escrow instead
-      escrowFactory: '0xa7bcb4eac8964306f9e3764f67db6a7af6ddf99a', // 1inch Escrow Factory
+      htlcBridge: mainnetChainSettings.ethereum.htlcBridge ?? '0x0000000000000000000000000000000000000000',
+      escrowFactory: mainnetChainSettings.ethereum.escrowFactory ?? '0x0000000000000000000000000000000000000000',
       testToken: '0xA0b86a33E6441b8bB770AE39aaDC4e75C0f03E6F', // WETH mainnet
     },
     sepolia: {
-      htlcBridge: '0x3f344ACDd17a0c4D21096da895152820f595dc8A',
-      escrowFactory: '0x6c3818E074d891F1FBB3A75913e4BDe87BcF1123',
+      htlcBridge: testnetChainSettings.ethereum.htlcBridge ?? '0x0000000000000000000000000000000000000000',
+      escrowFactory: testnetChainSettings.ethereum.escrowFactory ?? '0x0000000000000000000000000000000000000000',
       testToken: '0x677afcB4A57a938A74a1A76a93913dE4Db3e5C63',
     },
   },
@@ -188,12 +219,15 @@ export const FAUCETS = {
 };
 
 // Environment-based configuration with URL parameter support
+export const getNetworkConfigForMode = (mode: AppNetworkMode) => ({
+  ethereum: ETHEREUM_NETWORKS[mode === 'mainnet' ? 'mainnet' : 'sepolia'],
+  stellar: STELLAR_NETWORKS[mode === 'mainnet' ? 'mainnet' : 'testnet'],
+  solana: SOLANA_NETWORKS[mode === 'mainnet' ? 'mainnet' : 'testnet'],
+});
+
 export const getCurrentNetwork = () => {
   const networkName = readNetworkNameFromEnvOrUrl();
-  return {
-    ethereum: ETHEREUM_NETWORKS[networkName === 'mainnet' ? 'mainnet' : 'sepolia'],
-    stellar: STELLAR_NETWORKS[networkName === 'mainnet' ? 'mainnet' : 'testnet'],
-  };
+  return getNetworkConfigForMode(networkName);
 };
 
 export const getContractAddresses = () => {
