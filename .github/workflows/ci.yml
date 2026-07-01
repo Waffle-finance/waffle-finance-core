@@ -74,6 +74,30 @@ jobs:
       - name: Test — contracts (Hardhat)
         run: pnpm --filter @wafflefinance/contracts exec hardhat test test/HTLCEscrow.test.ts test/ResolverRegistry.test.ts
 
+  dependency-security:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+      - name: Audit dependencies
+        run: pnpm audit --json > audit-report.json || true
+      - name: Check lockfile changes
+        run: |
+          git diff --exit-code pnpm-lock.yaml || (echo "Lockfile mismatch" && exit 1)
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-report
+          path: audit-report.json
+
   soroban:
     name: Soroban contracts
     runs-on: ubuntu-latest
