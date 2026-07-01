@@ -1,5 +1,21 @@
 import type { OrderStatus } from "../types/index.js";
 
+export {
+  classifyRpcError,
+  chainIdsMatch,
+  normalizeChainId,
+  parseBalanceHex,
+  rpcCallWithFallback,
+} from "./rpc-compat.js";
+export type {
+  RpcError,
+  RpcErrorCategory,
+  RpcCallOptions,
+  RpcCallSuccess,
+  RpcCallFailure,
+  RpcCallResult,
+} from "./rpc-compat.js";
+
 /** 0x-prefixed 32-byte hex string. */
 type Hex32 = `0x${string}`;
 

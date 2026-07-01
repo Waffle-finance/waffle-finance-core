@@ -23,10 +23,14 @@
     /* Path mapping */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@wafflefinance/sdk": ["../packages/sdk/src/index.ts"],
+      "@wafflefinance/sdk/*": ["../packages/sdk/src/*"],
+      "@wafflefinance/config": ["../packages/config/src/index.ts"],
+      "@wafflefinance/config/*": ["../packages/config/src/*"]
     }
   },
   "include": ["src", "src/types/**/*"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"],
   "references": [{ "path": "./tsconfig.node.json" }]
-} 
+}

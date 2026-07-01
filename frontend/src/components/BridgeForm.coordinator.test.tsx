@@ -97,6 +97,10 @@ const okAnnounce = () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Real browsers persist localStorage across navigation but vitest
+  // tests in a single file share the same window. Clear so usePersistedBridgeDraft
+  // does not see drafts persisted by a previous test in this file.
+  window.localStorage.clear();
   Object.defineProperty(window, 'ethereum', { value: mockEthereum, writable: true, configurable: true });
   mockEthereum.request.mockImplementation((req: { method: string }) => {
     if (req.method === 'eth_chainId') return Promise.resolve('0xaa36a7');
