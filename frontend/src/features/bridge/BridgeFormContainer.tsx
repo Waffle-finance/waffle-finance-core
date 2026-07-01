@@ -17,6 +17,7 @@ import {
   validateDestinationChain,
   validateRouteWallets,
 } from '../../utils/validation';
+import { classifyTransactionError, type ClassifiedError } from '../../utils/errorMapper';
 
 export interface BridgeFormProps {
   ethAddress: string;
@@ -240,6 +241,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   const [balance, setBalance] = useState<string>('0');
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<ClassifiedError | null>(null);
   const prevEthRef = useRef(ethAddress);
   const prevStellarRef = useRef(stellarAddress);
   const prevSolanaRef = useRef(solanaAddress ?? '');
@@ -449,12 +451,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     });
     setAmount('');
     setEstimatedAmount('');
+    setSubmissionError(null);
   };
 
   // Form gönderimi - RELAYER API ÜZERİNDEN
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationErrors({});
+    setSubmissionError(null);
 
     const errors: Record<string, string> = {};
     const routeResult = validateRouteWallets(direction, ethAddress, stellarAddress, solanaAddress ?? '');
@@ -544,7 +548,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             console.log(`✅ Successfully added and switched to ${networkName}`);
           } else {
             console.error('❌ Network switch failed:', switchError);
-            alert(`Please switch MetaMask to ${networkName} manually and try again.`);
+            setSubmissionError(classifyTransactionError(switchError, direction));
             setIsSubmitting(false);
             setStatusMessage('');
             return;
@@ -956,19 +960,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             stack: txError.stack
           });
           
-          // Handle MetaMask errors with more specific messages
-          if (txError.code === 4001) {
-            alert('Transaction was rejected by user');
-          } else if (txError.code === -32603) {
-            alert('Transaction failed. Please check your balance and try again.');
-          } else if (txError.code === -32000) {
-            alert('Insufficient funds for gas * price + value');
-          } else if (txError.code === -32602) {
-            alert('Invalid transaction parameters');
-          } else {
-            const errorMsg = txError.message || txError.reason || 'Unknown error occurred';
-            alert(`Transaction error: ${errorMsg}`);
-          }
+          setSubmissionError(classifyTransactionError(txError, direction));
           return; // Don't show success if transaction failed
         }
       } else if (direction === 'xlm_to_eth') {
@@ -1120,11 +1112,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 setStatusMessage('Refunded ↩️');
                 setIsSubmitting(false);
                 
-                alert(
-                  `ETH transfer failed, but your XLM has been automatically refunded to your wallet.\n\n` +
-                  `Refund TX: ${parsedError.refund.stellarTxHash}\n\n` +
-                  `Reason: ${parsedError.details || 'Unknown'}`
-                );
+                setSubmissionError({
+                  type: 'unknown',
+                  message: 'Ethereum bridge payout failed, but XLM was automatically refunded.',
+                  action: `Your Stellar swap was not finalized on the Ethereum leg, but your XLM has been automatically refunded to your wallet (TX: ${parsedError.refund.stellarTxHash.slice(0, 10)}...).`
+                });
               } else {
                 // Refund failed or not attempted - inform user with manual refund instructions
                 console.error('❌ Automatic refund failed:', parsedError?.refund);
@@ -1138,13 +1130,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 setIsSubmitting(false);
                 
                 const refundInfo = parsedError?.refund 
-                  ? `\n\nAutomatic refund failed: ${parsedError.refund.error}\n\n` +
-                    `To recover your XLM, contact support with:\n` +
-                    `- Stellar TX: ${submitResult.hash}\n` +
-                    `- Stellar Address: ${stellarAddress}`
-                  : '';
+                  ? `Automatic refund failed: ${parsedError.refund.error}. Please contact support with Stellar TX: ${submitResult.hash.slice(0, 10)}...`
+                  : 'Please contact support to recover your funds.';
                 
-                alert(`ETH sending failed: ${parsedError?.details || errorData}${refundInfo}`);
+                setSubmissionError({
+                  type: 'unknown',
+                  message: `Ethereum bridge payout failed: ${parsedError?.details || errorData}`,
+                  action: refundInfo
+                });
               }
             }
           } catch (processError: any) {
@@ -1163,18 +1156,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             updateTransactionStatus(result.orderId, 'failed');
             
             // Show error to user  
-                          alert(`ETH sending network error: ${processError.message}`);
+            setSubmissionError(classifyTransactionError(processError, direction));
           }
 
         } catch (stellarError: any) {
           console.error('❌ Stellar transaction failed:', stellarError);
-          
-          // Handle Freighter errors
-          if (stellarError.message?.includes('User declined')) {
-            alert('Stellar transaction was rejected by user');
-          } else {
-            alert(`Stellar transaction error: ${stellarError.message || 'Unknown error occurred'}`);
-          }
+          setStatusMessage('Failed ❌');
+          setIsSubmitting(false);
+          setSubmissionError(classifyTransactionError(stellarError, direction));
           return;
         }
       } else if (direction === 'eth_to_sol' || direction === 'sol_to_eth') {
@@ -1251,9 +1240,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       
     } catch (error: any) {
       console.error('❌ Error creating order:', error);
-      
-      // Show error message
-      alert(`Error: ${error.message || 'Unknown error occurred'}`);
+      setSubmissionError(classifyTransactionError(error, direction));
     } finally {
       setIsSubmitting(false);
     }
@@ -1265,6 +1252,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     setEstimatedAmount('');
     setOrderCreated(false);
     setOrderId(null);
+    setSubmissionError(null);
   };
 
   // Check if wallets are connected
@@ -1321,6 +1309,22 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               {validationErrors.form}
             </div>
           )}
+          {submissionError && (
+            <div role="alert" className="rounded-2xl border border-red-500/40 bg-red-950/20 p-4 space-y-2 relative border-l-4 border-l-red-500">
+              <div className="flex justify-between items-start">
+                <h4 className="font-semibold text-red-200 text-sm">{submissionError.message}</h4>
+                <button 
+                  type="button"
+                  onClick={() => setSubmissionError(null)}
+                  className="text-slate-400 hover:text-slate-200 text-xs font-bold px-1.5 py-0.5 rounded hover:bg-white/5 transition"
+                  aria-label="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">{submissionError.action}</p>
+            </div>
+          )}
           <div className="mb-1 flex items-center justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">Bridge console</p>
@@ -1364,6 +1368,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                       setAmount('');
                       setEstimatedAmount('');
                       setValidationErrors({});
+                      setSubmissionError(null);
                     }
                   }}
                   className={`flex-1 rounded-lg px-2 py-1.5 text-[0.65rem] font-semibold transition ${
