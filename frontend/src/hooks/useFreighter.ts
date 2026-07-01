@@ -14,6 +14,10 @@ export interface FreighterState {
   hint: string | null;
   phase: ConnectionPhase;
   lastTransitionAt: number | null;
+  /** Always "Freighter" — exposed for UI consistency with other wallet hooks. */
+  walletName: 'Freighter' | null;
+  /** Whether the installed Freighter version is known to be outdated. */
+  isLegacyApi: boolean;
 }
 
 function transition(prev: FreighterState, patch: Partial<FreighterState>): FreighterState {
@@ -24,6 +28,74 @@ function transition(prev: FreighterState, patch: Partial<FreighterState>): Freig
     phase: patch.phase ?? prev.phase,
   };
 }
+
+// ---------------------------------------------------------------------------
+// API compatibility helpers
+// ---------------------------------------------------------------------------
+
+/** Shape of the Freighter API object (both legacy and current). */
+type FreighterApiCompat = typeof freighterApi & {
+  /** Older Freighter (< 2.x) exposed getPublicKey instead of getAddress. */
+  getPublicKey?: () => Promise<string>;
+};
+
+/**
+ * Detect whether the injected Freighter API is the older (pre-2.x) shape.
+ * Old shape: `getPublicKey()` returns a bare string.
+ * New shape: `getAddress()` returns `{ address: string }`.
+ */
+function detectLegacyApi(api: FreighterApiCompat): boolean {
+  return (
+    typeof api.getPublicKey === 'function' &&
+    typeof api.getAddress !== 'function'
+  );
+}
+
+/**
+ * Retrieve the connected Stellar address, normalising across API versions.
+ */
+async function fetchAddress(api: FreighterApiCompat): Promise<string | null> {
+  if (typeof api.getAddress === 'function') {
+    const result = await api.getAddress();
+    return result?.address ?? null;
+  }
+  if (typeof api.getPublicKey === 'function') {
+    // Legacy API — returns the public key as a plain string.
+    return (await api.getPublicKey()) ?? null;
+  }
+  return null;
+}
+
+/**
+ * Request user permission to connect. Guards against older Freighter builds
+ * that don't expose `setAllowed`.
+ *
+ * Returns `true` when the permission request succeeded (or was a no-op on
+ * legacy builds), `false` when the user declined.
+ */
+async function requestPermission(api: FreighterApiCompat, isLegacy: boolean): Promise<boolean> {
+  if (isLegacy || typeof api.setAllowed !== 'function') {
+    // Older Freighter grants access implicitly once the user unlocks the wallet.
+    // We can't request permission programmatically — treat as allowed.
+    return true;
+  }
+  try {
+    await api.setAllowed();
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    // Freighter throws with "User declined" or similar when rejected.
+    if (msg.toLowerCase().includes('declin') || msg.toLowerCase().includes('reject')) {
+      return false;
+    }
+    // Unknown error — re-throw so the caller can surface it.
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
 
 export function useFreighter() {
   const [state, setState] = useState<FreighterState>({
@@ -37,6 +109,8 @@ export function useFreighter() {
     hint: null,
     phase: 'idle',
     lastTransitionAt: null,
+    walletName: null,
+    isLegacyApi: false,
   });
 
   const setError = useCallback((code: string, message: string, hint?: string) => {
@@ -58,17 +132,22 @@ export function useFreighter() {
       setState((prev) => transition(prev, { phase: 'checking' }));
 
       try {
-        if (!freighterApi || typeof freighterApi.isConnected !== 'function') {
+        const api = freighterApi as FreighterApiCompat;
+
+        if (!api || typeof api.isConnected !== 'function') {
           console.log('❌ [freighter] API unavailable');
           setError(
             'freighter_unavailable',
-            'Freighter API not available. Is the extension installed?',
+            'Freighter wallet extension not found.',
             'Install Freighter from the Chrome Web Store and reload the page.'
           );
           return;
         }
 
-        const isConnected = await freighterApi.isConnected();
+        const isLegacy = detectLegacyApi(api);
+        setState((prev) => transition(prev, { walletName: 'Freighter', isLegacyApi: isLegacy }));
+
+        const isConnected = await api.isConnected();
         console.log('🔍 [freighter] connected:', isConnected);
 
         if (!isConnected) {
@@ -76,13 +155,18 @@ export function useFreighter() {
           return;
         }
 
-        const { address } = await freighterApi.getAddress();
+        const address = await fetchAddress(api);
         console.log('🔍 [freighter] address:', address);
+
+        if (!address) {
+          setState((prev) => transition(prev, { phase: 'idle' }));
+          return;
+        }
 
         let network: string | null = null;
         let networkPassphrase: string | null = null;
         try {
-          const net = await freighterApi.getNetwork();
+          const net = await api.getNetwork();
           network = net.network;
           networkPassphrase = net.networkPassphrase;
         } catch {
@@ -137,14 +221,16 @@ export function useFreighter() {
 
     const poll = async () => {
       try {
-        if (typeof freighterApi?.isConnected !== 'function') return;
-        const available = await freighterApi.isConnected();
+        const api = freighterApi as FreighterApiCompat;
+        if (typeof api?.isConnected !== 'function') return;
+
+        const available = await api.isConnected();
         if (!available) {
           if (!cancelled) markDisconnected();
           return;
         }
 
-        const { address } = await freighterApi.getAddress();
+        const address = await fetchAddress(api);
         if (!address) {
           if (!cancelled) markDisconnected();
           return;
@@ -153,7 +239,7 @@ export function useFreighter() {
         let network: string | null = null;
         let networkPassphrase: string | null = null;
         try {
-          const net = await freighterApi.getNetwork();
+          const net = await api.getNetwork();
           network = net.network;
           networkPassphrase = net.networkPassphrase;
         } catch {
@@ -191,38 +277,69 @@ export function useFreighter() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [setError]);
+  }, []);
 
   // Connect to Freighter
   const connect = useCallback(async () => {
     console.log('🔌 [freighter] connect requested');
-    setState((prev) => transition(prev, { isLoading: true, error: null, errorCode: null, hint: null }));
+    setState((prev) =>
+      transition(prev, { isLoading: true, error: null, errorCode: null, hint: null })
+    );
 
     try {
-      if (!freighterApi || typeof freighterApi.isConnected !== 'function') {
-        throw new Error('Freighter wallet extension not found. Please install Freighter.');
+      const api = freighterApi as FreighterApiCompat;
+
+      if (!api || typeof api.isConnected !== 'function') {
+        throw new Error(
+          'Freighter wallet extension not found. Please install Freighter from the Chrome Web Store.'
+        );
       }
 
-      const isAvailable = await freighterApi.isConnected();
+      const isLegacy = detectLegacyApi(api);
+      setState((prev) =>
+        transition(prev, { walletName: 'Freighter', isLegacyApi: isLegacy })
+      );
+
+      const isAvailable = await api.isConnected();
       console.log('🔍 [freighter] availability:', isAvailable);
 
       if (!isAvailable) {
-        throw new Error('Freighter wallet is not available. Please install Freighter extension.');
+        throw new Error(
+          'Freighter wallet is not available. Please install or unlock the Freighter extension.'
+        );
       }
 
       setState((prev) => transition(prev, { phase: 'requesting_permission' }));
-
       console.log('🔌 [freighter] requesting permission');
-      await freighterApi.setAllowed();
+
+      const permitted = await requestPermission(api, isLegacy);
+      if (!permitted) {
+        setError(
+          'freighter_permission_denied',
+          'You declined the Freighter connection request.',
+          'Open the Freighter popup and approve the connection to continue.'
+        );
+        return;
+      }
+
+      if (isLegacy) {
+        console.log('ℹ️ [freighter] legacy API detected — upgrade Freighter for full features');
+      }
 
       console.log('🔍 [freighter] getting address');
-      const { address } = await freighterApi.getAddress();
+      const address = await fetchAddress(api);
       console.log('✅ [freighter] connected:', address);
+
+      if (!address) {
+        throw new Error(
+          'Freighter returned an empty address. Ensure your wallet is unlocked and an account is selected.'
+        );
+      }
 
       let network: string | null = null;
       let networkPassphrase: string | null = null;
       try {
-        const net = await freighterApi.getNetwork();
+        const net = await api.getNetwork();
         network = net.network;
         networkPassphrase = net.networkPassphrase;
       } catch {
@@ -238,7 +355,9 @@ export function useFreighter() {
           isLoading: false,
           error: null,
           errorCode: null,
-          hint: null,
+          hint: isLegacy
+            ? 'You are using an older Freighter version. Upgrade for the best experience.'
+            : null,
           phase: 'connected',
         })
       );
@@ -270,6 +389,8 @@ export function useFreighter() {
       hint: null,
       phase: 'idle',
       lastTransitionAt: Date.now(),
+      walletName: 'Freighter',
+      isLegacyApi: false,
     });
   }, []);
 
@@ -285,36 +406,39 @@ export function useFreighter() {
   }, []);
 
   // Sign transaction
-  const signTransaction = useCallback(async (
-    xdr: string,
-    networkPassphrase?: string,
-    addressOverride?: string,
-  ) => {
-    const signerAddress = addressOverride ?? state.address;
-    if (!signerAddress) {
-      setError('wallet_not_connected', 'Wallet not connected', 'Connect Freighter before signing.');
-      throw new Error('Wallet not connected');
-    }
+  const signTransaction = useCallback(
+    async (xdr: string, networkPassphrase?: string, addressOverride?: string) => {
+      const signerAddress = addressOverride ?? state.address;
+      if (!signerAddress) {
+        setError('wallet_not_connected', 'Wallet not connected', 'Connect Freighter before signing.');
+        throw new Error('Wallet not connected');
+      }
 
-    try {
-      const result = await freighterApi.signTransaction(xdr, {
-        networkPassphrase,
-        address: signerAddress,
-      });
-      return result.signedTxXdr;
-    } catch (error) {
-      console.error('❌ [freighter] sign error:', error);
-      const msg = error instanceof Error ? error.message : 'Signing failed';
-      setError(
-        'freighter_sign_failed',
-        msg,
-        error instanceof Error && error.message?.includes('User declined')
-          ? 'You rejected the signature request in Freighter.'
-          : 'Check the Freighter popup and try again.'
-      );
-      throw error;
-    }
-  }, [state.address, setError]);
+      try {
+        const result = await freighterApi.signTransaction(xdr, {
+          networkPassphrase,
+          address: signerAddress,
+        });
+        return result.signedTxXdr;
+      } catch (error) {
+        console.error('❌ [freighter] sign error:', error);
+        const msg = error instanceof Error ? error.message : 'Signing failed';
+        const isUserDecline =
+          error instanceof Error &&
+          (error.message?.toLowerCase().includes('declin') ||
+            error.message?.toLowerCase().includes('user declined'));
+        setError(
+          'freighter_sign_failed',
+          msg,
+          isUserDecline
+            ? 'You rejected the signature request in Freighter.'
+            : 'Check the Freighter popup and try again.'
+        );
+        throw error;
+      }
+    },
+    [state.address, setError]
+  );
 
   return {
     ...state,

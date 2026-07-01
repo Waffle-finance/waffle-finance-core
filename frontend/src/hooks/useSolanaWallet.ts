@@ -1,33 +1,20 @@
 /**
- * useSolanaWallet — Phantom wallet integration for Solana.
+ * useSolanaWallet — Multi-wallet Solana integration.
+ *
+ * Supports Phantom, Solflare, Backpack and any generic Solana provider
+ * through the shared detectSolanaProvider() utility from walletCompat.
  *
  * Mirrors the structure of useFreighter so the rest of the app can treat
  * all three chains (Ethereum / Stellar / Solana) uniformly.
  */
 import { useCallback, useEffect, useState } from 'react';
+import {
+  detectSolanaProvider,
+  safeRemoveSolanaListener,
+  type SolanaProvider,
+} from '../lib/walletCompat';
 
 export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
-
-interface PhantomProvider {
-  isPhantom?: boolean;
-  publicKey: { toString(): string } | null;
-  isConnected: boolean;
-  connect(opts?: { onlyIfTrusted?: boolean }): Promise<{ publicKey: { toString(): string } }>;
-  disconnect(): Promise<void>;
-  signTransaction(tx: unknown): Promise<unknown>;
-  signAllTransactions(txs: unknown[]): Promise<unknown[]>;
-  on(event: string, handler: (...args: any[]) => void): void;
-  removeListener(event: string, handler: (...args: any[]) => void): void;
-}
-
-// Window augmentation lives in BridgeForm.tsx to avoid duplicate declarations.
-
-function getProvider(): PhantomProvider | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as any;
-  const provider = w.phantom?.solana ?? w.solana;
-  return provider?.isPhantom ? (provider as PhantomProvider) : null;
-}
 
 interface SolanaWalletState {
   isConnected: boolean;
@@ -39,6 +26,8 @@ interface SolanaWalletState {
   phase: ConnectionPhase;
   lastTransitionAt: number | null;
   isInstalled: boolean;
+  /** Human-readable name of the detected wallet, e.g. "Phantom", "Solflare". */
+  walletName: string | null;
 }
 
 const INITIAL_STATE: SolanaWalletState = {
@@ -51,6 +40,7 @@ const INITIAL_STATE: SolanaWalletState = {
   phase: 'idle',
   lastTransitionAt: null,
   isInstalled: false,
+  walletName: null,
 };
 
 function transition(prev: SolanaWalletState, patch: Partial<SolanaWalletState>): SolanaWalletState {
@@ -79,13 +69,18 @@ export function useSolanaWallet() {
 
   // Auto-reconnect on mount if previously trusted
   useEffect(() => {
-    const provider = getProvider();
-    if (!provider) {
-      setState((prev) => transition(prev, { isInstalled: false }));
+    const detected = detectSolanaProvider();
+
+    if (!detected) {
+      setState((prev) => transition(prev, { isInstalled: false, walletName: null }));
       return;
     }
 
-    setState((prev) => transition(prev, { isInstalled: true, phase: 'checking' }));
+    const { provider, walletName } = detected;
+
+    setState((prev) =>
+      transition(prev, { isInstalled: true, walletName, phase: 'checking' })
+    );
 
     const tryReconnect = async () => {
       try {
@@ -108,9 +103,10 @@ export function useSolanaWallet() {
 
     tryReconnect();
 
-    const handleAccountChange = (pubkey: { toString(): string } | null) => {
+    const handleAccountChange = (pubkey: unknown) => {
+      const pk = pubkey as { toString(): string } | null;
       setState((prev) => {
-        if (!pubkey) {
+        if (!pk) {
           return transition(prev, {
             isConnected: false,
             address: null,
@@ -119,7 +115,7 @@ export function useSolanaWallet() {
         }
         return transition(prev, {
           isConnected: true,
-          address: pubkey.toString(),
+          address: pk.toString(),
           error: null,
           errorCode: null,
           hint: null,
@@ -128,12 +124,13 @@ export function useSolanaWallet() {
       });
     };
 
-    const handleConnect = (pubkey: { toString(): string } | null) => {
-      if (!pubkey) return;
+    const handleConnect = (pubkey: unknown) => {
+      const pk = pubkey as { toString(): string } | null;
+      if (!pk) return;
       setState((prev) =>
         transition(prev, {
           isConnected: true,
-          address: pubkey.toString(),
+          address: pk.toString(),
           error: null,
           errorCode: null,
           hint: null,
@@ -143,30 +140,52 @@ export function useSolanaWallet() {
     };
 
     const handleDisconnect = () => {
-      setState((prev) => transition(prev, { isConnected: false, address: null, phase: 'idle' }));
+      setState((prev) =>
+        transition(prev, { isConnected: false, address: null, phase: 'idle' })
+      );
     };
 
-    provider.on('connect', handleConnect);
-    provider.on('accountChanged', handleAccountChange);
-    provider.on('disconnect', handleDisconnect);
+    try { provider.on('connect', handleConnect); }          catch { /* ignore */ }
+    try { provider.on('accountChanged', handleAccountChange); } catch { /* ignore */ }
+    try { provider.on('disconnect', handleDisconnect); }    catch { /* ignore */ }
 
     return () => {
-      provider.removeListener('connect', handleConnect);
-      provider.removeListener('accountChanged', handleAccountChange);
-      provider.removeListener('disconnect', handleDisconnect);
+      safeRemoveSolanaListener(provider, 'connect', handleConnect);
+      safeRemoveSolanaListener(provider, 'accountChanged', handleAccountChange);
+      safeRemoveSolanaListener(provider, 'disconnect', handleDisconnect);
     };
   }, []);
 
   const connect = useCallback(async () => {
-    const provider = getProvider();
-    if (!provider) {
-      const msg = 'Phantom wallet not found. Install it at https://phantom.app';
-      setError('phantom_unavailable', msg, 'Install the Phantom browser extension and reload the page.');
-      window.open('https://phantom.app', '_blank');
+    const detected = detectSolanaProvider();
+
+    if (!detected) {
+      const msg = 'No Solana wallet extension found. Install Phantom, Solflare, or Backpack.';
+      setError(
+        'solana_wallet_unavailable',
+        msg,
+        'Install a Solana wallet browser extension (e.g. phantom.app) and reload the page.'
+      );
+      // Open install page for the most common wallet
+      if (typeof window !== 'undefined') {
+        window.open('https://phantom.app', '_blank');
+      }
       return;
     }
 
-    setState((prev) => transition(prev, { isLoading: true, error: null, errorCode: null, hint: null, phase: 'requesting_permission' }));
+    const { provider, walletName } = detected;
+
+    setState((prev) =>
+      transition(prev, {
+        isLoading: true,
+        error: null,
+        errorCode: null,
+        hint: null,
+        phase: 'requesting_permission',
+        walletName,
+      })
+    );
+
     try {
       const resp = await provider.connect();
       setState((prev) =>
@@ -180,24 +199,35 @@ export function useSolanaWallet() {
           phase: 'connected',
         })
       );
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const anyErr = err as { message?: string };
       setError(
-        'phantom_connect_failed',
-        err?.message ?? 'Phantom connection failed',
-        'Check the Phantom popup. If you denied access, approve it and retry.'
+        'solana_connect_failed',
+        anyErr?.message ?? `${walletName} connection failed`,
+        `Check the ${walletName} popup. If you denied access, approve it and retry.`
       );
     }
   }, [setError]);
 
   const disconnect = useCallback(async () => {
-    const provider = getProvider();
-    if (provider) {
-      try { await provider.disconnect(); } catch { /* ignore */ }
+    const detected = detectSolanaProvider();
+    if (detected) {
+      try { await detected.provider.disconnect(); } catch { /* ignore */ }
     }
-    setState((prev) => transition(prev, { isConnected: false, address: null, isLoading: false, error: null, errorCode: null, hint: null, phase: 'idle' }));
+    setState((prev) =>
+      transition(prev, {
+        isConnected: false,
+        address: null,
+        isLoading: false,
+        error: null,
+        errorCode: null,
+        hint: null,
+        phase: 'idle',
+      })
+    );
   }, []);
 
-  const isInstalled = !!getProvider();
+  const isInstalled = !!detectSolanaProvider();
 
   return {
     isConnected: state.isConnected,
@@ -209,6 +239,7 @@ export function useSolanaWallet() {
     phase: state.phase,
     lastTransitionAt: state.lastTransitionAt,
     isInstalled,
+    walletName: state.walletName,
     connect,
     disconnect,
   };
