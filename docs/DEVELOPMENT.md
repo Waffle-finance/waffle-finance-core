@@ -21,6 +21,7 @@ This guide covers every path from a fresh checkout to a running local stack — 
   - [E2E (`e2e/`)](#e2e-e2e)
 - [Running the full local stack](#running-the-full-local-stack)
 - [Troubleshooting](#troubleshooting)
+- [Dependency updates](./DEPENDENCY_UPDATES.md) — automated Renovate workflow, review guardrails, and how to pause it for sensitive packages.
 
 ---
 

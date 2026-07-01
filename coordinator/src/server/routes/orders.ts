@@ -7,6 +7,7 @@ import { OrderValidationError } from "../../services/order-service.js";
 import { announceSchema } from "../../validation/announce.js";
 import { historyAddressSchema, orderIdSchema } from "../../validation/address.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
+import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, notFoundError } from "../errors.js";
 
@@ -54,6 +55,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
 
   const apiKeys = loadApiKeys();
   const trustedProxies = loadTrustedProxies();
+  const operatorKeys = loadOperatorKeys();
 
   // 20 announces per IP per minute — rate is intentionally conservative so
   // that legitimate resolvers are not impacted during normal operations.
@@ -127,8 +129,8 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
       // Handle invalid cursor gracefully
       if (err instanceof Error && err.message.includes('Invalid cursor')) {
         res.status(400).json({
-          error: "invalid_cursor", 
-          message: "The provided cursor is invalid or expired" 
+          error: "invalid_cursor",
+          message: "The provided cursor is invalid or expired"
         });
         return;
       }
@@ -162,58 +164,66 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     timelock: z.coerce.number().int().nonnegative()
   });
 
-  router.post("/orders/:id/src-locked", async (req, res, next) => {
-    const idResult = orderIdSchema.safeParse(req.params.id);
-    if (!idResult.success) {
-      res.status(400).json(validationError(idResult.error.errors));
-      return;
-    }
-    try {
-      const body = lockSchema.parse(req.body);
-      await orders.recordSrcLock({ publicId: idResult.data, ...body });
-      res.json({ ok: true });
-    } catch (err) {
-      if (err instanceof z.ZodError) {
-        res.status(400).json(validationError(err.errors));
+  router.post(
+    "/orders/:id/src-locked",
+    requireRole("operator", { operatorKeys, log, trustedProxies }),
+    async (req, res, next) => {
+      const idResult = orderIdSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json(validationError(idResult.error.errors));
         return;
       }
-      if (err instanceof OrderValidationError) {
-        res.status(400).json(orderValidationError(err.message));
-        return;
+      try {
+        const body = lockSchema.parse(req.body);
+        await orders.recordSrcLock({ publicId: idResult.data, ...body });
+        res.json({ ok: true });
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          res.status(400).json(validationError(err.errors));
+          return;
+        }
+        if (err instanceof OrderValidationError) {
+          res.status(400).json(orderValidationError(err.message));
+          return;
+        }
+        next(err);
       }
-      next(err);
     }
-  });
+  );
 
-  router.post("/orders/:id/dst-locked", async (req, res, next) => {
-    const idResult = orderIdSchema.safeParse(req.params.id);
-    if (!idResult.success) {
-      res.status(400).json(validationError(idResult.error.errors));
-      return;
-    }
-    try {
-      const body = lockSchema.extend({ resolver: z.string().nullable().optional() }).parse(req.body);
-      await orders.recordDstLock({
-        publicId: idResult.data,
-        orderId: body.orderId,
-        txHash: body.txHash,
-        blockNumber: body.blockNumber,
-        timelock: body.timelock,
-        resolver: body.resolver ?? null
-      });
-      res.json({ ok: true });
-    } catch (err) {
-      if (err instanceof z.ZodError) {
-        res.status(400).json(validationError(err.errors));
+  router.post(
+    "/orders/:id/dst-locked",
+    requireRole("operator", { operatorKeys, log, trustedProxies }),
+    async (req, res, next) => {
+      const idResult = orderIdSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json(validationError(idResult.error.errors));
         return;
       }
-      if (err instanceof OrderValidationError) {
-        res.status(400).json(orderValidationError(err.message));
-        return;
+      try {
+        const body = lockSchema.extend({ resolver: z.string().nullable().optional() }).parse(req.body);
+        await orders.recordDstLock({
+          publicId: idResult.data,
+          orderId: body.orderId,
+          txHash: body.txHash,
+          blockNumber: body.blockNumber,
+          timelock: body.timelock,
+          resolver: body.resolver ?? null
+        });
+        res.json({ ok: true });
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          res.status(400).json(validationError(err.errors));
+          return;
+        }
+        if (err instanceof OrderValidationError) {
+          res.status(400).json(orderValidationError(err.message));
+          return;
+        }
+        next(err);
       }
-      next(err);
     }
-  });
+  );
 
   return router;
 }

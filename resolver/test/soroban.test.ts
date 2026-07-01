@@ -19,7 +19,15 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
 
 describe('SorobanListener lifecycle', () => {
   const logger = pino({ level: 'silent' });
-  const cfg = { htlc: 'CABC', rpcUrl: 'http://localhost:8000', networkPassphrase: 'Test', chainId: 'testnet' };
+  const cfg = {
+    network: 'testnet' as const,
+    pollIntervalMs: 1000,
+    coordinatorUrl: '',
+    logLevel: 'silent' as const,
+    ethereum: { chainId: 11155111, rpcUrl: '', htlcEscrow: null, resolverRegistry: null, resolverPrivateKey: null },
+    soroban: { rpcUrl: 'http://localhost:8000', networkPassphrase: 'Test SDF Network ; September 2015', horizonUrl: '', htlc: 'CABC', resolverRegistry: null, resolverSecret: null },
+    rpc: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 2000 },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
