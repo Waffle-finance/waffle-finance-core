@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
+import { t } from '../i18n';
 
 export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
 
@@ -62,8 +63,8 @@ export function useFreighter() {
           console.log('❌ [freighter] API unavailable');
           setError(
             'freighter_unavailable',
-            'Freighter API not available. Is the extension installed?',
-            'Install Freighter from the Chrome Web Store and reload the page.'
+            t('wallet.errors.freighterUnavailable'),
+            t('wallet.errors.freighterUnavailableHint')
           );
           return;
         }

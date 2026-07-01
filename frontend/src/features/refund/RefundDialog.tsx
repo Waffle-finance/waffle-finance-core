@@ -5,6 +5,7 @@ import { mainnet, sepolia } from "viem/chains";
 import { makeEthereumHTLCClient } from "../../lib/sdk-context";
 import { isTestnet } from "../../config/networks";
 import { useNetworkMode } from "../../lib/useNetworkMode";
+import { t } from "../../i18n";
 
 /**
  * Two on-chain refund flavors are supported:
@@ -99,7 +100,10 @@ export function RefundDialog(props: RefundDialogProps) {
   async function handleRefund() {
     if (networkState.hasAnyMismatch) {
       setError(
-        `Wallet connected to ${networkState.metamaskChainId === "0x1" ? "Mainnet" : "wrong network"} while app is in ${networkState.mode === "testnet" ? "Testnet" : "Mainnet"} mode. Switch networks to continue.`
+        t('refundDialog.error.networkMismatch', {
+          walletNetwork: networkState.metamaskChainId === "0x1" ? "Mainnet" : "wrong network",
+          appMode: networkState.mode === "testnet" ? "Testnet" : "Mainnet",
+        })
       );
       setPhase("error");
       return;
@@ -114,23 +118,21 @@ export function RefundDialog(props: RefundDialogProps) {
       if (mode === "v2-escrow") {
         const client = await makeEthereumHTLCClient(props.userAddress);
         if (!client) {
-          throw new Error(
-            "HTLCEscrow address is not configured for this network. v2 is testnet-only; switch to testnet to refund."
-          );
+          throw new Error(t('refundDialog.error.htlcNotConfigured'));
         }
         hash = await client.refundOrder(BigInt(props.orderId));
       } else {
         if (!props.v1ContractAddress) {
-          throw new Error("v1-mainnet-htlc refund requires `v1ContractAddress` prop.");
+          throw new Error(t('refundDialog.error.missingAddress'));
         }
         if (typeof window === "undefined" || !window.ethereum) {
-          throw new Error("No injected wallet found.");
+          throw new Error(t('refundDialog.error.noWallet'));
         }
         const orderIdBytes32 = props.orderId.startsWith("0x")
           ? (props.orderId as `0x${string}`)
           : (`0x${props.orderId}` as `0x${string}`);
         if (orderIdBytes32.length !== 66) {
-          throw new Error("v1 mainnet refund requires a 0x-prefixed bytes32 order id.");
+          throw new Error(t('refundDialog.error.invalidOrderId'));
         }
         const chain = isTestnet() ? sepolia : mainnet;
         const rpcUrl = isTestnet()
@@ -170,16 +172,16 @@ export function RefundDialog(props: RefundDialogProps) {
     <div className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold text-white mb-1">Refund order</h2>
+          <h2 className="text-xl font-bold text-white mb-1">{t('refundDialog.title')}</h2>
           <p className="text-gray-400 text-sm">
-            Refund is permissionless — your wallet calls the contract directly.
+            {t('refundDialog.subtitle')}
           </p>
         </div>
         {props.onClose && (
           <button
             onClick={props.onClose}
             className="text-gray-400 hover:text-white transition-colors text-sm"
-            aria-label="Close"
+            aria-label={t('refundDialog.close')}
           >
             ✕
           </button>
@@ -188,15 +190,15 @@ export function RefundDialog(props: RefundDialogProps) {
 
       <dl className="space-y-2 mb-4 text-sm">
         <div className="flex justify-between">
-          <dt className="text-gray-400">Order id</dt>
+          <dt className="text-gray-400">{t('refundDialog.orderId')}</dt>
           <dd className="text-white font-mono">{props.orderId}</dd>
         </div>
         <div className="flex justify-between">
-          <dt className="text-gray-400">Locked amount</dt>
+          <dt className="text-gray-400">{t('refundDialog.lockedAmount')}</dt>
           <dd className="text-white font-mono">{props.amountWei} wei</dd>
         </div>
         <div className="flex justify-between">
-          <dt className="text-gray-400">Timelock</dt>
+          <dt className="text-gray-400">{t('refundDialog.timelock')}</dt>
           <dd className="text-white">{new Date(props.timelockUnixSeconds * 1000).toISOString()}</dd>
         </div>
       </dl>
@@ -205,8 +207,8 @@ export function RefundDialog(props: RefundDialogProps) {
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
           <Clock className="h-5 w-5 text-yellow-400" />
           <div className="text-sm">
-            <p className="text-yellow-300">Refund not yet available.</p>
-            <p className="text-gray-400">Time remaining: {formatRemaining(remaining)}</p>
+            <p className="text-yellow-300">{t('refundDialog.waiting.title')}</p>
+            <p className="text-gray-400">{t('refundDialog.waiting.body', { remaining: formatRemaining(remaining) })}</p>
           </div>
         </div>
       )}
@@ -215,7 +217,7 @@ export function RefundDialog(props: RefundDialogProps) {
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
           <ShieldCheck className="h-5 w-5 text-emerald-400" />
           <p className="text-sm text-emerald-300">
-            The timelock has expired. You can refund this order at any time.
+            {t('refundDialog.ready')}
           </p>
         </div>
       )}
@@ -224,7 +226,7 @@ export function RefundDialog(props: RefundDialogProps) {
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
           <AlertCircle className="h-5 w-5 text-red-400 mt-0.5" />
           <div className="text-sm">
-            <p className="text-red-300 font-medium">Refund failed</p>
+            <p className="text-red-300 font-medium">{t('refundDialog.error.title')}</p>
             <p className="text-gray-400 break-all">{error}</p>
           </div>
         </div>
@@ -232,7 +234,7 @@ export function RefundDialog(props: RefundDialogProps) {
 
       {phase === "done" && txHash && (
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 mb-4">
-          <p className="text-sm text-emerald-300 font-medium mb-1">Refund submitted.</p>
+          <p className="text-sm text-emerald-300 font-medium mb-1">{t('refundDialog.done.title')}</p>
           <a
             href={`${explorer}/tx/${txHash}`}
             target="_blank"
@@ -250,7 +252,7 @@ export function RefundDialog(props: RefundDialogProps) {
         className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
       >
         {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" />}
-        {phase === "submitting" ? "Submitting refund..." : "Refund from contract"}
+        {phase === "submitting" ? t('refundDialog.button.submitting') : t('refundDialog.button.submit')}
       </button>
     </div>
   );

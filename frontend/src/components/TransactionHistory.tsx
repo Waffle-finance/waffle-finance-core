@@ -4,6 +4,7 @@ import { isTestnet } from '../config/networks';
 import RefundDialog from '../features/refund/RefundDialog';
 import { useTransactionHistoryCache, type Transaction } from '../hooks/useTransactionHistoryCache';
 import type { Address } from 'viem';
+import { t } from '../i18n';
 
 interface TransactionHistoryProps {
   ethAddress?: string;
@@ -13,10 +14,10 @@ interface TransactionHistoryProps {
 type TransactionFilter = 'all' | 'pending' | 'completed' | 'cancelled';
 
 const FILTER_OPTIONS: Array<{ key: TransactionFilter; label: string }> = [
-  { key: 'all', label: 'All' },
-  { key: 'pending', label: 'Pending' },
-  { key: 'completed', label: 'Completed' },
-  { key: 'cancelled', label: 'Cancelled' },
+  { key: 'all',       label: t('history.filter.all') },
+  { key: 'pending',   label: t('history.filter.pending') },
+  { key: 'completed', label: t('history.filter.completed') },
+  { key: 'cancelled', label: t('history.filter.cancelled') },
 ];
 
 const PRODUCTION_API_BASE_URL = 'https://oversync-k36vx.ondigitalocean.app';
@@ -174,7 +175,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     const refundAddress = tx.stellarAddress || stellarAddress;
 
     if (!originalStellarTx || !refundAddress) {
-      window.alert('Manual refund requires the original Stellar transaction and your Stellar wallet address.');
+      window.alert(t('history.refund.refundRequires'));
       return;
     }
 
@@ -202,7 +203,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       markRefunded(tx.id, body.refundTxHash, 'stellar');
       window.alert(`XLM refund submitted.\nRefund TX: ${body.refundTxHash}`);
     } catch (err) {
-      window.alert(`Manual XLM refund failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      window.alert(t('history.refund.failed', { message: err instanceof Error ? err.message : 'Unknown error' }));
     } finally {
       setManualRefundingIds((prev) => {
         const next = new Set(prev);
@@ -221,14 +222,14 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     <div className="surface-panel flex max-h-[calc(100dvh-21rem)] min-h-[28rem] flex-col overflow-hidden rounded-[1.25rem] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.36)] md:p-6 lg:max-h-[calc(100dvh-18rem)]">
       <div className="mb-6 flex shrink-0 flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">Ledger</p>
-          <h2 className="mt-1 text-2xl font-semibold tracking-tight text-white">Transaction History</h2>
+          <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">{t('history.ledgerLabel')}</p>
+          <h2 className="mt-1 text-2xl font-semibold tracking-tight text-white">{t('history.title')}</h2>
           <p className="mt-2 text-sm text-slate-400">
-            Track your cross-chain swaps between Ethereum and Stellar networks
+            {t('history.subtitle')}
           </p>
           {(isRefreshing || isStale) && transactions.length > 0 && (
             <p className="mt-2 text-xs text-cyan-100/60" aria-live="polite">
-              {isRefreshing ? 'Showing cached history while refreshing latest data...' : 'Showing cached history'}
+              {isRefreshing ? t('history.refreshing') : t('history.showingCached')}
             </p>
           )}
         </div>
@@ -238,7 +239,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
           className="button-hover-scale flex items-center justify-center gap-2 rounded-full border border-cyan-200/30 bg-cyan-200/[0.12] px-4 py-2 text-sm font-semibold text-cyan-50 shadow-[0_12px_34px_rgba(0,226,255,0.12)] transition hover:border-cyan-100/45 hover:bg-cyan-200/[0.18] disabled:opacity-60"
         >
           <RefreshCw className={`h-4 w-4 ${isHistoryBusy ? 'animate-spin' : ''}`} />
-          Refresh
+          {t('history.refresh')}
         </button>
       </div>
 
@@ -264,9 +265,9 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
             <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.045]">
               <Clock className="h-8 w-8 text-slate-400" />
             </div>
-            <p className="text-lg text-slate-300">No transactions yet</p>
+            <p className="text-lg text-slate-300">{t('history.empty.title')}</p>
             <p className="mt-1 text-sm text-slate-500">
-              Your real cross-chain swaps will appear here after the first transaction
+              {t('history.empty.subtitle')}
             </p>
           </div>
         ) : (
@@ -296,7 +297,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       title="View on Etherscan"
                     >
                       <img src="/images/eth.png" alt="ETH" className="h-3.5 w-3.5" />
-                      <span>Etherscan</span>
+                      <span>{t('history.transaction.etherscan')}</span>
                       <ExternalLink className="h-3 w-3 opacity-70" />
                     </a>
                   )}
@@ -309,7 +310,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       title="View on Stellar Expert"
                     >
                       <img src="/images/xlm.png" alt="XLM" className="h-3.5 w-3.5" />
-                      <span>Stellar Expert</span>
+                      <span>{t('history.transaction.stellarExpert')}</span>
                       <ExternalLink className="h-3 w-3 opacity-70" />
                     </a>
                   )}
@@ -342,7 +343,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
 
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-3">
                 <div className="text-xs text-slate-400">
-                  Transaction:
+                  {t('history.transaction.id')}
                   <span className="ml-1 font-mono text-slate-300">
                     {tx.txHash.substring(0, 10)}...{tx.txHash.substring(tx.txHash.length - 8)}
                   </span>
@@ -354,10 +355,10 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/25"
-                      title={`Refund settled on ${getRefundNetworkLabel(tx)}. Click to view the refund transaction.`}
+                      title={t('history.refund.refundSettled', { network: getRefundNetworkLabel(tx) })}
                     >
                       <Undo2 className="h-3.5 w-3.5" />
-                      <span>Refunded · view on</span>
+                      <span>{t('history.transaction.refundedLabel')}</span>
                       <img
                         src={getRefundNetwork(tx) === 'ethereum' ? '/images/eth.png' : '/images/xlm.png'}
                         alt={getRefundNetworkLabel(tx)}
@@ -370,10 +371,10 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                     <button
                       onClick={() => setRefundTarget(tx)}
                       className="flex items-center gap-1.5 rounded-full border border-indigo-300/30 bg-indigo-400/15 px-3 py-1.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-400/25"
-                      title="Refund your locked ETH from the HTLC contract once the timelock expires"
+                      title={t('history.refund.ethTitle')}
                     >
                       <Undo2 className="h-3.5 w-3.5" />
-                      Refund ETH
+                      {t('history.transaction.refundEth')}
                     </button>
                   )}
                   {canManualRefundXlm(tx) && (
@@ -381,10 +382,10 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       onClick={() => void handleManualXlmRefund(tx)}
                       disabled={manualRefundingIds.has(tx.id)}
                       className="flex items-center gap-1.5 rounded-full border border-cyan-400/30 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-60"
-                      title="Ask the relayer to refund your original XLM payment"
+                      title={t('history.refund.xlmTitle')}
                     >
                       <Undo2 className={`h-3.5 w-3.5 ${manualRefundingIds.has(tx.id) ? 'animate-spin' : ''}`} />
-                      {manualRefundingIds.has(tx.id) ? 'Refunding...' : 'Refund XLM'}
+                      {manualRefundingIds.has(tx.id) ? t('history.transaction.refunding') : t('history.transaction.refundXlm')}
                     </button>
                   )}
                 </div>

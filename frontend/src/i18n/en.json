@@ -1,0 +1,294 @@
+{
+  "bridge": {
+    "console": "Bridge console",
+    "status": {
+      "preparing": "Preparing...",
+      "sending": "Sending...",
+      "creatingOrder": "Creating order...",
+      "creatingMainnetOrder": "Creating mainnet order...",
+      "confirming": "Confirming...",
+      "bridging": "Bridging...",
+      "completed": "Completed ✅",
+      "failed": "Failed ❌",
+      "refunded": "Refunded ↩️",
+      "networkError": "Network error ❌",
+      "processing": "Processing...",
+      "announceOrder": "Announcing order...",
+      "orderAnnounced": "Order announced ✅"
+    },
+    "button": {
+      "bridge": "Bridge",
+      "newBridge": "New Bridge",
+      "reconnectWallet": "Reconnect Wallet",
+      "connectWallet": "Connect Wallet"
+    },
+    "orderCreated": {
+      "title": "Order Created",
+      "description": "Your cross-chain order has been successfully created and is now processing.",
+      "orderId": "Order ID:",
+      "from": "From:",
+      "to": "To:"
+    },
+    "form": {
+      "youPay": "You pay",
+      "youReceive": "You receive",
+      "fee": "Fee:",
+      "time": "~1 min",
+      "balance": "Balance: {{balance}} {{symbol}}",
+      "consoleLabel": "Bridge console"
+    },
+    "rate": {
+      "title": "Exchange rate",
+      "updating": "Updating...",
+      "updated": "Updated {{time}}",
+      "liveLabel": "live",
+      "liveTitle": "Price data is fresh (within 15s)",
+      "staleLabel": "stale",
+      "staleTitle": "Price data is stale (15–60s old). A background refresh is in progress.",
+      "fallbackLabel": "fallback",
+      "fallbackTitle": "The relayer price feed is unreachable; this is a hardcoded estimate.",
+      "staleWarning": "Prices refreshing in background — quote is from up to 60s ago and is still safe to use.",
+      "fallbackWarning": "Live price feed unreachable. Final swap amount will use the relayer's price at execution time and may differ.",
+      "priceSource": "via relayer (CoinGecko, 15s SWR)"
+    },
+    "recovery": {
+      "walletLost": "{{wallets}} wallet {{plural}} lost. Reconnect to continue.",
+      "walletConnection": "connection",
+      "walletConnections": "connections"
+    },
+    "direction": {
+      "ethToXlm": "ETH → XLM",
+      "xlmToEth": "XLM → ETH",
+      "ethToSol": "ETH → SOL",
+      "solToEth": "SOL → ETH",
+      "xlmToSol": "XLM → SOL",
+      "solToXlm": "SOL → XLM"
+    },
+    "token": {
+      "onChain": "on {{chain}}"
+    },
+    "errors": {
+      "networkSwitchFailed": "Please switch MetaMask to {{network}} manually and try again.",
+      "invalidTxParams": "Invalid transaction parameters from relayer",
+      "txRejected": "Transaction was rejected by user",
+      "txFailed": "Transaction failed. Please check your balance and try again.",
+      "txInsufficientFunds": "Insufficient funds for gas * price + value",
+      "txInvalidParams": "Invalid transaction parameters",
+      "txError": "Transaction error: {{message}}",
+      "stellarRejected": "Stellar transaction was rejected by user",
+      "stellarError": "Stellar transaction error: {{message}}",
+      "coordinatorError": "Coordinator error: {{status}}",
+      "processError": "Error: {{message}}",
+      "xlmRefundFailed": "ETH transfer failed, but your XLM has been automatically refunded to your wallet.\n\nRefund TX: {{txHash}}\n\nReason: {{reason}}",
+      "xlmRefundAutoFailed": "ETH sending failed: {{details}}",
+      "xlmNetworkError": "ETH sending network error: {{message}}"
+    }
+  },
+
+  "history": {
+    "ledgerLabel": "Ledger",
+    "title": "Transaction History",
+    "subtitle": "Track your cross-chain swaps between Ethereum and Stellar networks",
+    "refreshing": "Showing cached history while refreshing latest data...",
+    "showingCached": "Showing cached history",
+    "refresh": "Refresh",
+    "empty": {
+      "title": "No transactions yet",
+      "subtitle": "Your real cross-chain swaps will appear here after the first transaction"
+    },
+    "filter": {
+      "all": "All",
+      "pending": "Pending",
+      "completed": "Completed",
+      "cancelled": "Cancelled"
+    },
+    "status": {
+      "completed": "completed",
+      "pending": "pending",
+      "cancelled": "cancelled",
+      "failed": "failed"
+    },
+    "transaction": {
+      "id": "Transaction:",
+      "refundedLabel": "Refunded · view on",
+      "refundEth": "Refund ETH",
+      "refundXlm": "Refund XLM",
+      "refunding": "Refunding...",
+      "etherscan": "Etherscan",
+      "stellarExpert": "Stellar Expert"
+    },
+    "refund": {
+      "ethTitle": "Refund your locked ETH from the HTLC contract once the timelock expires",
+      "xlmTitle": "Ask the relayer to refund your original XLM payment",
+      "refundSettled": "Refund settled on {{network}}. Click to view the refund transaction.",
+      "refundRequires": "Manual refund requires the original Stellar transaction and your Stellar wallet address.",
+      "failed": "Manual XLM refund failed: {{message}}"
+    }
+  },
+
+  "wallet": {
+    "connected": "Connected",
+    "partial": "Partial",
+    "connect": "Connect Wallet",
+    "connectWallets": "Connect Wallets",
+    "disconnectAll": "Disconnect All",
+    "connecting": "Connecting…",
+    "install": "Install",
+    "status": {
+      "connected": "Connected",
+      "missing": "Missing",
+      "error": "Error"
+    },
+    "networks": {
+      "testnet": "Testnet",
+      "mainnet": "Mainnet",
+      "mainnetSoon": "Mainnet Soon",
+      "mainnetSoonTitle": "v2 mainnet launches after independent audit (Q1 2027)"
+    },
+    "metamask": {
+      "name": "MetaMask",
+      "chain": "Ethereum",
+      "hint": "Install MetaMask from metamask.io and reload the page."
+    },
+    "freighter": {
+      "name": "Freighter",
+      "chain": "Stellar",
+      "hint": "Install Freighter from the Chrome Web Store and reload the page."
+    },
+    "phantom": {
+      "name": "Phantom",
+      "chain": "Solana"
+    },
+    "errors": {
+      "metamaskUnavailable": "MetaMask not found.",
+      "metamaskCheckFailed": "Failed to check MetaMask state",
+      "metamaskConnectFailed": "MetaMask connection failed",
+      "metamaskConnectHintRejected": "You rejected the connection request in MetaMask.",
+      "metamaskConnectHintGeneral": "Check the MetaMask popup and try again.",
+      "metamaskReloadHint": "Refresh the page. If accounts are locked, unlock MetaMask and try again.",
+      "freighterUnavailable": "Freighter API not available. Is the extension installed?",
+      "freighterUnavailableHint": "Install Freighter from the Chrome Web Store and reload the page."
+    },
+    "toast": {
+      "networkChangeCancelled": "Network change cancelled",
+      "networkChangeCancelledBody": "You declined the wallet switch — app is still on {{network}}.",
+      "networkSwitchFailed": "Network switch failed",
+      "networkSwitchFailedBody": "Please switch your wallet network manually, then click the toggle again.",
+      "networkModeChanged": "Network mode changed",
+      "networkModeChangedBody": "Switched to {{network}} mode"
+    }
+  },
+
+  "network": {
+    "mismatch": {
+      "title": "Your wallet network does not match the app network.",
+      "body": "App is set to {{expected}}.",
+      "ethMismatch": "Ethereum wallet is on {{actual}}{{chainId}}.",
+      "freighterMismatch": "Freighter is on {{actual}}.",
+      "freighterHint": "Switch Freighter to Stellar Testnet in the extension if needed.",
+      "signingWillFail": "Balances and signing will fail until they match.",
+      "switchWallet": "Switch wallet to {{network}}",
+      "switchApp": "Switch app to wallet"
+    },
+    "mainnetBanner": {
+      "title": "Mainnet: v1 single-relayer bridge active",
+      "body": "v2 decentralized HTLC stack (multi-resolver, on-chain hashlock/timelock) is live on testnet. v2 mainnet launch is on the roadmap for Q1 2027 after audit. Switch to testnet to try the v2 flow today.",
+      "button": "Try v2 on testnet"
+    }
+  },
+
+  "refundDialog": {
+    "title": "Refund order",
+    "subtitle": "Refund is permissionless — your wallet calls the contract directly.",
+    "close": "Close",
+    "orderId": "Order id",
+    "lockedAmount": "Locked amount",
+    "timelock": "Timelock",
+    "waiting": {
+      "title": "Refund not yet available.",
+      "body": "Time remaining: {{remaining}}"
+    },
+    "ready": "The timelock has expired. You can refund this order at any time.",
+    "error": {
+      "title": "Refund failed",
+      "networkMismatch": "Wallet connected to {{walletNetwork}} while app is in {{appMode}} mode. Switch networks to continue.",
+      "missingAddress": "v1-mainnet-htlc refund requires `v1ContractAddress` prop.",
+      "noWallet": "No injected wallet found.",
+      "invalidOrderId": "v1 mainnet refund requires a 0x-prefixed bytes32 order id.",
+      "htlcNotConfigured": "HTLCEscrow address is not configured for this network. v2 is testnet-only; switch to testnet to refund."
+    },
+    "done": {
+      "title": "Refund submitted."
+    },
+    "button": {
+      "submit": "Refund from contract",
+      "submitting": "Submitting refund..."
+    }
+  },
+
+  "claimDialog": {
+    "title": "Claim order",
+    "subtitle": "Direct on-chain claim — your wallet calls the contract directly.",
+    "close": "Close",
+    "orderId": "Order id",
+    "checking": "Checking coordinator availability…",
+    "coordinatorUp": {
+      "title": "Coordinator is available",
+      "body": "Use the standard claim flow — the coordinator will relay the secret to the destination chain automatically."
+    },
+    "fallback": {
+      "title": "Coordinator unavailable — fallback mode",
+      "body": "The coordinator is offline. You can still claim your funds by submitting the secret directly to the on-chain contract from your wallet."
+    },
+    "error": {
+      "title": "Claim failed",
+      "networkMismatch": "Wallet is on the wrong network for {{mode}} mode. Switch networks to continue.",
+      "htlcNotConfigured": "HTLCEscrow address is not configured for this network. v2 is testnet-only — switch to testnet to claim.",
+      "unknown": "Unknown error during claim"
+    },
+    "done": {
+      "title": "Claim submitted."
+    },
+    "button": {
+      "submit": "Claim directly on-chain",
+      "submitting": "Submitting claim…",
+      "notNeeded": "Fallback is not needed while the coordinator is reachable."
+    }
+  },
+
+  "validation": {
+    "ethereum": {
+      "required": "Ethereum address is required.",
+      "invalid": "Enter a valid 0x Ethereum address."
+    },
+    "stellar": {
+      "required": "Stellar address is required.",
+      "memoNotAccepted": "Stellar memo IDs are not accepted here. Paste the account address starting with G.",
+      "invalid": "Enter a valid Stellar public address (starts with G, 56 chars)."
+    },
+    "solana": {
+      "required": "Solana address is required.",
+      "invalid": "Enter a valid Solana wallet address."
+    },
+    "amount": {
+      "required": "Enter an amount.",
+      "tooLow": "Amount must be greater than zero.",
+      "tooManyDecimals": "Amount may have at most {{maxDecimals}} decimals for this token.",
+      "belowMinimum": "Amount is below the minimum ({{min}})."
+    },
+    "balance": {
+      "insufficient": "Insufficient {{symbol}} balance. You have {{balance}} {{symbol}}."
+    },
+    "route": {
+      "missingWallets": "Connect {{wallets}} to use this route."
+    },
+    "destination": {
+      "mustBeEthereum": "Destination must be an Ethereum address for this route.",
+      "mustBeStellar": "Destination must be a Stellar address for this route.",
+      "mustBeSolana": "Destination must be a Solana address for this route."
+    },
+    "assetPair": {
+      "unsupported": "Unsupported asset pair: {{from}} → {{to}}."
+    }
+  }
+}

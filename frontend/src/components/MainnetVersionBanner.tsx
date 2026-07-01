@@ -1,4 +1,5 @@
 import type { NetworkModeState } from '../lib/useNetworkMode';
+import { t } from '../i18n';
 
 interface Props {
   networkState: NetworkModeState;
@@ -18,12 +19,10 @@ export default function MainnetVersionBanner({ networkState }: Props) {
         <span className="mt-0.5">ℹ</span>
         <div>
           <div className="font-semibold text-blue-100">
-            Mainnet: v1 single-relayer bridge active
+            {t('network.mainnetBanner.title')}
           </div>
           <div className="text-blue-200/90">
-            v2 decentralized HTLC stack (multi-resolver, on-chain hashlock/timelock) is
-            live on <b>testnet</b>. v2 mainnet launch is on the roadmap for Q1 2027
-            after audit. Switch to testnet to try the v2 flow today.
+            {t('network.mainnetBanner.body')}
           </div>
         </div>
       </div>
@@ -32,7 +31,7 @@ export default function MainnetVersionBanner({ networkState }: Props) {
           onClick={() => networkState.setMode('testnet')}
           className="px-3 py-1.5 rounded-md bg-blue-400/20 hover:bg-blue-400/30 text-blue-50 text-xs font-semibold border border-blue-300/30 transition-colors"
         >
-          Try v2 on testnet
+          {t('network.mainnetBanner.button')}
         </button>
       </div>
     </div>

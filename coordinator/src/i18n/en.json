@@ -1,0 +1,23 @@
+{
+  "api": {
+    "errors": {
+      "validationFailed": "Request validation failed",
+      "notFound": "Resource not found",
+      "orderNotFound": "Order not found",
+      "secretNotRevealed": "Secret has not been revealed for this order",
+      "invalidCursor": "The provided cursor is invalid or expired",
+      "unknownOrder": "unknown order {{publicId}}",
+      "cannotTransitionSrc": "cannot record src lock from status {{status}}",
+      "cannotTransitionDst": "cannot record dst lock from status {{status}}",
+      "cannotTransitionSecret": "cannot record secret from status {{status}}",
+      "cannotTransition": "cannot transition from {{from}} to {{to}}",
+      "hashlockConflict": "An order with hashlock {{hashlock}} already exists (publicId={{publicId}})"
+    },
+    "secret": {
+      "unknownOrder": "No order found for the supplied publicId",
+      "invalidPreimage": "The supplied preimage does not match the order hashlock",
+      "revealConflict": "This order is no longer in a state that can accept a secret reveal",
+      "storageFailure": "The secret could not be persisted due to an internal error; the reveal can be retried"
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, RefreshCw, WifiOff } from "lucide-react";
 import type { Address, Hex } from "viem";
 import { makeEthereumHTLCClient } from "../../lib/sdk-context";
 import { useNetworkMode } from "../../lib/useNetworkMode";
+import { t } from "../../i18n";
 
 export interface ClaimFallbackDialogProps {
   /** Ethereum address of the user (used as wallet signer). */
@@ -88,9 +89,7 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
 
   async function handleDirectClaim() {
     if (networkState.hasAnyMismatch) {
-      setError(
-        `Wallet is on the wrong network for ${networkState.mode} mode. Switch networks to continue.`
-      );
+      setError(t('claimDialog.error.networkMismatch', { mode: networkState.mode }));
       setPhase("error");
       return;
     }
@@ -100,17 +99,14 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
     try {
       const client = await makeEthereumHTLCClient(props.userAddress);
       if (!client) {
-        throw new Error(
-          "HTLCEscrow address is not configured for this network. " +
-          "v2 is testnet-only — switch to testnet to claim."
-        );
+        throw new Error(t('claimDialog.error.htlcNotConfigured'));
       }
       const hash = await client.claimOrder(BigInt(props.orderId), props.preimage);
       setTxHash(hash);
       setPhase("done");
       props.onClaimed?.(hash);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error during claim");
+      setError(err instanceof Error ? err.message : t('claimDialog.error.unknown'));
       setPhase("error");
     }
   }
@@ -122,16 +118,16 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
     <div className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold text-white mb-1">Claim order</h2>
+          <h2 className="text-xl font-bold text-white mb-1">{t('claimDialog.title')}</h2>
           <p className="text-gray-400 text-sm">
-            Direct on-chain claim — your wallet calls the contract directly.
+            {t('claimDialog.subtitle')}
           </p>
         </div>
         {props.onClose && (
           <button
             onClick={props.onClose}
             className="text-gray-400 hover:text-white transition-colors text-sm"
-            aria-label="Close"
+            aria-label={t('claimDialog.close')}
           >
             ✕
           </button>
@@ -140,7 +136,7 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
 
       <dl className="space-y-2 mb-4 text-sm">
         <div className="flex justify-between">
-          <dt className="text-gray-400">Order id</dt>
+          <dt className="text-gray-400">{t('claimDialog.orderId')}</dt>
           <dd className="text-white font-mono text-xs truncate max-w-[200px]">{props.orderId}</dd>
         </div>
       </dl>
@@ -148,7 +144,7 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
       {phase === "checking" && (
         <div className="bg-gray-500/10 border border-gray-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
           <RefreshCw className="h-5 w-5 text-gray-400 animate-spin" />
-          <p className="text-sm text-gray-300">Checking coordinator availability…</p>
+          <p className="text-sm text-gray-300">{t('claimDialog.checking')}</p>
         </div>
       )}
 
@@ -156,11 +152,8 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
           <CheckCircle2 className="h-5 w-5 text-emerald-400 mt-0.5 shrink-0" />
           <div className="text-sm">
-            <p className="text-emerald-300 font-medium">Coordinator is available</p>
-            <p className="text-gray-400">
-              Use the standard claim flow — the coordinator will relay the secret
-              to the destination chain automatically.
-            </p>
+            <p className="text-emerald-300 font-medium">{t('claimDialog.coordinatorUp.title')}</p>
+            <p className="text-gray-400">{t('claimDialog.coordinatorUp.body')}</p>
           </div>
         </div>
       )}
@@ -169,11 +162,8 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
           <WifiOff className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
           <div className="text-sm">
-            <p className="text-yellow-300 font-medium">Coordinator unavailable — fallback mode</p>
-            <p className="text-gray-400">
-              The coordinator is offline. You can still claim your funds by
-              submitting the secret directly to the on-chain contract from your wallet.
-            </p>
+            <p className="text-yellow-300 font-medium">{t('claimDialog.fallback.title')}</p>
+            <p className="text-gray-400">{t('claimDialog.fallback.body')}</p>
           </div>
         </div>
       )}
@@ -182,7 +172,7 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
           <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 shrink-0" />
           <div className="text-sm">
-            <p className="text-red-300 font-medium">Claim failed</p>
+            <p className="text-red-300 font-medium">{t('claimDialog.error.title')}</p>
             <p className="text-gray-400 break-all">{error}</p>
           </div>
         </div>
@@ -190,7 +180,7 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
 
       {phase === "done" && txHash && (
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 mb-4">
-          <p className="text-sm text-emerald-300 font-medium mb-1">Claim submitted.</p>
+          <p className="text-sm text-emerald-300 font-medium mb-1">{t('claimDialog.done.title')}</p>
           <a
             href={`${explorer}/tx/${txHash}`}
             target="_blank"
@@ -214,12 +204,12 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
       >
         {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" />}
-        {phase === "submitting" ? "Submitting claim…" : "Claim directly on-chain"}
+        {phase === "submitting" ? t('claimDialog.button.submitting') : t('claimDialog.button.submit')}
       </button>
 
       {phase === "coordinator-up" && (
         <p className="text-xs text-gray-500 text-center mt-2">
-          Fallback is not needed while the coordinator is reachable.
+          {t('claimDialog.button.notNeeded')}
         </p>
       )}
     </div>
