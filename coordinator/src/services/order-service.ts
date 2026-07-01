@@ -7,7 +7,7 @@ import {
   type Chain
 } from "../persistence/orders-repo.js";
 import { canTransition } from "../state-machine/order-machine.js";
-import { ordersTotal } from "../metrics.js";
+import { ordersTotal, resolverLockActionsTotal } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
 
@@ -154,12 +154,16 @@ export class OrderService {
       throw new OrderValidationError(`cannot record dst lock from status ${order.status}`);
     }
     await this.repo.recordDstLock(input);
-    this.log.info({ publicId: input.publicId, dstOrderId: input.orderId }, "dst lock recorded");
+    this.log.info({ publicId: input.publicId, dstOrderId: input.orderId, resolver: input.resolver }, "dst lock recorded");
     ordersTotal.inc({ status: "dst_locked" });
     
     // Invalidate cache for both addresses since order status changed
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
+
+    if (input.resolver) {
+      resolverLockActionsTotal.inc({ resolver_address: input.resolver, action: "dst_lock" });
+    }
   }
 
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {

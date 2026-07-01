@@ -185,3 +185,11 @@ export const staleCleanupLastRun = new Gauge({
   help: "Unix timestamp of the most recent stale order cleanup run",
   registers: [registry]
 });
+
+/** Resolver participation per operation */
+export const resolverLockActionsTotal = new Counter({
+  name: "coordinator_resolver_lock_actions_total",
+  help: "Total resolver lock actions by resolver address and action type",
+  labelNames: ["resolver_address", "action"] as const,
+  registers: [registry],
+});
