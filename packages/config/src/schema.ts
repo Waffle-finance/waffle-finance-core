@@ -209,12 +209,29 @@ export type ResolverConfig = z.infer<typeof resolverConfigSchema>;
 // Frontend Configuration Schema (Vite browser)
 export const frontendConfigSchema = z.object({
   network: networkModeSchema,
-  mainnetEnabled: z.coerce.boolean().default(false),
+  mainnetEnabled: z.preprocess((val) => {
+    if (typeof val === "string") {
+      if (val.toLowerCase() === "true" || val === "1") return true;
+      if (val.toLowerCase() === "false" || val === "0") return false;
+    }
+    return val;
+  }, z.boolean().default(false)),
   sepoliaRpcUrl: z.string().optional(),
   mainnetRpcUrl: z.string().optional(),
   infuraApiKey: z.string().optional(),
   oneinchApiKey: z.string().optional(),
   apiBaseUrl: z.string().url().default("http://localhost:3001"),
-});
+}).refine(
+  (data) => {
+    if (data.network === "mainnet" && !data.mainnetEnabled) {
+      return false;
+    }
+    return true;
+  },
+  {
+    message: "Mainnet cannot be configured as the default network if VITE_MAINNET_ENABLED is false",
+    path: ["network"],
+  }
+);
 
 export type FrontendConfig = z.infer<typeof frontendConfigSchema>;

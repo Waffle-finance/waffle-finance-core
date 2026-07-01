@@ -7,8 +7,31 @@ import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from './rpc-urls';
 
 export type AppNetworkMode = 'mainnet' | 'testnet';
 
+// Whitelist of allowed network modes
+export const ALLOWED_NETWORK_MODES = ['testnet', 'mainnet'] as const;
+
 // Central configuration entry point for the frontend dApp
 export const frontendConfig = loadFrontendConfig((import.meta as any).env || {});
+
+/** Centralized network-mode helper with validation and whitelisting. */
+export const validateNetworkMode = (mode: string): AppNetworkMode => {
+  if (!ALLOWED_NETWORK_MODES.includes(mode as any)) {
+    throw new Error(`Invalid network mode: "${mode}". Allowed modes: ${ALLOWED_NETWORK_MODES.join(', ')}`);
+  }
+  if (mode === 'mainnet' && !frontendConfig.mainnetEnabled) {
+    throw new Error('Mainnet mode is disabled in this environment.');
+  }
+  return mode as AppNetworkMode;
+};
+
+// Fail-fast validation at module initialization time
+try {
+  validateNetworkMode(frontendConfig.network);
+} catch (error: any) {
+  console.error('Configuration validation failed at startup:', error.message);
+  // Throwing here will prevent application load on invalid configs
+  throw error;
+}
 
 /**
  * When false, the dApp is testnet-only. Mainnet toggle shows "Mainnet Coming".
@@ -20,10 +43,11 @@ export const isMainnetEnabled = (): boolean => {
 
 /** Clamp requested mode when mainnet is temporarily disabled. */
 export const resolveNetworkMode = (requested: AppNetworkMode): AppNetworkMode => {
-  if (requested === 'mainnet' && !isMainnetEnabled()) {
+  try {
+    return validateNetworkMode(requested);
+  } catch {
     return 'testnet';
   }
-  return requested;
 };
 
 function readNetworkNameFromEnvOrUrl(): AppNetworkMode {
@@ -32,7 +56,7 @@ function readNetworkNameFromEnvOrUrl(): AppNetworkMode {
   if (typeof window !== 'undefined') {
     const urlNetwork = new URLSearchParams(window.location.search).get('network');
     if (urlNetwork === 'mainnet' || urlNetwork === 'testnet') {
-      networkName = urlNetwork;
+      networkName = urlNetwork as AppNetworkMode;
       return resolveNetworkMode(networkName);
     }
   }
