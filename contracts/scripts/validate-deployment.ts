@@ -118,7 +118,6 @@ async function validateDeploymentParameters(artifact: DeploymentArtifact, result
   }
 
   const { stakeAsset, minStake } = config;
-  // Note: minSafetyDeposit might not be present in the new config structure
   const minSafetyDeposit = (config as any).minSafetyDeposit;
 
   // For Ethereum network validation, stake asset from stellar config is a Stellar asset, not an ETH address.
