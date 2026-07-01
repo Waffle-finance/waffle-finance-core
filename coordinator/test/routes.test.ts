@@ -472,6 +472,47 @@ describe("GET /api/orders/history", () => {
     expect(res.status).toBe(200);
     expect(res.body.transactions).toEqual([]);
   });
+
+  it("accepts eth and stellar parameters together and returns matching orders", async () => {
+    const app = await freshApp();
+    await request(app).post("/api/orders/announce").send(BASE_ANNOUNCE).expect(201);
+
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ eth: VALID_ETH_ADDR, stellar: VALID_STELLAR_ADDR });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.transactions[0].correlationId).toBeNull();
+  });
+
+  it("allows announcing with correlationId and querying by it", async () => {
+    const app = await freshApp();
+    const correlationId = "test-correlation-123";
+    await request(app)
+      .post("/api/orders/announce")
+      .send({ ...BASE_ANNOUNCE, correlationId })
+      .expect(201);
+
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ correlationId });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.transactions[0].correlationId).toBe(correlationId);
+    expect(res.body.transactions[0].lifecyclePhase).toBe("announced");
+    expect(res.body.transactions[0].lastUpdatedTimestamp).toBeGreaterThan(0);
+  });
+
+  it("allows searching by hashlock and matching partial terms", async () => {
+    const app = await freshApp();
+    await request(app).post("/api/orders/announce").send(BASE_ANNOUNCE).expect(201);
+
+    const res = await request(app)
+      .get("/api/orders/history")
+      .query({ search: VALID_HASHLOCK.substring(0, 10) });
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+  });
 });
 
 describe("Rate-limit response headers", () => {

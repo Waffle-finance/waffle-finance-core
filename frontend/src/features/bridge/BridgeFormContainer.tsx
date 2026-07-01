@@ -9,6 +9,7 @@ import {
 import { isTestnet, getCurrentNetwork } from '../../config/networks';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
+import { trackFailedSubmission } from '../../lib/telemetry';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
 import {
   validateAmount,
@@ -896,6 +897,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               setIsSubmitting(false);
             } else {
               console.error('❌ Processing request failed:', processResponse.status);
+              trackFailedSubmission({
+                orderId: result?.orderId,
+                direction,
+                step: 'eth_to_xlm_process_order',
+                walletType: 'metamask',
+                error: new Error(`Process API failed with status ${processResponse.status}`),
+                state: { amount, estimatedAmount, ethAddress, stellarAddress, txHash }
+              });
 
               if (ENABLE_MOCK_DATA) {
                 console.log('🧪 Mock data enabled: showing success despite processing failure');
@@ -912,6 +921,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             }
           } catch (processError) {
             console.error('❌ Processing request error:', processError);
+            trackFailedSubmission({
+              orderId: result?.orderId,
+              direction,
+              step: 'eth_to_xlm_process_order',
+              walletType: 'metamask',
+              error: processError,
+              state: { amount, estimatedAmount, ethAddress, stellarAddress, txHash }
+            });
 
             if (ENABLE_MOCK_DATA) {
               console.log('🧪 Mock data enabled: showing success despite processing error');
@@ -944,6 +961,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           
         } catch (txError: any) {
           console.error('❌ Approval transaction failed:', txError);
+          trackFailedSubmission({
+            orderId: result?.orderId,
+            direction,
+            step: 'eth_approval_submit',
+            walletType: 'metamask',
+            error: txError,
+            state: { amount, estimatedAmount, ethAddress, stellarAddress }
+          });
           
           // Update status to failed
           setStatusMessage('Failed ❌');
@@ -1078,8 +1103,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               console.log('✅ ETH release initiated:', processResult);
               console.log('💰 Expected ETH amount:', result.orderData?.targetAmount || 'unknown', 'wei');
               
-              // Update transaction status to completed
-              updateTransactionStatus(result.orderId, 'completed', {
+updateTransactionStatus(result.orderId, 'completed', {
                 ethTxHash: processResult.ethTxId
               });
               
@@ -1094,6 +1118,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               const errorData = await processResponse.text();
               console.error('❌ ETH release failed:', processResponse.status);
               console.error('❌ Error response body:', errorData);
+              trackFailedSubmission({
+                orderId: result?.orderId,
+                direction,
+                step: 'xlm_to_eth_release_order',
+                walletType: 'freighter',
+                error: new Error(errorData || `ETH release API failed with status ${processResponse.status}`),
+                state: { amount, estimatedAmount, ethAddress, stellarAddress, stellarTxHash: submitResult.hash }
+              });
               
               // Try to parse error details
               let parsedError: any = null;
@@ -1154,9 +1186,17 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               name: processError.name,
               stack: processError.stack
             });
+            trackFailedSubmission({
+              orderId: result?.orderId,
+              direction,
+              step: 'xlm_to_eth_release_order',
+              walletType: 'freighter',
+              error: processError,
+              state: { amount, estimatedAmount, ethAddress, stellarAddress, stellarTxHash: submitResult.hash }
+            });
             
             // Update status to failed
-                          setStatusMessage('Network error ❌');
+            setStatusMessage('Network error ❌');
             setIsSubmitting(false);
             
             // Update transaction status to failed
@@ -1168,6 +1208,14 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
 
         } catch (stellarError: any) {
           console.error('❌ Stellar transaction failed:', stellarError);
+          trackFailedSubmission({
+            orderId: result?.orderId,
+            direction,
+            step: 'stellar_payment_submit',
+            walletType: 'freighter',
+            error: stellarError,
+            state: { amount, estimatedAmount, ethAddress, stellarAddress }
+          });
           
           // Handle Freighter errors
           if (stellarError.message?.includes('User declined')) {

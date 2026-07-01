@@ -62,6 +62,11 @@ export interface OrderRow {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+
+  lifecyclePhase: string;
+  lastUpdatedTimestamp: number | null;
+  errorState: string | null;
+  correlationId: string | null;
 }
 
 export interface OrderHistoryResult {
@@ -86,6 +91,17 @@ export interface AnnounceOrderInput {
   dstAddress: string;
   dstAsset: string;
   dstAmount: string;
+  correlationId?: string;
+}
+
+export interface SearchOrdersFilters {
+  addresses?: string[];
+  status?: string;
+  lifecyclePhase?: string;
+  direction?: string;
+  correlationId?: string;
+  hashlock?: string;
+  search?: string;
 }
 
 interface OrderDbRow {
@@ -118,6 +134,11 @@ interface OrderDbRow {
   created_at: number;
   updated_at: number;
   archived_at: number | null;
+
+  lifecycle_phase: string | null;
+  last_updated_timestamp: number | null;
+  error_state: string | null;
+  correlation_id: string | null;
 }
 
 function rowToOrder(r: OrderDbRow): OrderRow {
@@ -150,7 +171,12 @@ function rowToOrder(r: OrderDbRow): OrderRow {
     resolverAddress: r.resolver_address,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    archivedAt: r.archived_at ?? null
+    archivedAt: r.archived_at ?? null,
+
+    lifecyclePhase: r.lifecycle_phase ?? r.status,
+    lastUpdatedTimestamp: r.last_updated_timestamp ?? r.updated_at,
+    errorState: r.error_state ?? null,
+    correlationId: r.correlation_id ?? null
   };
 }
 
@@ -174,11 +200,13 @@ export class OrdersRepository {
       INSERT INTO orders (
         public_id, direction, status, hashlock,
         src_chain, src_address, src_asset, src_amount, src_safety_deposit,
-        dst_chain, dst_address, dst_asset, dst_amount
+        dst_chain, dst_address, dst_asset, dst_amount,
+        lifecycle_phase, last_updated_timestamp, correlation_id
       ) VALUES (
         :publicId, :direction, 'announced', :hashlock,
         :srcChain, :srcAddress, :srcAsset, :srcAmount, :srcSafetyDeposit,
-        :dstChain, :dstAddress, :dstAsset, :dstAmount
+        :dstChain, :dstAddress, :dstAsset, :dstAmount,
+        'announced', CAST(strftime('%s','now') AS INTEGER), :correlationId
       )
     `);
     this.byPublicId = db.prepare("SELECT * FROM orders WHERE public_id = ?");
@@ -207,12 +235,13 @@ export class OrdersRepository {
     `);
     this.updateStatus = db.prepare(`
       UPDATE orders
-      SET status = :status, updated_at = CAST(strftime('%s','now') AS INTEGER)
+      SET status = :status,
+          lifecycle_phase = :lifecyclePhase,
+          last_updated_timestamp = :lastUpdatedTimestamp,
+          error_state = :errorState,
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId
     `);
-    // Status is computed in TypeScript (see recordSrcLock/recordDstLock) using
-    // the order state machine as the single source of truth, then applied here
-    // as a discrete value rather than via a brittle SQL CASE expression.
     this.updateSrcLock = db.prepare(`
       UPDATE orders SET
         src_order_id = :orderId,
@@ -220,6 +249,9 @@ export class OrdersRepository {
         src_lock_block = :blockNumber,
         src_timelock = :timelock,
         status = :status,
+        lifecycle_phase = :status,
+        last_updated_timestamp = CAST(strftime('%s','now') AS INTEGER),
+        error_state = NULL,
         updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId
     `);
@@ -231,6 +263,9 @@ export class OrdersRepository {
         dst_timelock = :timelock,
         resolver_address = :resolver,
         status = :status,
+        lifecycle_phase = :status,
+        last_updated_timestamp = CAST(strftime('%s','now') AS INTEGER),
+        error_state = NULL,
         updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId
     `);
@@ -240,6 +275,9 @@ export class OrdersRepository {
         preimage_enc_version = :encVersion,
         secret_revealed_tx = :txHash,
         status = 'secret_revealed',
+        lifecycle_phase = 'secret_revealed',
+        last_updated_timestamp = CAST(strftime('%s','now') AS INTEGER),
+        error_state = NULL,
         updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId
     `);
@@ -250,6 +288,9 @@ export class OrdersRepository {
         src_lock_block = NULL,
         src_timelock = NULL,
         status = 'announced',
+        lifecycle_phase = 'announced',
+        last_updated_timestamp = CAST(strftime('%s','now') AS INTEGER),
+        error_state = NULL,
         updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId AND status = 'src_locked'
     `);
@@ -261,6 +302,9 @@ export class OrdersRepository {
         dst_timelock = NULL,
         resolver_address = NULL,
         status = 'src_locked',
+        lifecycle_phase = 'src_locked',
+        last_updated_timestamp = CAST(strftime('%s','now') AS INTEGER),
+        error_state = NULL,
         updated_at = CAST(strftime('%s','now') AS INTEGER)
       WHERE public_id = :publicId AND status = 'dst_locked'
     `);
@@ -312,7 +356,11 @@ export class OrdersRepository {
   /** Returns the public id of the new order. */
   async announce(input: AnnounceOrderInput): Promise<OrderRow> {
     const publicId = orderIdFromHashlock(input.hashlock);
-    await this.run(this.insertStmt, { publicId, ...input });
+    await this.run(this.insertStmt, { 
+      publicId, 
+      ...input,
+      correlationId: input.correlationId ?? null 
+    });
     const row = await this.get<OrderDbRow>(this.byPublicId, publicId);
     if (!row) throw new Error("Failed to insert order");
     return rowToOrder(row);
@@ -398,6 +446,183 @@ export class OrdersRepository {
   }
 
   /**
+   * Find orders using dynamic filters with cursor-based pagination.
+   */
+  async searchOrdersWithCursor(
+    filters: SearchOrdersFilters,
+    limit = 50,
+    cursor?: string
+  ): Promise<OrderHistoryResult> {
+    if (cursor !== undefined && cursor === '') {
+      throw new Error('Invalid cursor: empty string is not a valid cursor');
+    }
+
+    const conditions: string[] = [];
+    const params: Record<string, any> = {};
+
+    // 1. Address filtering (OR match if multiple addresses provided)
+    if (filters.addresses && filters.addresses.length > 0) {
+      const addressConditions: string[] = [];
+      filters.addresses.forEach((addr, idx) => {
+        const paramName = `addr_${idx}`;
+        addressConditions.push(`src_address = :${paramName} OR dst_address = :${paramName}`);
+        params[paramName] = addr;
+      });
+      conditions.push(`(${addressConditions.join(" OR ")})`);
+    }
+
+    // 2. Specific filters
+    if (filters.status) {
+      conditions.push("status = :status");
+      params.status = filters.status;
+    }
+    if (filters.lifecyclePhase) {
+      conditions.push("lifecycle_phase = :lifecyclePhase");
+      params.lifecyclePhase = filters.lifecyclePhase;
+    }
+    if (filters.direction) {
+      conditions.push("direction = :direction");
+      params.direction = filters.direction;
+    }
+    if (filters.correlationId) {
+      conditions.push("correlation_id = :correlationId");
+      params.correlationId = filters.correlationId;
+    }
+    if (filters.hashlock) {
+      conditions.push("hashlock = :hashlock");
+      params.hashlock = filters.hashlock;
+    }
+
+    // 3. General search query
+    if (filters.search) {
+      conditions.push(`(
+        public_id LIKE :searchPattern OR
+        correlation_id LIKE :searchPattern OR
+        hashlock LIKE :searchPattern OR
+        src_address LIKE :searchPattern OR
+        dst_address LIKE :searchPattern OR
+        src_order_id LIKE :searchPattern OR
+        dst_order_id LIKE :searchPattern OR
+        src_lock_tx LIKE :searchPattern OR
+        dst_lock_tx LIKE :searchPattern
+      )`);
+      params.searchPattern = `%${filters.search}%`;
+    }
+
+    // 4. Cursor pagination
+    if (cursor) {
+      const cursorInfo = this.decodeCursor(cursor);
+      conditions.push("(created_at < :cursorCreatedAt OR (created_at = :cursorCreatedAt AND id < :cursorId))");
+      params.cursorCreatedAt = cursorInfo.createdAt;
+      params.cursorId = cursorInfo.id;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const fetchLimit = limit + 1;
+    params.limit = fetchLimit;
+
+    const sql = `
+      SELECT * FROM orders
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT :limit
+    `;
+
+    const stmt = this.db.prepare(sql);
+    const rows = await this.all<OrderDbRow>(stmt, params);
+
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const orders = pageRows.map(rowToOrder);
+
+    let nextCursor: string | null = null;
+    if (hasMore) {
+      const lastOrder = orders[orders.length - 1];
+      if (lastOrder) {
+        nextCursor = this.encodeCursor({
+          createdAt: lastOrder.createdAt,
+          id: lastOrder.id
+        });
+      }
+    }
+
+    return { orders, nextCursor };
+  }
+
+  /**
+   * Find orders using dynamic filters with offset-based pagination.
+   */
+  async searchOrders(
+    filters: SearchOrdersFilters,
+    limit = 50,
+    offset = 0
+  ): Promise<OrderRow[]> {
+    const conditions: string[] = [];
+    const params: Record<string, any> = {};
+
+    if (filters.addresses && filters.addresses.length > 0) {
+      const addressConditions: string[] = [];
+      filters.addresses.forEach((addr, idx) => {
+        const paramName = `addr_${idx}`;
+        addressConditions.push(`src_address = :${paramName} OR dst_address = :${paramName}`);
+        params[paramName] = addr;
+      });
+      conditions.push(`(${addressConditions.join(" OR ")})`);
+    }
+
+    if (filters.status) {
+      conditions.push("status = :status");
+      params.status = filters.status;
+    }
+    if (filters.lifecyclePhase) {
+      conditions.push("lifecycle_phase = :lifecyclePhase");
+      params.lifecyclePhase = filters.lifecyclePhase;
+    }
+    if (filters.direction) {
+      conditions.push("direction = :direction");
+      params.direction = filters.direction;
+    }
+    if (filters.correlationId) {
+      conditions.push("correlation_id = :correlationId");
+      params.correlationId = filters.correlationId;
+    }
+    if (filters.hashlock) {
+      conditions.push("hashlock = :hashlock");
+      params.hashlock = filters.hashlock;
+    }
+
+    if (filters.search) {
+      conditions.push(`(
+        public_id LIKE :searchPattern OR
+        correlation_id LIKE :searchPattern OR
+        hashlock LIKE :searchPattern OR
+        src_address LIKE :searchPattern OR
+        dst_address LIKE :searchPattern OR
+        src_order_id LIKE :searchPattern OR
+        dst_order_id LIKE :searchPattern OR
+        src_lock_tx LIKE :searchPattern OR
+        dst_lock_tx LIKE :searchPattern
+      )`);
+      params.searchPattern = `%${filters.search}%`;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.limit = limit;
+    params.offset = offset;
+
+    const sql = `
+      SELECT * FROM orders
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT :limit OFFSET :offset
+    `;
+
+    const stmt = this.db.prepare(sql);
+    const rows = await this.all<OrderDbRow>(stmt, params);
+    return rows.map(rowToOrder);
+  }
+
+  /**
    * Encode cursor information as a base64url string.
    * Format: base64url(JSON.stringify({createdAt, id}))
    */
@@ -432,8 +657,14 @@ export class OrdersRepository {
     }
   }
 
-  async setStatus(publicId: string, status: OrderStatus): Promise<void> {
-    await this.run(this.updateStatus, { publicId, status });
+  async setStatus(publicId: string, status: OrderStatus, errorState?: string | null): Promise<void> {
+    await this.run(this.updateStatus, {
+      publicId,
+      status,
+      lifecyclePhase: status,
+      lastUpdatedTimestamp: Math.floor(Date.now() / 1000),
+      errorState: errorState ?? null
+    });
   }
 
   /**

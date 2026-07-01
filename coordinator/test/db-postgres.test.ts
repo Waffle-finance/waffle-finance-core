@@ -127,7 +127,7 @@ describe("PostgreSQL Database Compatibility", () => {
     const migrations = await queryMigrations(db);
     expect(migrations.length).toBeGreaterThan(0);
     const version = await getCurrentSchemaVersion(db);
-    const expected = dbType === "postgres" ? "006_stale_cleanup_postgres.sql" : "006_stale_cleanup.sql";
+    const expected = dbType === "postgres" ? "007_richer_history_metadata_postgres.sql" : "007_richer_history_metadata.sql";
     expect(version).toBe(expected);
   });
 
@@ -606,7 +606,7 @@ describe("PostgreSQL Migration Edge Cases", () => {
     if (!fresh) return;
 
     const version = await getCurrentSchemaVersion(fresh);
-    expect(version).toBe("006_stale_cleanup_postgres.sql");
+    expect(version).toBe("007_richer_history_metadata_postgres.sql");
 
     await fresh.getPool().end();
   });
