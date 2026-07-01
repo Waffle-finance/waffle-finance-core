@@ -3,7 +3,12 @@
  *
  * These helpers surface edge cases — unsupported routes, malformed addresses,
  * amount constraints — before a request hits the relayer.
+ *
+ * All user-facing messages are sourced from the i18n catalog so they can be
+ * translated without touching this file.
  */
+
+import { t } from '../i18n';
 
 export type ValidationResult =
   | { isValid: true }
@@ -11,30 +16,30 @@ export type ValidationResult =
 
 /** Ethereum address: 0x-prefixed, 42 chars, hex. */
 export function validateEthereumAddress(value: string): ValidationResult {
-  if (!value) return { isValid: false, message: "Ethereum address is required." };
+  if (!value) return { isValid: false, message: t('validation.ethereum.required') };
   if (!/^0x[0-9a-fA-F]{40}$/.test(value)) {
-    return { isValid: false, message: "Enter a valid 0x Ethereum address." };
+    return { isValid: false, message: t('validation.ethereum.invalid') };
   }
   return { isValid: true };
 }
 
 /** Stellar address: starts with G, max 56 chars, base32. */
 export function validateStellarAddress(value: string): ValidationResult {
-  if (!value) return { isValid: false, message: "Stellar address is required." };
+  if (!value) return { isValid: false, message: t('validation.stellar.required') };
   if (value.startsWith("$") || value.startsWith("M")) {
-    return { isValid: false, message: "Stellar memo IDs are not accepted here. Paste the account address starting with G." };
+    return { isValid: false, message: t('validation.stellar.memoNotAccepted') };
   }
   if (!/^G[A-Z2-7]{55}$/.test(value)) {
-    return { isValid: false, message: "Enter a valid Stellar public address (starts with G, 56 chars)." };
+    return { isValid: false, message: t('validation.stellar.invalid') };
   }
   return { isValid: true };
 }
 
 /** Solana address: base58, 32-44 chars. */
 export function validateSolanaAddress(value: string): ValidationResult {
-  if (!value) return { isValid: false, message: "Solana address is required." };
+  if (!value) return { isValid: false, message: t('validation.solana.required') };
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) {
-    return { isValid: false, message: "Enter a valid Solana wallet address." };
+    return { isValid: false, message: t('validation.solana.invalid') };
   }
   return { isValid: true };
 }
@@ -45,14 +50,14 @@ export function validateAmount(
   maxDecimals: number,
   min = "0"
 ): ValidationResult {
-  if (!value) return { isValid: false, message: "Enter an amount." };
-  if (Number(value) <= 0) return { isValid: false, message: "Amount must be greater than zero." };
+  if (!value) return { isValid: false, message: t('validation.amount.required') };
+  if (Number(value) <= 0) return { isValid: false, message: t('validation.amount.tooLow') };
   const decimalPart = value.split(".")[1];
   if (decimalPart && decimalPart.length > maxDecimals) {
-    return { isValid: false, message: `Amount may have at most ${maxDecimals} decimals for this token.` };
+    return { isValid: false, message: t('validation.amount.tooManyDecimals', { maxDecimals }) };
   }
   if (Number(value) < Number(min)) {
-    return { isValid: false, message: `Amount is below the minimum (${min}).` };
+    return { isValid: false, message: t('validation.amount.belowMinimum', { min }) };
   }
   return { isValid: true };
 }
@@ -67,7 +72,7 @@ export function validateBalance(
   const a = parseFloat(amount);
   const b = parseFloat(balance);
   if (a > b) {
-    return { isValid: false, message: `Insufficient ${symbol} balance. You have ${b} ${symbol}.` };
+    return { isValid: false, message: t('validation.balance.insufficient', { symbol, balance: String(b) }) };
   }
   return { isValid: true };
 }
@@ -96,7 +101,7 @@ export function validateRouteWallets(
   if (needsSolana && !solana) missing.push("Solana wallet");
 
   if (missing.length > 0) {
-    return { isValid: false, message: `Connect ${missing.join(" and ")} to use this route.` };
+    return { isValid: false, message: t('validation.route.missingWallets', { wallets: missing.join(" and ") }) };
   }
   return { isValid: true };
 }
@@ -108,13 +113,13 @@ export function validateDestinationChain(
 ): ValidationResult {
   if (!destinationAddress) return { isValid: true };
   if (direction.endsWith("_eth") && !/^0x[0-9a-fA-F]{40}$/.test(destinationAddress)) {
-    return { isValid: false, message: "Destination must be an Ethereum address for this route." };
+    return { isValid: false, message: t('validation.destination.mustBeEthereum') };
   }
   if (direction.endsWith("_xlm") && !/^G[A-Z2-7]{55}$/.test(destinationAddress)) {
-    return { isValid: false, message: "Destination must be a Stellar address for this route." };
+    return { isValid: false, message: t('validation.destination.mustBeStellar') };
   }
   if (direction.endsWith("_sol") && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(destinationAddress)) {
-    return { isValid: false, message: "Destination must be a Solana address for this route." };
+    return { isValid: false, message: t('validation.destination.mustBeSolana') };
   }
   return { isValid: true };
 }
@@ -134,10 +139,10 @@ export function validateAssetPair(
   ] as const;
   const key = `${fromToken}->${toToken}`;
   const supportedKey = supported.find(
-    ([f, t]) => `${f}->${t}` === key
+    ([f, to]) => `${f}->${to}` === key
   );
   if (!supportedKey) {
-    return { isValid: false, message: `Unsupported asset pair: ${fromToken} → ${toToken}.` };
+    return { isValid: false, message: t('validation.assetPair.unsupported', { from: fromToken, to: toToken }) };
   }
   return { isValid: true };
 }

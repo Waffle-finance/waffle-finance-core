@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { NetworkModeState } from '../lib/useNetworkMode';
 import { isMainnetEnabled } from '../config/networks';
+import { t } from '../i18n';
 
 interface Props {
   networkState: NetworkModeState;
@@ -105,27 +106,29 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
         <span className="mt-0.5">⚠</span>
         <div>
           <div className="font-semibold">
-            Your wallet network does not match the app network.
+            {t('network.mismatch.title')}
           </div>
           <div className="text-amber-200/90">
-            App is set to <b>{expectedLabel}</b>.{' '}
+            {t('network.mismatch.body', { expected: expectedLabel })}{' '}
             {metamaskConnected && !metamaskMatches && (
               <span>
-                Ethereum wallet is on <b>{metamaskActual}</b>
-                {metamaskChainId ? ` (${metamaskChainId})` : ''}.{' '}
+                {t('network.mismatch.ethMismatch', {
+                  actual: metamaskActual,
+                  chainId: metamaskChainId ? ` (${metamaskChainId})` : '',
+                })}{' '}
               </span>
             )}
             {freighterConnected && !freighterMatches && (
               <span>
-                Freighter is on <b>{freighterActual}</b>.{' '}
+                {t('network.mismatch.freighterMismatch', { actual: freighterActual })}{' '}
               </span>
             )}
             {freighterConnected && !freighterMatches && (
               <span className="block mt-1 text-amber-200/75">
-                Switch Freighter to <b>Stellar Testnet</b> in the extension if needed.
+                {t('network.mismatch.freighterHint')}
               </span>
             )}
-            Balances and signing will fail until they match.
+            {t('network.mismatch.signingWillFail')}
           </div>
         </div>
       </div>
@@ -135,7 +138,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
           disabled={busy}
           className="px-3 py-1.5 rounded-md bg-amber-400/20 hover:bg-amber-400/30 text-amber-50 text-xs font-semibold border border-amber-300/30 transition-colors disabled:opacity-50"
         >
-          Switch wallet to {expectedLabel}
+          {t('network.mismatch.switchWallet', { network: expectedLabel })}
         </button>
         {showSwitchAppToWallet && (
           <button
@@ -143,7 +146,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
             disabled={busy}
             className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-amber-50 text-xs font-medium border border-white/10 transition-colors disabled:opacity-50"
           >
-            Switch app to wallet
+            {t('network.mismatch.switchApp')}
           </button>
         )}
       </div>

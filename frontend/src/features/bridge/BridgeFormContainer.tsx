@@ -17,6 +17,7 @@ import {
   validateDestinationChain,
   validateRouteWallets,
 } from '../../utils/validation';
+import { t } from '../../i18n';
 
 export interface BridgeFormProps {
   ethAddress: string;
@@ -486,7 +487,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     });
     
     setIsSubmitting(true);
-    setStatusMessage('Hazırlanıyor...');
+    setStatusMessage(t('bridge.status.preparing'));
     
     let result: any;
     
@@ -583,7 +584,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       if (networkInfo.isTestnet) {
         // TESTNET: Use existing relayer system
         console.log('🔄 Creating bridge order via Relayer API (Testnet)...');
-        setStatusMessage('Creating order...');
+        setStatusMessage(t('bridge.status.creatingOrder'));
       
       console.log('📋 Order request:', orderRequest);
       
@@ -610,7 +611,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             } else {
         // MAINNET: Relayer handles 1inch integration
         console.log('🔄 Creating bridge order via Relayer API (Mainnet)...');
-        setStatusMessage('Creating mainnet order...');
+        setStatusMessage(t('bridge.status.creatingMainnetOrder'));
         
         // Send request to relayer (same as testnet)
         const response = await fetch(`${API_BASE_URL}/api/orders/create`, {

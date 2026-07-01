@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { t } from '../i18n';
 
 export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
 
@@ -60,8 +61,8 @@ export function useEthereumWallet() {
     if (!provider) {
       setError(
         'metamask_unavailable',
-        'MetaMask not found.',
-        'Install MetaMask from metamask.io and reload the page.'
+        t('wallet.errors.metamaskUnavailable'),
+        t('wallet.metamask.hint')
       );
       return;
     }
@@ -88,8 +89,8 @@ export function useEthereumWallet() {
       } catch (err) {
         setError(
           'ethereum_check_failed',
-          err instanceof Error ? err.message : 'Failed to check MetaMask state',
-          'Refresh the page. If accounts are locked, unlock MetaMask and try again.'
+          err instanceof Error ? err.message : t('wallet.errors.metamaskCheckFailed'),
+          t('wallet.errors.metamaskReloadHint')
         );
       }
     };
@@ -142,7 +143,7 @@ export function useEthereumWallet() {
   const connect = useCallback(async () => {
     const provider = typeof window !== 'undefined' ? window.ethereum : undefined;
     if (!provider) {
-      setError('metamask_unavailable', 'MetaMask not found.', 'Install MetaMask and reload.');
+      setError('metamask_unavailable', t('wallet.errors.metamaskUnavailable'), t('wallet.metamask.hint'));
       return;
     }
 
@@ -167,10 +168,10 @@ export function useEthereumWallet() {
     } catch (err: any) {
       setError(
         'metamask_connect_failed',
-        err?.message ?? 'MetaMask connection failed',
+        err?.message ?? t('wallet.errors.metamaskConnectFailed'),
         err?.code === 4001
-          ? 'You rejected the connection request in MetaMask.'
-          : 'Check the MetaMask popup and try again.'
+          ? t('wallet.errors.metamaskConnectHintRejected')
+          : t('wallet.errors.metamaskConnectHintGeneral')
       );
     }
   }, [setError]);
