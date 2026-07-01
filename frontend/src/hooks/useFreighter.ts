@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
+import { logger } from '../utils/logger';
 
 export type ConnectionPhase = 'idle' | 'checking' | 'requesting_permission' | 'connected' | 'error';
 
@@ -208,9 +209,7 @@ export function useFreighter() {
 
       if (!isAvailable) {
         throw new Error('Freighter wallet is not available. Please install Freighter extension.');
-      }
-
-      setState((prev) => transition(prev, { phase: 'requesting_permission' }));
+      }      setState((prev) => transition(prev, { phase: 'requesting_permission' }));
 
       console.log('🔌 [freighter] requesting permission');
       await freighterApi.setAllowed();
@@ -297,6 +296,7 @@ export function useFreighter() {
     }
 
     try {
+      logger.transactionSign('unknown', 'Freighter', { signerAddress: signerAddress.substring(0, 6) });
       const result = await freighterApi.signTransaction(xdr, {
         networkPassphrase,
         address: signerAddress,
