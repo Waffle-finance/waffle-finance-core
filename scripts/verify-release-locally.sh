@@ -96,6 +96,11 @@ for contract in "${REQUIRED_CONTRACTS[@]}"; do
 done
 echo ""
 
+info "Validating contract artifacts and SDK ABI drift..."
+node scripts/validate-artifacts.mjs
+success "Contract artifacts and SDK ABI drift check complete"
+echo ""
+
 info "Compiling contracts with Foundry..."
 cd contracts
 forge build

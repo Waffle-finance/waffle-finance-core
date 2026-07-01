@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Ethereum smart contracts for WaffleFinance cross-chain token swaps",
   "scripts": {
-    "compile": "hardhat compile",
+    "compile": "hardhat compile && node ../scripts/update-sdk-abi.mjs",
     "test": "hardhat test",
     "test:validate": "hardhat test test/validateEnv.test.ts",
     "deploy": "hardhat run scripts/deploy.ts",

@@ -54,7 +54,15 @@ coverage/
 .nyc_output
 
 # Solidity
-artifacts/
+contracts/artifacts/*
+!contracts/artifacts/contracts/
+contracts/artifacts/contracts/*
+!contracts/artifacts/contracts/HTLCEscrow.sol/
+contracts/artifacts/contracts/HTLCEscrow.sol/*
+!contracts/artifacts/contracts/HTLCEscrow.sol/HTLCEscrow.json
+!contracts/artifacts/contracts/ResolverRegistry.sol/
+contracts/artifacts/contracts/ResolverRegistry.sol/*
+!contracts/artifacts/contracts/ResolverRegistry.sol/ResolverRegistry.json
 cache/
 forge-cache/
 typechain-types/

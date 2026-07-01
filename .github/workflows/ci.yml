@@ -71,6 +71,9 @@ jobs:
       - name: Compile contracts
         run: pnpm --filter @wafflefinance/contracts compile
 
+      - name: Validate contract artifacts
+        run: node scripts/validate-artifacts.mjs
+
       - name: Test — contracts (Hardhat)
         run: pnpm --filter @wafflefinance/contracts exec hardhat test test/HTLCEscrow.test.ts test/ResolverRegistry.test.ts
 
