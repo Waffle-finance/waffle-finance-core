@@ -5,7 +5,7 @@ import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import { observeListenerEventProcessing, recordListenerProgress, listenerLastBlock } from "../metrics.js";
 import { validatePreimage } from "../reconciliation/secret-reconciler.js";
-
+import { KeyedMutex } from "../utils/concurrency.js";
 const ORDER_CREATED = parseAbiItem(
   "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
 );
