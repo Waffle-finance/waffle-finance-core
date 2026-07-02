@@ -169,7 +169,6 @@ pnpm run format
 
 # Check formatting without modifying
 pnpm run format:check
-```
 
 # Compile + test Solidity contracts
 pnpm --filter @wafflefinance/contracts exec hardhat test
