@@ -3,6 +3,11 @@
 Reference coordinator (for the WaffleFinance cross-chain
 bridge.
 
+## Public API
+
+The supported endpoints, schemas, errors, rate limits, examples, and consumed
+chain events are defined in the [coordinator and relayer public API contract](../docs/API_CONTRACT.md#coordinator-api).
+
 ## What this service does
 
 - Hosts the public order book — anyone can POST `/api/orders/announce`
@@ -32,13 +37,13 @@ bridge.
 to retry or abandon an attempt. Each failure returns a stable `error` code, an
 appropriate HTTP status, and a `retryable` flag:
 
-| `error` code       | HTTP | `retryable` | Meaning / client action |
-| ------------------ | ---- | ----------- | ----------------------- |
-| `validation_error` | 400  | n/a         | Malformed request body (missing/invalid fields). Fix the request. |
+| `error` code       | HTTP | `retryable` | Meaning / client action                                                                                |
+| ------------------ | ---- | ----------- | ------------------------------------------------------------------------------------------------------ |
+| `validation_error` | 400  | n/a         | Malformed request body (missing/invalid fields). Fix the request.                                      |
 | `invalid_preimage` | 400  | `false`     | The preimage does not hash (sha256 or keccak256) to the order hashlock. Abandon — the secret is wrong. |
-| `unknown_order`    | 404  | `false`     | No order exists for the supplied `publicId`. Abandon or check the id. |
-| `reveal_conflict`  | 409  | `false`     | The order has moved past the point where a reveal is accepted (stale/replayed reveal). Abandon. |
-| `storage_failure`  | 500  | `true`      | The preimage was valid but could not be persisted (transient DB error). Retry. |
+| `unknown_order`    | 404  | `false`     | No order exists for the supplied `publicId`. Abandon or check the id.                                  |
+| `reveal_conflict`  | 409  | `false`     | The order has moved past the point where a reveal is accepted (stale/replayed reveal). Abandon.        |
+| `storage_failure`  | 500  | `true`      | The preimage was valid but could not be persisted (transient DB error). Retry.                         |
 
 Error responses never include the submitted preimage, the on-chain secret, or
 the storage encryption key — only the `publicId` and a category description.
@@ -147,9 +152,10 @@ and the schema bootstrapping on SQLite.
 ### PostgreSQL Compatibility Tests
 
 The test suite includes comprehensive PostgreSQL compatibility tests that verify:
+
 - SQLite-to-PostgreSQL SQL translation correctness
 - Named parameter handling (`:name` syntax)
-- Positional parameter handling (`?` placeholders) 
+- Positional parameter handling (`?` placeholders)
 - `strftime` to `EXTRACT(EPOCH FROM NOW())` conversion
 - All `OrdersRepository` operations work identically on both databases
 - Database schema migrations

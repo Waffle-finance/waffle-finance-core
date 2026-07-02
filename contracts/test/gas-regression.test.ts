@@ -5,6 +5,7 @@ import type { HTLCEscrow, ResolverRegistry, TestERC20 } from '../typechain-types
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
 const TIMELOCK = 600; // 10 minutes
+const SHORT_TIMELOCK = 300; // 5 minutes (MIN_TIMELOCK in contract)
 const SAFETY_DEPOSIT = ethers.parseEther('0.001');
 const AMOUNT = ethers.parseEther('0.5');
 const MIN_STAKE = ethers.parseEther('10');
@@ -246,14 +247,14 @@ describe('Gas Regression Suite', () => {
             AMOUNT,
             SAFETY_DEPOSIT,
             hashlock,
-            shortTimelock,
+            SHORT_TIMELOCK,
             { value: AMOUNT + SAFETY_DEPOSIT }
           );
 
         const orderId = 1n;
 
         // Move time forward to expire the order
-        await time.increase(shortTimelock + 1);
+        await time.increase(SHORT_TIMELOCK + 1);
 
         // Refund the order
         const tx = await escrow.connect(refunder).refundOrder(orderId);
@@ -283,14 +284,14 @@ describe('Gas Regression Suite', () => {
             AMOUNT,
             SAFETY_DEPOSIT,
             hashlock,
-            shortTimelock,
+            SHORT_TIMELOCK,
             { value: SAFETY_DEPOSIT }
           );
 
         const orderId = 1n;
 
         // Move time forward to expire
-        await time.increase(shortTimelock + 1);
+        await time.increase(SHORT_TIMELOCK + 1);
 
         // Refund the order
         const tx = await escrow.connect(refunder).refundOrder(orderId);
@@ -494,7 +495,7 @@ describe('Gas Regression Suite', () => {
           AMOUNT,
           SAFETY_DEPOSIT,
           hashlock,
-          shortTimelock,
+          SHORT_TIMELOCK,
           { value: AMOUNT + SAFETY_DEPOSIT }
         );
       const createGas = await measureGas(createTx);
