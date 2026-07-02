@@ -2,6 +2,16 @@ import { rpc, Address } from "@stellar/stellar-sdk";
 import type { Logger } from "pino";
 import type { ResolverConfig } from "../config.js";
 import { retryRpcCall } from "../retry.js";
+import {
+  eventsTotal,
+  listenerErrorsTotal,
+  listenerPollDurationSeconds,
+  listenerPollRunsTotal,
+  listenerLastEventTimestampSeconds,
+  activeListeners,
+} from "../metrics.js";
+
+const CHAIN = "soroban";
 
 export class SorobanListener {
   private readonly server: rpc.Server;
@@ -29,12 +39,19 @@ export class SorobanListener {
 
     const contractId = this.cfg.soroban.htlc;
     this.log.info({ contract: contractId, rpc: this.cfg.soroban.rpcUrl }, "starting Soroban listener");
+    activeListeners.set({ chain: CHAIN }, 1);
 
     const tick = async () => {
       if (this.stopped) return;
+      const endTimer = listenerPollDurationSeconds.startTimer({ chain: CHAIN });
       try {
         await this.fetchAndProcess(contractId, handlers);
+        endTimer();
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: "success" });
       } catch (err) {
+        endTimer();
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: "failure" });
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "poll_error" });
         this.log.warn({ err }, "Soroban poll failed");
       } finally {
         if (!this.stopped) {
@@ -74,13 +91,20 @@ export class SorobanListener {
     );
 
     for (const ev of events.events) {
-      handlers.onContractEvent({
-        ledger: Number(ev.ledger),
-        txHash: ev.txHash,
-        contractId: ev.contractId?.toString() ?? contractId,
-        topics: ev.topic.map((t: any) => t.toXDR ? t.toXDR("base64") : String(t)),
-        value: (ev.value as any)?.toXDR ? (ev.value as any).toXDR("base64") : String(ev.value),
-      });
+      eventsTotal.inc({ chain: CHAIN, event_type: "contract_event" });
+      listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+      try {
+        handlers.onContractEvent({
+          ledger: Number(ev.ledger),
+          txHash: ev.txHash,
+          contractId: ev.contractId?.toString() ?? contractId,
+          topics: ev.topic.map((t: any) => t.toXDR ? t.toXDR("base64") : String(t)),
+          value: (ev.value as any)?.toXDR ? (ev.value as any).toXDR("base64") : String(ev.value),
+        });
+      } catch (err) {
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "handler_error" });
+        this.log.warn({ err }, "onContractEvent handler failed");
+      }
     }
     if (events.cursor) {
       this.cursor = events.cursor;
@@ -93,6 +117,7 @@ export class SorobanListener {
       clearTimeout(this.timeoutId);
       this.timeoutId = undefined;
     }
+    activeListeners.set({ chain: CHAIN }, 0);
   }
 }
 

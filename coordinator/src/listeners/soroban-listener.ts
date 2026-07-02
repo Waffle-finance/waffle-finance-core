@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
+import { KeyedMutex } from "../utils/concurrency.js";
 
 /**
  * Polls the Soroban RPC for HTLC contract events and feeds them into
@@ -13,6 +14,7 @@ export class SorobanListener {
   private readonly log: Logger;
   private cursor: string | undefined;
   private stopped = false;
+  private orderMutex = new KeyedMutex();
 
   constructor(
     private readonly cfg: CoordinatorConfig,
@@ -80,14 +82,16 @@ export class SorobanListener {
       const timelock = Number(ev.value?.map?.timelock ?? ev.value?.timelock ?? 0);
       if (!hashlock || !orderId) return;
       try {
-        const order = await this.orders.findByHashlock(hashlock);
-        if (!order) return;
-        await this.orders.recordSrcLock({
-          publicId: order.publicId,
-          orderId: String(orderId),
-          txHash: ev.txHash,
-          blockNumber: ev.ledger,
-          timelock
+        await this.orderMutex.runExclusive(hashlock, async () => {
+          const order = await this.orders.findByHashlock(hashlock);
+          if (!order) return;
+          await this.orders.recordSrcLock({
+            publicId: order.publicId,
+            orderId: String(orderId),
+            txHash: ev.txHash,
+            blockNumber: ev.ledger,
+            timelock
+          });
         });
       } catch (err: any) {
         if (!err?.message?.includes("cannot record")) {

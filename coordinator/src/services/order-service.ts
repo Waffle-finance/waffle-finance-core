@@ -7,7 +7,7 @@ import {
   type Chain
 } from "../persistence/orders-repo.js";
 import { canTransition } from "../state-machine/order-machine.js";
-import { ordersTotal } from "../metrics.js";
+import { ordersTotal, resolverLockActionsTotal } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
 
@@ -114,6 +114,13 @@ export class OrderService {
   }): Promise<void> {
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
+
+    // Idempotency check
+    if (order.srcOrderId === input.orderId && order.srcLockTx === input.txHash) {
+      this.log.info({ publicId: input.publicId, srcOrderId: input.orderId }, "duplicate src lock ignored");
+      return;
+    }
+
     if (!canTransition(order.status, "src_locked") && order.status !== "src_locked") {
       throw new OrderValidationError(`cannot record src lock from status ${order.status}`);
     }
@@ -136,21 +143,39 @@ export class OrderService {
   }): Promise<void> {
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
+
+    // Idempotency check
+    if (order.dstOrderId === input.orderId && order.dstLockTx === input.txHash) {
+      this.log.info({ publicId: input.publicId, dstOrderId: input.orderId }, "duplicate dst lock ignored");
+      return;
+    }
+
     if (!canTransition(order.status, "dst_locked") && order.status !== "dst_locked") {
       throw new OrderValidationError(`cannot record dst lock from status ${order.status}`);
     }
     await this.repo.recordDstLock(input);
-    this.log.info({ publicId: input.publicId, dstOrderId: input.orderId }, "dst lock recorded");
+    this.log.info({ publicId: input.publicId, dstOrderId: input.orderId, resolver: input.resolver }, "dst lock recorded");
     ordersTotal.inc({ status: "dst_locked" });
     
     // Invalidate cache for both addresses since order status changed
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
+
+    if (input.resolver) {
+      resolverLockActionsTotal.inc({ resolver_address: input.resolver, action: "dst_lock" });
+    }
   }
 
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
+
+    // Idempotency check
+    if (order.preimage === preimage && order.secretRevealedTx === txHash) {
+      this.log.info({ publicId }, "duplicate secret ignored");
+      return;
+    }
+
     if (!canTransition(order.status, "secret_revealed") && order.status !== "secret_revealed") {
       throw new OrderValidationError(`cannot record secret from status ${order.status}`);
     }
@@ -166,6 +191,13 @@ export class OrderService {
   async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
+
+    // Idempotency check
+    if (order.status === status) {
+      this.log.info({ publicId, status }, "duplicate status update ignored");
+      return;
+    }
+
     if (!canTransition(order.status, status)) {
       throw new OrderValidationError(`cannot transition from ${order.status} to ${status}`);
     }
