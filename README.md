@@ -147,6 +147,28 @@ cp env.example .env          # fill in RPC URLs and private keys
 ```bash
 # Build shared SDK (required before anything else)
 pnpm --filter @wafflefinance/sdk build
+```
+
+### Linting and Formatting
+
+The repository enforces consistent code style across all packages. See [LINTING.md](LINTING.md) for detailed documentation on:
+
+- Running linters locally
+- Pre-commit hooks
+- CI enforcement
+- Configuration details
+
+Quick commands:
+
+```bash
+# Lint all packages
+pnpm run lint
+
+# Format all files
+pnpm run format
+
+# Check formatting without modifying
+pnpm run format:check
 
 # Compile + test Solidity contracts
 pnpm --filter @wafflefinance/contracts exec hardhat test

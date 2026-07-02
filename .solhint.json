@@ -1,0 +1,27 @@
+{
+  "extends": "solhint:recommended",
+  "plugins": [],
+  "rules": {
+    "compiler-version": ["error", "^0.8.0"],
+    "func-visibility": ["warn", { "ignoreConstructors": true }],
+    "max-line-length": ["warn", 120],
+    "not-rely-on-time": "off",
+    "no-empty-blocks": "warn",
+    "reason-string": ["warn", { "maxLength": 64 }],
+    "constructor-syntax": "error",
+    "quotes": ["error", "double"],
+    "indent": ["error", 4],
+    "no-unused-vars": "warn",
+    "private-vars-leading-underscore": "error",
+    "state-visibility": "error",
+    "func-name-mixedcase": "error",
+    "var-name-mixedcase": "error"
+  },
+  "ignoreFiles": [
+    "node_modules/**",
+    "dist/**",
+    "build/**",
+    "cache/**",
+    "artifacts/**"
+  ]
+}
