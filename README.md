@@ -168,6 +168,8 @@ See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for per-package commands, Postg
 
 See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for deployment checklists, incident response runbooks, and monitoring guidance.
 
+See [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md) for the service-level technical debt register and roadmap — architectural gaps, known limitations, and planned improvements across all services.
+
 ---
 
 ## Wallet support

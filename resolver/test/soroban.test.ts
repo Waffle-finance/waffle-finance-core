@@ -24,6 +24,14 @@ describe('SorobanListener lifecycle', () => {
     soroban: { htlc: 'CABC', rpcUrl: 'http://localhost:8000' },
     rpc: { maxRetries: 1, baseDelayMs: 0, maxDelayMs: 1 },
   } as ResolverConfig;
+    network: 'testnet' as const,
+    pollIntervalMs: 1000,
+    coordinatorUrl: '',
+    logLevel: 'silent' as const,
+    ethereum: { chainId: 11155111, rpcUrl: '', htlcEscrow: null, resolverRegistry: null, resolverPrivateKey: null },
+    soroban: { rpcUrl: 'http://localhost:8000', networkPassphrase: 'Test SDF Network ; September 2015', horizonUrl: '', htlc: 'CABC', resolverRegistry: null, resolverSecret: null },
+    rpc: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 2000 },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();

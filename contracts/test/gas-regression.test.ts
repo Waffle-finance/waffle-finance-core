@@ -24,6 +24,16 @@ const GAS_THRESHOLDS = {
   increaseStake: 75_000n, // Increase existing stake
   unregister: 110_000n, // Unregister and withdraw stake
   slash: 85_000n, // Slash a resolver
+  createOrderERC20: 300_000n, // ERC20 order creation
+  claimOrder: 200_000n, // Claim with preimage reveal
+  refundOrder: 150_000n, // Refund after timelock expiry
+  withdraw: 100_000n, // Withdraw credited balance
+
+  // ResolverRegistry operations
+  register: 200_000n, // Register as resolver with stake
+  increaseStake: 150_000n, // Increase existing stake
+  unregister: 150_000n, // Unregister and withdraw stake
+  slash: 150_000n, // Slash a resolver
 };
 
 async function deployEscrow(
@@ -52,6 +62,10 @@ async function deployResolverRegistry() {
   )) as unknown as TestERC20;
 
   const [owner, resolver] = await ethers.getSigners();
+  
+  // Transfer some tokens to the resolver so they can test staking
+  await stakeToken.connect(owner).transfer(resolver.address, ethers.parseEther('10000'));
+
   const ResolverRegistry = await ethers.getContractFactory('ResolverRegistry');
   const registry = (await ResolverRegistry.deploy(
     await stakeToken.getAddress(),
@@ -237,6 +251,7 @@ describe('Gas Regression Suite', () => {
 
         // Create an order with short timelock for testing
         const shortTimelock = 300; // contract minimum: 5 minutes
+        const shortTimelock = 300; // 5 minutes
         await escrow
           .connect(sender)
           .createOrder(
@@ -479,6 +494,7 @@ describe('Gas Regression Suite', () => {
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
       const shortTimelock = TIMELOCK;
+      const shortTimelock = 300;
 
       console.log('\n  ╔═══════════════════════════════════════════════════════╗');
       console.log('  ║         Full Swap Sequence Gas Analysis              ║');

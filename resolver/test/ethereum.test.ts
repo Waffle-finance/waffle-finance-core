@@ -19,6 +19,13 @@ describe('EthereumListener lifecycle', () => {
   const cfg = {
     ethereum: { chainId: 1, rpcUrl: 'http://localhost:8545', htlcEscrow: '0x123' },
   } as ResolverConfig;
+    network: 'testnet' as const,
+    pollIntervalMs: 15000,
+    coordinatorUrl: '',
+    logLevel: 'silent' as const,
+    ethereum: { chainId: 1, rpcUrl: 'http://localhost:8545', htlcEscrow: '0x123' as const, resolverRegistry: null, resolverPrivateKey: null },
+    soroban: { rpcUrl: '', networkPassphrase: '', horizonUrl: '', htlc: null, resolverRegistry: null, resolverSecret: null },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
+import { KeyedMutex } from "../utils/concurrency.js";
 
 /**
  * Polls the Solana RPC for HTLC program logs and feeds order events into
@@ -16,6 +17,7 @@ export class SolanaListener {
   private readonly log: Logger;
   private stopped = false;
   private lastSlot = 0;
+  private orderMutex = new KeyedMutex();
 
   constructor(
     private readonly cfg: CoordinatorConfig,
@@ -135,17 +137,19 @@ export class SolanaListener {
 
       void (async () => {
         try {
-          const order = await this.orders.findByHashlock(hashlock);
-          if (!order) {
-            this.log.info({ hashlock, orderId }, "Solana order observed without local announce");
-            return;
-          }
-          await this.orders.recordSrcLock({
-            publicId: order.publicId,
-            orderId,
-            txHash: sig,
-            blockNumber: this.lastSlot,
-            timelock,
+          await this.orderMutex.runExclusive(hashlock, async () => {
+            const order = await this.orders.findByHashlock(hashlock);
+            if (!order) {
+              this.log.info({ hashlock, orderId }, "Solana order observed without local announce");
+              return;
+            }
+            await this.orders.recordSrcLock({
+              publicId: order.publicId,
+              orderId,
+              txHash: sig,
+              blockNumber: this.lastSlot,
+              timelock,
+            });
           });
         } catch (err) {
           this.log.warn({ err, hashlock }, "could not record Solana src lock");
