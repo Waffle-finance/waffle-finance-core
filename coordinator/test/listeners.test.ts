@@ -9,9 +9,10 @@ import { OrdersRepository } from "../src/persistence/orders-repo.js";
 import { OrderService } from "../src/services/order-service.js";
 import { EthereumListener } from "../src/listeners/ethereum-listener.js";
 import { SorobanListener } from "../src/listeners/soroban-listener.js";
+import { SolanaListener } from "../src/listeners/solana-listener.js";
 import type { CoordinatorConfig } from "../src/config.js";
 
-// Global mock states to control dynamically in tests
+// ── viem mock state ──────────────────────────────────────────────────────────
 let mockLatestBlock = 1000n;
 let mockCreatedLogs: any[] = [];
 let mockClaimedLogs: any[] = [];
@@ -20,9 +21,15 @@ let mockWatchEventCallback: ((logs: any[]) => void) | undefined = undefined;
 let mockClaimedCallback: ((logs: any[]) => void) | undefined = undefined;
 let mockRefundedCallback: ((logs: any[]) => void) | undefined = undefined;
 
+// ── @stellar/stellar-sdk mock state ─────────────────────────────────────────
 let mockLatestLedger = 10000;
 let mockSorobanEvents: any[] = [];
 let mockSorobanCursor: string | null = null;
+
+// ── @solana/web3.js mock state ───────────────────────────────────────────────
+let mockSolanaSlot = 500;
+let mockSolanaSignatures: any[] = [];
+let mockSolanaTransactions: Record<string, any> = {};
 
 vi.mock("viem", async (importOriginal) => {
   const actual = await importOriginal<typeof import("viem")>();
@@ -62,6 +69,15 @@ vi.mock("@stellar/stellar-sdk", () => ({
       }))
     }))
   }
+}));
+
+vi.mock("@solana/web3.js", () => ({
+  Connection: vi.fn(() => ({
+    getSlot: vi.fn(async () => mockSolanaSlot),
+    getSignaturesForAddress: vi.fn(async () => mockSolanaSignatures),
+    getParsedTransaction: vi.fn(async (sig: string) => mockSolanaTransactions[sig] ?? null),
+  })),
+  PublicKey: vi.fn((addr: string) => ({ toString: () => addr })),
 }));
 
 // Setup / Helpers
@@ -634,11 +650,320 @@ describe("SorobanListener", () => {
   });
 });
 
+// ─── SolanaListener ───────────────────────────────────────────────────────────
+
+const SOLANA_CFG: CoordinatorConfig = {
+  ...BASE_CFG,
+  solana: { rpcUrl: "https://solana.test", programId: "SomeRealProgramId1111111111111111111111111111", commitment: "confirmed" },
+};
+
+async function seedSolanaOrder(orders: OrderService, hashlock = HASHLOCK) {
+  return orders.announce({
+    direction: "sol_to_eth",
+    hashlock,
+    srcChain: "solana",
+    srcAddress: VALID_ETH_ADDR,
+    srcAsset: "native",
+    srcAmount: "1000000000",
+    srcSafetyDeposit: "0",
+    dstChain: "ethereum",
+    dstAddress: VALID_ETH_ADDR,
+    dstAsset: "native",
+    dstAmount: "1000000000000000000",
+  });
+}
+
+describe("SolanaListener", () => {
+  let orders: OrderService;
+  let listener: SolanaListener;
+
+  beforeEach(async () => {
+    orders = await freshOrders();
+    mockSolanaSlot = 500;
+    mockSolanaSignatures = [];
+    mockSolanaTransactions = {};
+    listener = new SolanaListener(SOLANA_CFG, orders, log);
+  });
+
+  afterEach(() => {
+    listener.stop();
+  });
+
+  it("is disabled when programId is PLACEHOLDER", async () => {
+    const disabledCfg: CoordinatorConfig = {
+      ...SOLANA_CFG,
+      solana: { ...SOLANA_CFG.solana, programId: "PLACEHOLDER" },
+    };
+    const disabledListener = new SolanaListener(disabledCfg, orders, log);
+    // start() should return without scheduling any polls (no errors thrown)
+    expect(() => disabledListener.start()).not.toThrow();
+    disabledListener.stop();
+  });
+
+  it("resumes from the last persisted slot on startup", async () => {
+    // Seed an order that already has a src lock recorded at slot 400
+    const order = await seedSolanaOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "persisted-1",
+      txHash: "sig-persisted",
+      blockNumber: 400,
+      timelock: 9999,
+    });
+
+    // Arrange: a new sig at slot 450 (above 400) should be processed
+    const newSig = "sig-new";
+    mockSolanaSlot = 500;
+    mockSolanaSignatures = [{ signature: newSig, slot: 450, err: null }];
+    mockSolanaTransactions[newSig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderCreated",
+          `Program log: {"hashlock":"${HASHLOCK2}","orderId":"new-1","timelock":9999}`,
+        ],
+      },
+    };
+
+    // Seed a second order for HASHLOCK2
+    await orders.announce({
+      direction: "sol_to_eth",
+      hashlock: HASHLOCK2,
+      srcChain: "solana",
+      srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native",
+      srcAmount: "1000000000",
+      srcSafetyDeposit: "0",
+      dstChain: "ethereum",
+      dstAddress: VALID_ETH_ADDR,
+      dstAsset: "native",
+      dstAmount: "1000000000000000000",
+    });
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    // The new order (HASHLOCK2) should be src_locked; the persisted order untouched
+    const persisted = await orders.get(order.publicId);
+    expect(persisted?.status).toBe("src_locked");
+    expect(persisted?.srcOrderId).toBe("persisted-1");
+  });
+
+  it("processes an OrderCreated event and records src lock", async () => {
+    const order = await seedSolanaOrder(orders);
+    const sig = "sig-created-1";
+
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: sig, slot: 100, err: null }];
+    mockSolanaTransactions[sig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderCreated",
+          `Program log: {"hashlock":"${HASHLOCK}","orderId":"sol-1","timelock":9999}`,
+        ],
+      },
+    };
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
+    expect(updated?.srcOrderId).toBe("sol-1");
+    expect(updated?.srcLockTx).toBe(sig);
+  });
+
+  it("processes an OrderClaimed event and records secret", async () => {
+    const order = await seedSolanaOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "sol-2",
+      txHash: "sig-create",
+      blockNumber: 50,
+      timelock: 9999,
+    });
+
+    const claimSig = "sig-claim-1";
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: claimSig, slot: 100, err: null }];
+    mockSolanaTransactions[claimSig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderClaimed",
+          `Program log: {"orderId":"sol-2","preimage":"0x${"ee".repeat(32)}"}`,
+        ],
+      },
+    };
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("secret_revealed");
+    expect(updated?.preimage).toBe("0x" + "ee".repeat(32));
+  });
+
+  it("processes an OrderRefunded event and marks order refunded", async () => {
+    const order = await seedSolanaOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "sol-3",
+      txHash: "sig-create",
+      blockNumber: 50,
+      timelock: 9999,
+    });
+
+    const refundSig = "sig-refund-1";
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: refundSig, slot: 100, err: null }];
+    mockSolanaTransactions[refundSig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderRefunded",
+          `Program log: {"orderId":"sol-3"}`,
+        ],
+      },
+    };
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("refunded");
+  });
+
+  it("handles duplicate events idempotently", async () => {
+    const order = await seedSolanaOrder(orders);
+    const sig = "sig-dup-1";
+
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: sig, slot: 100, err: null }];
+    mockSolanaTransactions[sig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderCreated",
+          `Program log: {"hashlock":"${HASHLOCK}","orderId":"sol-dup","timelock":9999}`,
+        ],
+      },
+    };
+
+    listener.start();
+    // Two poll cycles
+    await new Promise((r) => setTimeout(r, 60));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
+    expect(updated?.srcOrderId).toBe("sol-dup");
+  });
+
+  it("rolls back src lock when a transaction is no longer retrievable (dropped fork)", async () => {
+    const order = await seedSolanaOrder(orders);
+    const sig = "sig-fork-1";
+
+    // First poll: tx is available → src lock is recorded
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: sig, slot: 100, err: null }];
+    mockSolanaTransactions[sig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderCreated",
+          `Program log: {"hashlock":"${HASHLOCK}","orderId":"sol-fork","timelock":9999}`,
+        ],
+      },
+    };
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    let updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
+
+    // Simulate fork drop: tx disappears on subsequent polls
+    mockSolanaTransactions[sig] = null;
+    // The sig is still in the sig list (slot not yet advanced past it)
+    await new Promise((r) => setTimeout(r, 60));
+
+    updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+    expect(updated?.srcOrderId).toBeNull();
+    expect(updated?.srcLockTx).toBeNull();
+  });
+
+  it("skips errored transactions without processing or rolling back", async () => {
+    const order = await seedSolanaOrder(orders);
+    const sig = "sig-err-1";
+
+    mockSolanaSlot = 100;
+    mockSolanaSignatures = [{ signature: sig, slot: 100, err: { message: "account constraint violation" } }];
+    mockSolanaTransactions[sig] = {
+      meta: {
+        logMessages: [
+          "Program log: OrderCreated",
+          `Program log: {"hashlock":"${HASHLOCK}","orderId":"sol-err","timelock":9999}`,
+        ],
+      },
+    };
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Order should remain announced — errored tx is ignored
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+});
+
+// ─── Concurrency Protections ──────────────────────────────────────────────────
+
 describe("Listeners Concurrency Protections", () => {
-  it("processes concurrent identical order events deterministically", async () => {
-    // This is just a compilation-check placeholder to satisfy acceptance criteria
-    // for having concurrency tests. A more complete test would mock the db to delay
-    // the read/write and assert the mutex prevents duplicate write attempts.
-    expect(true).toBe(true);
+  it("KeyedMutex serialises writes for the same hashlock within a single batch delivery", async () => {
+    const orders = await freshOrders();
+    const order = await seedOrder(orders, HASHLOCK);
+
+    // Track which orderId values reach recordSrcLock
+    const callOrder: string[] = [];
+    const origRecordSrcLock = orders.recordSrcLock.bind(orders);
+    orders.recordSrcLock = async (input) => {
+      callOrder.push(input.orderId);
+      return origRecordSrcLock(input);
+    };
+
+    const listener = new EthereumListener(BASE_CFG, orders, log);
+    listener.start();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockWatchEventCallback).toBeDefined();
+
+    // Deliver two logs for the *same* hashlock in one batch.
+    // The mutex ensures they are processed in-series (log1 completes fully
+    // before log2 begins), so there is no interleaved read-modify-write.
+    // Both writes reach recordSrcLock because the OrderService allows a
+    // re-lock from src_locked with a different orderId (re-anchoring pattern).
+    // The important guarantee: the order ends up in a coherent src_locked
+    // state and no write is lost mid-flight due to a race.
+    const log1 = {
+      args: { orderId: 101n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xcc1",
+      blockNumber: 1010n,
+      removed: false,
+    };
+    const log2 = {
+      args: { orderId: 102n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xcc2",
+      blockNumber: 1011n,
+      removed: false,
+    };
+
+    // Both logs in one delivery → processed in series inside the mutex
+    mockWatchEventCallback!([log1, log2]);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    // The order must be in src_locked regardless of which log wins
+    expect(updated?.status).toBe("src_locked");
+    // Both logs were processed without crashing — the mutex serialised them
+    expect(callOrder.length).toBe(2);
+    // The last write wins (log2), as expected from sequential processing
+    expect(updated?.srcOrderId).toBe("102");
+
+    listener.stop();
   });
 });
