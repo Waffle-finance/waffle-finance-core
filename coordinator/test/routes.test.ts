@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
+import express from "express";
 import pino from "pino";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,6 +25,7 @@ import { OrderService } from "../src/services/order-service.js";
 import { SecretService } from "../src/services/secret-service.js";
 import { QuoteService } from "../src/services/quote-service.js";
 import { createApp, type AppDeps } from "../src/server/app.js";
+import { makeRateLimiter, resolveClientIp } from "../src/server/middleware/ratelimit.js";
 
 // ?? Helpers ???????????????????????????????????????????????????????????????????
 
@@ -355,6 +357,62 @@ describe("API key bypass", () => {
       }
     }
   });
+
+  it("an invalid API key does not bypass the secrets/reveal rate limit", async () => {
+    const originalKeys = process.env.COORDINATOR_API_KEYS;
+    process.env.COORDINATOR_API_KEYS = "valid-key-only";
+
+    try {
+      const app = await freshApp();
+      const payload = {
+        publicId: "anyid",
+        preimage: "0x" + "cd".repeat(32),
+        txHash: "0xabc"
+      };
+
+      for (let i = 0; i < 5; i++) {
+        const res = await request(app)
+          .post("/api/secrets/reveal")
+          .set("Authorization", "Bearer wrong-key")
+          .send(payload);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe("unknown_order");
+      }
+
+      const res = await request(app)
+        .post("/api/secrets/reveal")
+        .set("Authorization", "Bearer wrong-key")
+        .send(payload);
+      expect(res.status).toBe(429);
+      expect(res.body.error).toBe("too_many_requests");
+    } finally {
+      if (originalKeys === undefined) {
+        delete process.env.COORDINATOR_API_KEYS;
+      } else {
+        process.env.COORDINATOR_API_KEYS = originalKeys;
+      }
+    }
+  });
+});
+
+describe("Rate-limit client IP resolution", () => {
+  it("uses the first X-Forwarded-For value only when the direct peer is trusted", () => {
+    const req = {
+      socket: { remoteAddress: "10.0.0.10" },
+      headers: { "x-forwarded-for": "203.0.113.7, 10.0.0.10" }
+    };
+
+    expect(resolveClientIp(req as any, new Set(["10.0.0.10"]))).toBe("203.0.113.7");
+  });
+
+  it("ignores X-Forwarded-For when the direct peer is not trusted", () => {
+    const req = {
+      socket: { remoteAddress: "10.0.0.11" },
+      headers: { "x-forwarded-for": "203.0.113.7" }
+    };
+
+    expect(resolveClientIp(req as any, new Set(["10.0.0.10"]))).toBe("10.0.0.11");
+  });
 });
 
 describe("GET /api/orders/history", () => {
@@ -424,6 +482,24 @@ describe("Rate-limit response headers", () => {
       .send(BASE_ANNOUNCE);
     expect(res.headers["x-ratelimit-limit"]).toBeDefined();
     expect(res.headers["x-ratelimit-remaining"]).toBeDefined();
+    expect(res.headers["x-ratelimit-reset"]).toBeDefined();
+  });
+
+  it("opens a fresh rate-limit window after reset time elapses", async () => {
+    const app = express();
+    app.get(
+      "/limited",
+      makeRateLimiter({ windowMs: 50, max: 1, name: "test-reset-window", log }),
+      (_req, res) => res.json({ ok: true })
+    );
+
+    await request(app).get("/limited").expect(200);
+    await request(app).get("/limited").expect(429);
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 75));
+
+    const res = await request(app).get("/limited").expect(200);
+    expect(res.body).toEqual({ ok: true });
     expect(res.headers["x-ratelimit-reset"]).toBeDefined();
   });
 });

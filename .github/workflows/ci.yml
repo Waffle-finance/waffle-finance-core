@@ -41,6 +41,12 @@ jobs:
       - name: Validate Deployment Artifacts
         run: pnpm run validate:deployments
 
+      - name: Validate Deployed Contracts (Sepolia)
+        run: pnpm --filter @wafflefinance/contracts run validate:sepolia
+        env:
+          SEPOLIA_RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
+          HARDHAT_DISABLE_TELEMETRY: 1
+
       - name: Typecheck — SDK
         run: pnpm --filter @wafflefinance/sdk exec tsc --noEmit
 

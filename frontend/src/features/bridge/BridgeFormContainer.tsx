@@ -697,36 +697,37 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           // Update UI status
           setStatusMessage('Gönderiliyor...');
           setIsSubmitting(true);
-
-          // Update status to confirmation waiting
-          setStatusMessage('Confirming...');
-
+          
           // Wait for transaction receipt to confirm success
           let receipt = null;
           let attempts = 0;
           const maxAttempts = 120; // Wait max 2 minutes (1s * 120 = 120s)
 
           while (!receipt && attempts < maxAttempts) {
+            // Update status to show active waiting
+            setStatusMessage(`Confirming (${attempts}s)...`);
+            
             try {
-              // First try to get transaction status
-              const txStatus = await window.ethereum?.request({
-                method: 'eth_getTransactionByHash',
-                params: [txHash]
-              });
-
-              if (txStatus && txStatus.blockNumber) {
-                console.log('✅ Transaction confirmed via block number!');
-                receipt = { status: '0x1' }; // Assume success if confirmed
-                break;
-              }
-
-              // Then try to get receipt
+              // First try to get receipt directly
               receipt = await window.ethereum?.request({
                 method: 'eth_getTransactionReceipt',
                 params: [txHash]
               });
 
               if (!receipt) {
+                // If no receipt, check if it's pending in mempool
+                const txStatus = await window.ethereum?.request({
+                  method: 'eth_getTransactionByHash',
+                  params: [txHash]
+                });
+                
+                if (txStatus && txStatus.blockNumber) {
+                  // Fallback: If we have a blockNumber but eth_getTransactionReceipt is lagging
+                  console.log('✅ Transaction confirmed via block number (receipt delayed)');
+                  receipt = { status: '0x1' }; // Assume success temporarily
+                  break;
+                }
+                
                 // Only log every 10 attempts to reduce spam
                 if ((attempts + 1) % 10 === 0 || attempts === 0) {
                   console.log(`⏳ Waiting for confirmation... (${attempts + 1}/${maxAttempts})`);
@@ -765,37 +766,34 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               throw new Error('Transaction confirmation timeout');
             }
           }
-
-          // Check transaction status
-          const isSuccess = receipt.status === '0x1';
-          console.log('📋 Transaction status:', receipt.status, isSuccess ? '✅ SUCCESS' : '❌ FAILED');
-
-          if (!isSuccess) {
-            throw new Error('Transaction failed on blockchain');
-          }
-
-          console.log('✅ Transaction confirmed successfully!');
-          console.log('🤖 Now triggering cross-chain processing...');
-
+          
           // Pull the full receipt (we may have only a {status} stub from the
-          // alt-path above). Logs are required to parse refund metadata.
+          // alt-path above). Logs are required to parse refund metadata and verify success.
           let refundMeta: ReturnType<typeof parseHtlcReceipt> = null;
           try {
             const fullReceipt = await window.ethereum?.request({
               method: 'eth_getTransactionReceipt',
               params: [txHash],
             });
-            refundMeta = parseHtlcReceipt(fullReceipt?.logs);
-            if (refundMeta) {
-              console.log('🛡️ Refund metadata captured:', refundMeta);
-            } else {
-              console.warn('⚠️ No HTLC OrderCreated event in receipt; refund button will be hidden for this tx.');
+            if (fullReceipt) {
+              // If we were falling back to { status: '0x1' }, now we update it to the true status
+              receipt = fullReceipt;
+              refundMeta = parseHtlcReceipt(fullReceipt.logs);
+              if (refundMeta) {
+                console.log('🛡️ Refund metadata captured:', refundMeta);
+              } else {
+                console.warn('⚠️ No HTLC OrderCreated event in receipt; refund button will be hidden for this tx.');
+              }
             }
           } catch (parseErr) {
             console.warn('⚠️ Failed to load full receipt for refund metadata:', parseErr);
           }
 
-          // Save transaction to history immediately when ETH tx confirms
+          // Check transaction status
+          const isSuccess = receipt.status === '0x1';
+          console.log('📋 Transaction status:', receipt.status, isSuccess ? '✅ SUCCESS' : '❌ FAILED');
+          
+          // Save transaction to history immediately when ETH tx confirms (or fails)
           saveTransactionToHistory({
             orderId: result.orderId,
             txHash: txHash,
@@ -805,7 +803,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             ethAddress: ethAddress,
             stellarAddress: stellarAddress,
             ethTxHash: txHash,
-            status: 'pending', // Initial status, will update after processing
+            status: isSuccess ? 'pending' : 'failed', // Initial status based on receipt
             onChainOrderId: refundMeta?.orderId,
             htlcContractAddress: refundMeta?.contractAddress,
             htlcContractMode: refundMeta?.contractMode,
@@ -813,6 +811,15 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             amountWei: refundMeta?.amountWei,
           });
 
+          if (!isSuccess) {
+            setStatusMessage('Failed ❌');
+            setIsSubmitting(false);
+            throw new Error('Transaction failed on blockchain');
+          }
+          
+          console.log('✅ Transaction confirmed successfully!');
+          console.log('🤖 Now triggering cross-chain processing...');
+          
           // Update status to cross-chain processing
           setStatusMessage('Bridging...');
 

@@ -21,6 +21,7 @@ This guide covers every path from a fresh checkout to a running local stack — 
   - [E2E (`e2e/`)](#e2e-e2e)
 - [Running the full local stack](#running-the-full-local-stack)
 - [Troubleshooting](#troubleshooting)
+- [Dependency updates](./DEPENDENCY_UPDATES.md) — automated Renovate workflow, review guardrails, and how to pause it for sensitive packages.
 
 ---
 
@@ -446,3 +447,9 @@ cp env.example .env
 ### Slow `cargo build` on first run
 
 Soroban SDK dependencies are large. Cargo's download + compile pass typically takes 3–5 minutes on first build; subsequent builds use the incremental cache. The dev container pre-warms this cache during image build.
+
+---
+
+## Known gaps and planned improvements
+
+See [`docs/TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md) for the full service-level technical debt register, including architectural gaps, known limitations, and the priority order for future work.
