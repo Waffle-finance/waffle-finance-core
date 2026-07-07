@@ -3,6 +3,7 @@ import { pino } from "pino";
 import { resolve } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { openDatabase } from "../src/persistence/db.js";
 import { OrderService } from "../src/services/order-service.js";
 import { OrdersRepository } from "../src/persistence/orders-repo.js";
@@ -58,14 +59,14 @@ describe("Cursor Pagination Integration", () => {
       await createTestOrders(service, 5, VALID_ETH_ADDR);
       
       // First request should hit database
-      const start1 = Date.now();
+      const start1 = performance.now();
       const result1 = await service.historyWithCursor(VALID_ETH_ADDR, 3);
-      const time1 = Date.now() - start1;
+      const time1 = performance.now() - start1;
       
       // Second identical request should hit cache
-      const start2 = Date.now();
+      const start2 = performance.now();
       const result2 = await service.historyWithCursor(VALID_ETH_ADDR, 3);
-      const time2 = Date.now() - start2;
+      const time2 = performance.now() - start2;
       
       expect(result1).toEqual(result2);
       expect(time2).toBeLessThan(time1); // Cache should be faster

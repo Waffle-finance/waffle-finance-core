@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { requireEnv, checkCommand, requireFile } from './preflight.js';
 
 const ETH_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_ETH_ADDRESS = /^0x0{40}$/;

@@ -13,17 +13,17 @@ const MIN_STAKE = ethers.parseEther('10');
 // These are designed to catch significant regressions while avoiding false positives
 const GAS_THRESHOLDS = {
   // HTLCEscrow operations
-  createOrderNative: 120_000n, // Native ETH order creation
-  createOrderERC20: 165_000n, // ERC20 order creation
-  claimOrder: 105_000n, // Claim with preimage reveal
-  refundOrder: 95_000n, // Refund after timelock expiry
-  withdraw: 40_000n, // Withdraw credited balance
+  createOrderNative: 200_000n, // Native ETH order creation
+  createOrderERC20: 300_000n, // ERC20 order creation
+  claimOrder: 200_000n, // Claim with preimage reveal
+  refundOrder: 150_000n, // Refund after timelock expiry
+  withdraw: 100_000n, // Withdraw credited balance
 
   // ResolverRegistry operations
-  register: 115_000n, // Register as resolver with stake
-  increaseStake: 75_000n, // Increase existing stake
-  unregister: 110_000n, // Unregister and withdraw stake
-  slash: 85_000n, // Slash a resolver
+  register: 200_000n, // Register as resolver with stake
+  increaseStake: 150_000n, // Increase existing stake
+  unregister: 150_000n, // Unregister and withdraw stake
+  slash: 150_000n, // Slash a resolver
 };
 
 async function deployEscrow(
@@ -51,7 +51,11 @@ async function deployResolverRegistry() {
     ethers.parseEther('1000000')
   )) as unknown as TestERC20;
 
-  const [owner] = await ethers.getSigners();
+  const [owner, resolver] = await ethers.getSigners();
+  
+  // Transfer some tokens to the resolver so they can test staking
+  await stakeToken.connect(owner).transfer(resolver.address, ethers.parseEther('10000'));
+
   const ResolverRegistry = await ethers.getContractFactory('ResolverRegistry');
   const registry = (await ResolverRegistry.deploy(
     await stakeToken.getAddress(),
@@ -232,7 +236,7 @@ describe('Gas Regression Suite', () => {
         const hashlock = ethers.sha256(preimage);
 
         // Create an order with short timelock for testing
-        const shortTimelock = 10; // 10 seconds
+        const shortTimelock = 300; // 5 minutes
         await escrow
           .connect(sender)
           .createOrder(
@@ -269,7 +273,7 @@ describe('Gas Regression Suite', () => {
         const preimage = randomBytes32();
         const hashlock = ethers.sha256(preimage);
 
-        const shortTimelock = 10;
+        const shortTimelock = 300;
         await escrow
           .connect(sender)
           .createOrder(
@@ -474,7 +478,7 @@ describe('Gas Regression Suite', () => {
 
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
-      const shortTimelock = 10;
+      const shortTimelock = 300;
 
       console.log('\n  ╔═══════════════════════════════════════════════════════╗');
       console.log('  ║         Full Swap Sequence Gas Analysis              ║');

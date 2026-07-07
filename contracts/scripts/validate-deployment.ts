@@ -5,22 +5,33 @@ import * as path from "node:path";
 
 interface DeploymentArtifact {
   network: string;
-  chainId: number;
-  deployer: string;
+  chainId?: number;
+  deployer?: string;
   ethereum?: {
-    htlcEscrow: string;
-    resolverRegistry: string;
+    chainId?: number;
+    contracts?: {
+      HTLCEscrow: string;
+      ResolverRegistry: string;
+    };
+    htlcEscrow?: string;
+    resolverRegistry?: string;
   };
   soroban?: {
     htlc: string;
     resolverRegistry: string;
+  };
+  stellar?: {
+    contracts?: {
+      HTLC: string;
+      ResolverRegistry: string;
+    };
   };
   config?: {
     stakeAsset: string;
     minStake: string;
     minSafetyDeposit: string;
   };
-  deployedAt: string;
+  deployedAt?: string;
 }
 
 interface ValidationResult {
@@ -30,9 +41,16 @@ interface ValidationResult {
 }
 
 function readDeploymentArtifact(): DeploymentArtifact | null {
-  const artifactPath = path.resolve(__dirname, `../../deployments.${network.name}.json`);
+  let artifactPath = path.resolve(__dirname, `../../deployments.${network.name}.json`);
   if (!fs.existsSync(artifactPath)) {
-    return null;
+    if (network.name === 'sepolia') {
+      artifactPath = path.resolve(__dirname, `../../deployments.testnet.json`);
+      if (!fs.existsSync(artifactPath)) {
+        return null;
+      }
+    } else {
+      return null;
+    }
   }
   return JSON.parse(fs.readFileSync(artifactPath, "utf8")) as DeploymentArtifact;
 }
@@ -43,7 +61,14 @@ async function validateEthereumContracts(artifact: DeploymentArtifact, results: 
     return;
   }
 
-  const { htlcEscrow, resolverRegistry } = artifact.ethereum;
+  const htlcEscrow = artifact.ethereum.contracts?.HTLCEscrow || artifact.ethereum.htlcEscrow;
+  const resolverRegistry = artifact.ethereum.contracts?.ResolverRegistry || artifact.ethereum.resolverRegistry;
+
+  if (!htlcEscrow || !resolverRegistry) {
+    results.errors.push("Missing HTLCEscrow or ResolverRegistry address in artifact");
+    results.valid = false;
+    return;
+  }
 
   // Verify HTLCEscrow contract exists and has correct interface
   try {
@@ -86,20 +111,23 @@ async function validateEthereumContracts(artifact: DeploymentArtifact, results: 
 }
 
 async function validateDeploymentParameters(artifact: DeploymentArtifact, results: ValidationResult): Promise<void> {
-  if (!artifact.config) {
+  const config = artifact.stellar?.resolverRegistryConfig || artifact.config;
+  if (!config) {
     results.warnings.push("No config section in deployment artifact");
     return;
   }
 
-  const { stakeAsset, minStake, minSafetyDeposit } = artifact.config;
+  const { stakeAsset, minStake } = config;
+  const minSafetyDeposit = (config as any).minSafetyDeposit;
 
-  // Validate stake asset is not zero address
-  if (stakeAsset && stakeAsset !== ethers.ZeroAddress) {
+  // For Ethereum network validation, stake asset from stellar config is a Stellar asset, not an ETH address.
+  // We should skip checking it as an ETH contract if it's from the stellar config.
+  if (stakeAsset && artifact.config?.stakeAsset && stakeAsset !== ethers.ZeroAddress) {
     const code = await ethers.provider.getCode(stakeAsset);
     if (code === "0x") {
       results.warnings.push(`Stake asset ${stakeAsset} is not a contract on this network`);
     }
-  } else if (stakeAsset === ethers.ZeroAddress) {
+  } else if (artifact.config && stakeAsset === ethers.ZeroAddress) {
     results.warnings.push("Stake asset is zero address - native ETH staking may not be supported");
   }
 
@@ -119,9 +147,9 @@ async function validateDeploymentParameters(artifact: DeploymentArtifact, result
 async function validateChainId(artifact: DeploymentArtifact, results: ValidationResult): Promise<void> {
   const providerNetwork = await ethers.provider.getNetwork();
   const actualChainId = Number(providerNetwork.chainId);
-  const expectedChainId = artifact.chainId;
+  const expectedChainId = artifact.ethereum?.chainId || artifact.chainId;
 
-  if (actualChainId !== expectedChainId) {
+  if (expectedChainId && actualChainId !== expectedChainId) {
     results.errors.push(
       `Chain ID mismatch: RPC reports ${actualChainId}, but artifact expects ${expectedChainId}`
     );
