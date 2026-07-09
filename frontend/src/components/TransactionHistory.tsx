@@ -29,7 +29,6 @@ const API_BASE_URL = import.meta.env.PROD
 export default function TransactionHistory({ ethAddress, stellarAddress }: TransactionHistoryProps) {
   const [filter, setFilter] = useState<TransactionFilter>('all');
   const [refundTarget, setRefundTarget] = useState<Transaction | null>(null);
-  const [manualRefundingIds, setManualRefundingIds] = useState<Set<string>>(() => new Set());
   
   // Advanced search and filtering state
   const [searchQuery, setSearchQuery] = useState('');
@@ -187,56 +186,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     return `https://stellar.expert/explorer/${network}/tx/${txHash}`;
   };
 
-  /**
-   * Pick the right block explorer for a refund tx.
-   *
-   * `refundNetwork` is the authoritative signal once we start writing it.
-   * For legacy entries that don't have it, we fall back to a hash-shape
-   * heuristic: Ethereum hashes are 0x-prefixed, Stellar hashes are not.
-   */
-  const getRefundNetwork = (tx: Transaction): 'ethereum' | 'stellar' => {
-    if (tx.refundNetwork) return tx.refundNetwork;
-    if (tx.refundTxHash?.startsWith('0x')) return 'ethereum';
-    return 'stellar';
-  };
 
-  const getRefundExplorerUrl = (tx: Transaction): string => {
-    if (!tx.refundTxHash) return '#';
-    return getRefundNetwork(tx) === 'ethereum'
-      ? getEtherscanUrl(tx.refundTxHash)
-      : getStellarExplorerUrl(tx.refundTxHash);
-  };
-
-  const getRefundNetworkLabel = (tx: Transaction): string =>
-    getRefundNetwork(tx) === 'ethereum' ? 'Ethereum' : 'Stellar';
-
-  /**
-   * A pending ETH→XLM swap is "refundable" once we have all three on-chain
-   * coordinates and the order is still in pending/failed/expired state. We do NOT
-   * gate on time here — RefundDialog itself enforces the timelock and only
-   * unlocks the button after it expires.
-   */
-  const canRefund = (tx: Transaction): boolean => {
-    return (
-      tx.direction === 'eth-to-xlm' &&
-      (tx.status === 'pending' || tx.status === 'failed' || tx.status === 'expired' || tx.status === 'timed_out') &&
-      !tx.refundedAt &&
-      !!tx.onChainOrderId &&
-      !!tx.htlcContractAddress &&
-      !!tx.timelockUnixSeconds
-    );
-  };
-
-  const canManualRefundXlm = (tx: Transaction): boolean => {
-    return (
-      tx.direction === 'xlm-to-eth' &&
-      tx.status === 'failed' &&
-      tx.autoRefundFailed === true &&
-      !tx.refundedAt &&
-      !!(tx.stellarTxHash || tx.txHash) &&
-      !!(tx.stellarAddress || stellarAddress)
-    );
-  };
 
   const markRefunded = (
     orderId: string,
@@ -258,48 +208,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     });
   };
 
-  const handleManualXlmRefund = async (tx: Transaction) => {
-    const originalStellarTx = tx.stellarTxHash || tx.txHash;
-    const refundAddress = tx.stellarAddress || stellarAddress;
 
-    if (!originalStellarTx || !refundAddress) {
-      window.alert('Manual refund requires the original Stellar transaction and your Stellar wallet address.');
-      return;
-    }
-
-    setManualRefundingIds((prev) => new Set(prev).add(tx.id));
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/orders/manual-refund`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          stellarTxHash: originalStellarTx,
-          stellarAddress: refundAddress,
-          networkMode: tx.networkMode || (isTestnet() ? 'testnet' : 'mainnet'),
-        }),
-      });
-      const body = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        throw new Error(body?.details || body?.error || `Refund failed with ${res.status}`);
-      }
-
-      if (!body?.refundTxHash) {
-        throw new Error('Refund response did not include a transaction hash.');
-      }
-
-      markRefunded(tx.id, body.refundTxHash, 'stellar');
-      window.alert(`XLM refund submitted.\nRefund TX: ${body.refundTxHash}`);
-    } catch (err) {
-      window.alert(`Manual XLM refund failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      setManualRefundingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(tx.id);
-        return next;
-      });
-    }
-  };
 
   const handleRefunded = (orderId: string, refundHash: `0x${string}`) => {
     markRefunded(orderId, refundHash, 'ethereum');
@@ -468,9 +377,6 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       {tx.toNetwork}
                     </div>
                   </div>
-                </div>
-              </div>
-
                 </div>
               </div>
 

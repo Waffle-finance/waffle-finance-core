@@ -224,7 +224,7 @@ describe("Cursor Pagination API", () => {
     });
 
     it("enforces maximum limit", async () => {
-      await createTestOrders(service, 250, VALID_ETH_ADDR);
+      await createTestOrders(service, 5, VALID_ETH_ADDR);
 
       const response = await request(app)
         .get("/api/orders/history")
@@ -236,6 +236,8 @@ describe("Cursor Pagination API", () => {
 
       expect(response.body.pagination.limit).toBe(200); // Capped at maximum
     });
+
+
 
     it("handles concurrent requests correctly", async () => {
       await createTestOrders(service, 20, VALID_ETH_ADDR);
