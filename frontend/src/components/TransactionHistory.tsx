@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Clock, CheckCircle, XCircle, ArrowRight, ExternalLink, RefreshCw, Search, Copy, Check, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, ArrowRight, ExternalLink, RefreshCw, Undo2, Search, Copy, Check, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import { isTestnet } from '../config/networks';
 import RefundDialog from '../features/refund/RefundDialog';
 import { useTransactionHistoryCache, type Transaction } from '../hooks/useTransactionHistoryCache';
@@ -186,51 +186,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     return `https://stellar.expert/explorer/${network}/tx/${txHash}`;
   };
 
-  /**
-   * Pick the right block explorer for a refund tx.
-   *
-   * `refundNetwork` is the authoritative signal once we start writing it.
-   * For legacy entries that don't have it, we fall back to a hash-shape
-   * heuristic: Ethereum hashes are 0x-prefixed, Stellar hashes are not.
-   */
 
-  const getRefundExplorerUrl = (tx: Transaction): string => {
-    if (!tx.refundTxHash) return '#';
-    return getRefundNetwork(tx) === 'ethereum'
-      ? getEtherscanUrl(tx.refundTxHash)
-      : getStellarExplorerUrl(tx.refundTxHash);
-  };
-
-  const getRefundNetworkLabel = (tx: Transaction): string =>
-    getRefundNetwork(tx) === 'ethereum' ? 'Ethereum' : 'Stellar';
-
-  /**
-   * A pending ETH→XLM swap is "refundable" once we have all three on-chain
-   * coordinates and the order is still in pending/failed/expired state. We do NOT
-   * gate on time here — RefundDialog itself enforces the timelock and only
-   * unlocks the button after it expires.
-   */
-  const canRefund = (tx: Transaction): boolean => {
-    return (
-      tx.direction === 'eth-to-xlm' &&
-      (tx.status === 'pending' || tx.status === 'failed' || tx.status === 'expired' || tx.status === 'timed_out') &&
-      !tx.refundedAt &&
-      !!tx.onChainOrderId &&
-      !!tx.htlcContractAddress &&
-      !!tx.timelockUnixSeconds
-    );
-  };
-
-  const canManualRefundXlm = (tx: Transaction): boolean => {
-    return (
-      tx.direction === 'xlm-to-eth' &&
-      tx.status === 'failed' &&
-      tx.autoRefundFailed === true &&
-      !tx.refundedAt &&
-      !!(tx.stellarTxHash || tx.txHash) &&
-      !!(tx.stellarAddress || stellarAddress)
-    );
-  };
 
   const markRefunded = (
     orderId: string,
