@@ -38,6 +38,12 @@ jobs:
       - name: Validate deployment manifests
         run: pnpm run validate:deployments
 
+      - name: Validate deployed testnet contracts
+        run: pnpm --filter @wafflefinance/contracts run validate:sepolia
+        env:
+          SEPOLIA_RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
+          HARDHAT_DISABLE_TELEMETRY: 1
+
       # ========================================
       # Contract Artifact Verification
       # ========================================

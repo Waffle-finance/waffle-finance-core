@@ -10,7 +10,7 @@ export interface Transaction {
   toToken: string;
   amount: string;
   estimatedAmount: string;
-  status: 'pending' | 'completed' | 'cancelled' | 'failed';
+  status: 'pending' | 'completed' | 'confirmed' | 'cancelled' | 'failed' | 'refunded' | 'expired' | 'timed_out';
   timestamp: number;
   ethTxHash?: string;
   stellarTxHash?: string;
@@ -297,6 +297,7 @@ export function useTransactionHistoryCache({
         const res = await fetchWithRetry(`${apiBase}/api/orders/history?${params.toString()}`, {
           maxRetries: 2,
           retryDelayMs: 1000,
+          fetcher,
         });
         if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
 

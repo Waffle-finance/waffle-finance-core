@@ -7,6 +7,7 @@ interface FetchWithRetryOptions extends RequestInit {
   retryDelayMs?: number;
   retryableStatuses?: number[];
   onRetry?: (attempt: number, error: Error) => void;
+  fetcher?: typeof fetch;
 }
 
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
@@ -34,6 +35,7 @@ export async function fetchWithRetry(
     retryDelayMs = DEFAULT_RETRY_DELAY_MS,
     retryableStatuses = DEFAULT_RETRYABLE_STATUSES,
     onRetry,
+    fetcher = fetch,
     ...fetchOptions
   } = options;
 
@@ -41,7 +43,7 @@ export async function fetchWithRetry(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(url, fetchOptions);
+      const response = await fetcher(url, fetchOptions);
 
       if (retryableStatuses.includes(response.status)) {
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`);

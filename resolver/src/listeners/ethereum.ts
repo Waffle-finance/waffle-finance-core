@@ -7,6 +7,14 @@ import {
 import { sepolia, mainnet } from "viem/chains";
 import { type Logger } from "pino";
 import type { ResolverConfig } from "../config.js";
+import {
+  eventsTotal,
+  listenerErrorsTotal,
+  listenerLastEventTimestampSeconds,
+  activeListeners,
+} from "../metrics.js";
+
+const CHAIN = "ethereum";
 
 /**
  * Stream HTLCEscrow events from the configured Ethereum chain.
@@ -42,6 +50,7 @@ export class EthereumListener {
 
     const address = this.cfg.ethereum.htlcEscrow;
     this.log.info({ chainId: this.cfg.ethereum.chainId, contract: address }, "starting Ethereum listener");
+    activeListeners.set({ chain: CHAIN }, 1);
 
     const orderCreated = parseAbiItem(
       "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
@@ -58,18 +67,25 @@ export class EthereumListener {
       event: orderCreated,
       onLogs: (logs) => {
         for (const log of logs) {
-          handlers.onOrderCreated({
-            orderId: log.args.orderId!,
-            sender: log.args.sender!,
-            beneficiary: log.args.beneficiary!,
-            token: log.args.token!,
-            amount: log.args.amount!,
-            safetyDeposit: log.args.safetyDeposit!,
-            hashlock: log.args.hashlock!,
-            timelock: log.args.timelock!,
-            blockNumber: log.blockNumber,
-            txHash: log.transactionHash
-          });
+          eventsTotal.inc({ chain: CHAIN, event_type: "order_created" });
+          listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          try {
+            handlers.onOrderCreated({
+              orderId: log.args.orderId!,
+              sender: log.args.sender!,
+              beneficiary: log.args.beneficiary!,
+              token: log.args.token!,
+              amount: log.args.amount!,
+              safetyDeposit: log.args.safetyDeposit!,
+              hashlock: log.args.hashlock!,
+              timelock: log.args.timelock!,
+              blockNumber: log.blockNumber,
+              txHash: log.transactionHash
+            });
+          } catch (err) {
+            listenerErrorsTotal.inc({ chain: CHAIN, error_type: "handler_error" });
+            this.log.warn({ err }, "onOrderCreated handler failed");
+          }
         }
       }
     });
@@ -79,13 +95,20 @@ export class EthereumListener {
       event: orderClaimed,
       onLogs: (logs) => {
         for (const log of logs) {
-          handlers.onOrderClaimed({
-            orderId: log.args.orderId!,
-            claimer: log.args.claimer!,
-            preimage: log.args.preimage!,
-            blockNumber: log.blockNumber,
-            txHash: log.transactionHash
-          });
+          eventsTotal.inc({ chain: CHAIN, event_type: "order_claimed" });
+          listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          try {
+            handlers.onOrderClaimed({
+              orderId: log.args.orderId!,
+              claimer: log.args.claimer!,
+              preimage: log.args.preimage!,
+              blockNumber: log.blockNumber,
+              txHash: log.transactionHash
+            });
+          } catch (err) {
+            listenerErrorsTotal.inc({ chain: CHAIN, error_type: "handler_error" });
+            this.log.warn({ err }, "onOrderClaimed handler failed");
+          }
         }
       }
     });
@@ -95,12 +118,19 @@ export class EthereumListener {
       event: orderRefunded,
       onLogs: (logs) => {
         for (const log of logs) {
-          handlers.onOrderRefunded({
-            orderId: log.args.orderId!,
-            caller: log.args.caller!,
-            blockNumber: log.blockNumber,
-            txHash: log.transactionHash
-          });
+          eventsTotal.inc({ chain: CHAIN, event_type: "order_refunded" });
+          listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          try {
+            handlers.onOrderRefunded({
+              orderId: log.args.orderId!,
+              caller: log.args.caller!,
+              blockNumber: log.blockNumber,
+              txHash: log.transactionHash
+            });
+          } catch (err) {
+            listenerErrorsTotal.inc({ chain: CHAIN, error_type: "handler_error" });
+            this.log.warn({ err }, "onOrderRefunded handler failed");
+          }
         }
       }
     });
@@ -110,6 +140,7 @@ export class EthereumListener {
     this.unwatchOrderCreated?.();
     this.unwatchOrderClaimed?.();
     this.unwatchOrderRefunded?.();
+    activeListeners.set({ chain: CHAIN }, 0);
   }
 }
 

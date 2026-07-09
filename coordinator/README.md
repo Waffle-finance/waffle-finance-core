@@ -51,6 +51,20 @@ it automatically.
 Preimages (pre-claim) are secret material. The hashlock is NOT secret and shouldn't be redacted.
 Rule for contributors: **Never let a raw Error or request/response body reach a log or HTTP response outside the classified SecretRevealError path without passing through `sanitizeForLog()` first.**
 
+## Operational Endpoint Access Control
+
+The coordinator restricts access to privileged operational endpoints using bearer token authentication.
+
+These endpoints require the request to present a valid bearer token in the `Authorization` header (`Authorization: Bearer <token>`). Tokens are loaded from the `COORDINATOR_OPERATOR_KEYS` environment variable.
+
+| Endpoint | Method | Intended Caller | Required Env Var | 401 Meaning | 403 Meaning |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `/api/orders/:id/src-locked` | `POST` | Relayer / Resolver Infra | `COORDINATOR_OPERATOR_KEYS` | Missing or malformed `Authorization` header | Token is present but does not match any key in `COORDINATOR_OPERATOR_KEYS` |
+| `/api/orders/:id/dst-locked` | `POST` | Relayer / Resolver Infra | `COORDINATOR_OPERATOR_KEYS` | Missing or malformed `Authorization` header | Token is present but does not match any key in `COORDINATOR_OPERATOR_KEYS` |
+| `/metrics` | `GET` | Prometheus / Scraping Agent | `COORDINATOR_OPERATOR_KEYS` | Missing or malformed `Authorization` header | Token is present but does not match any key in `COORDINATOR_OPERATOR_KEYS` |
+
+*Note: All public-facing endpoints (e.g. `/healthz`, `/readyz`, `/api/orders/announce`, and public order-read queries) do not require authorization. The privileged operational endpoints (`src-locked` and `dst-locked`) are intentionally not rate-limited to avoid throttling infrastructure under high load; if a rate limiter is introduced in the future, it must execute after the `requireRole` middleware to prevent unauthenticated requests from exhausting the operator's rate limit budget.*
+
 ## Quick start
 
 ```bash
