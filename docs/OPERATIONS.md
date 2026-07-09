@@ -10,6 +10,7 @@ This document provides operational guidance for deploying, monitoring, and troub
 - [Pre-deployment Validation](#pre-deployment-validation)
 - [Service Dependencies](#service-dependencies)
 - [Incident Response](#incident-response)
+- [Postmortem Process](#postmortem-process)
 - [Rollback Procedures](#rollback-procedures)
 - [Monitoring Guide](#monitoring-guide)
 
@@ -22,6 +23,7 @@ Before deploying contracts or services, complete the following checklist:
 ### Environment Setup
 
 1. **Set required environment variables:**
+
    ```bash
    # Required for deployment
    export RELAYER_PRIVATE_KEY="<your-deployer-private-key>"
@@ -31,11 +33,12 @@ Before deploying contracts or services, complete the following checklist:
    ```
 
 2. **Verify RPC connectivity:**
+
    ```bash
    # Ethereum
    curl -X POST $ETHEREUM_RPC_URL -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-   
+
    # Stellar Horizon
    curl "$STELLAR_HORIZON_URL" | head -1
    ```
@@ -110,12 +113,12 @@ Services must be started in this order:
 
 ### Health Check Endpoints
 
-| Service | Endpoint | Description |
-|---------|----------|-------------|
-| Coordinator | `GET /health` | Liveness check |
-| Coordinator | `GET /metrics` | Prometheus metrics |
-| Relayer | `GET /api/health` | Service health |
-| Relayer | `GET /api/debug/chain-monitor` | Chain monitoring status |
+| Service     | Endpoint                       | Description             |
+| ----------- | ------------------------------ | ----------------------- |
+| Coordinator | `GET /health`                  | Liveness check          |
+| Coordinator | `GET /metrics`                 | Prometheus metrics      |
+| Relayer     | `GET /api/health`              | Service health          |
+| Relayer     | `GET /api/debug/chain-monitor` | Chain monitoring status |
 
 ---
 
@@ -128,12 +131,14 @@ Services must be started in this order:
 **Symptom:** Resolver logs show "RPC call failed" messages, order processing stalls.
 
 **Resolution:**
+
 1. Check RPC endpoint status (Infura/Alchemy dashboard)
 2. Verify rate limits aren't exhausted
 3. Restart affected service - it will resume from last processed block
 4. Check network connectivity
 
 **Configuration:**
+
 ```bash
 # Adjust retry settings
 export RESOLVER_RPC_MAX_RETRIES=10
@@ -146,13 +151,14 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 **Symptom:** Orders remain in `src_locked` or `dst_locked` without progress.
 
 **Resolution:**
+
 1. Check resolver logs for errors
 2. Verify resolver is staked in ResolverRegistry
 3. Manually check on-chain state:
    ```bash
    # Ethereum
    curl $ETH_HTLC_ESCROW_TESTNET/events?hashlock=<hashlock>
-   
+
    # Stellar
    curl "$STELLAR_HORIZON_URL/contracts/$SOROBAN_HTLC/events"
    ```
@@ -163,6 +169,7 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 **Symptom:** Orders announced but no destination lock occurs.
 
 **Resolution:**
+
 1. Verify resolver is registered:
    ```bash
    pnpm --filter @wafflefinance/resolver status
@@ -176,9 +183,34 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 **Symptom:** Preimages not being relayed between chains.
 
 **Resolution:**
+
 1. Check coordinator `SECRET_STORAGE_KEY` is set consistently
 2. Verify coordinator can reach both chains
 3. Run secret recovery via on-chain log replay (coordinator feature)
+
+---
+
+## Postmortem Process
+
+Any SEV-1 or SEV-2 incident that has resolved requires a postmortem. The postmortem must be opened within 24 hours of resolution and merged within eight business days.
+
+| Document | Purpose |
+|---|---|
+| [docs/postmortem/WORKFLOW.md](postmortem/WORKFLOW.md) | End-to-end postmortem process — roles, phases, deadlines, quality bar |
+| [docs/postmortem/TEMPLATE.md](postmortem/TEMPLATE.md) | Fill-in-the-blank postmortem document |
+| [docs/postmortem/examples/](postmortem/examples/) | Worked examples showing the template applied to real incidents |
+| [docs/BUG_TRIAGE.md](BUG_TRIAGE.md) | Severity definitions, triage workflow, and escalation path |
+
+### Quick reference
+
+1. Incident resolved → incident commander opens a `postmortem: YYYY-MM-DD <description>` GitHub issue within 24 h.
+2. Author copies `docs/postmortem/TEMPLATE.md` to `docs/postmortem/YYYY-MM-DD-<slug>.md` on a new branch.
+3. Draft completed within five business days.
+4. PR reviewed by ≥ 2 people and merged within eight business days.
+5. Every action item tracked as a GitHub issue with an owner and due date.
+6. 30-day follow-up to verify action items are on track.
+
+For severity definitions and how to route an active incident, see [Bug Triage](BUG_TRIAGE.md).
 
 ---
 
@@ -189,12 +221,14 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 If a contract deployment fails or needs replacement:
 
 1. **Identify the issue:**
+
    ```bash
    # Check validation
    pnpm --filter @wafflefinance/contracts exec hardhat run scripts/validate-deployment.ts --network <network>
    ```
 
 2. **For failed transactions:** Wait for the nonce to expire or manually reset:
+
    ```bash
    # Cancel pending transactions
    pnpm --filter @wafflefinance/contracts exec hardhat run scripts/cancel-pending.ts --network <network>
@@ -210,14 +244,20 @@ The coordinator database is a cache - it can be rebuilt from on-chain state:
 # Stop coordinator
 pnpm --filter @wafflefinance/coordinator stop
 
-# Clear database (SQLite)
-rm wafflefinance.db
+# Create a verified backup first
+pnpm --filter @wafflefinance/coordinator db:backup -- --database-url "$DATABASE_URL" --out ./backups
 
-# Or drop and recreate (PostgreSQL)
-dropdb wafflefinance && createdb wafflefinance
+# Restore a known-good SQLite backup
+pnpm --filter @wafflefinance/coordinator db:restore -- --database-url "$DATABASE_URL" --from ./backups/coordinator-sqlite-example.db --force
+
+# Or restore a PostgreSQL custom dump
+pnpm --filter @wafflefinance/coordinator db:restore -- --database-url "$DATABASE_URL" --from ./backups/coordinator-postgres-example.dump --force
 
 # Restart - schema auto-applied, events re-fetched
 ```
+
+See `coordinator/docs/backup-restore.md` for the full backup/restore procedure,
+validation checks, and PostgreSQL tool requirements.
 
 ### Emergency Shutdown
 
@@ -237,13 +277,13 @@ export MAINTENANCE_MODE=true
 
 ### Key Metrics to Watch
 
-| Metric | Alert Threshold | Meaning |
-|--------|-----------------|---------|
-| `orders_announced_total` | - | Orders arriving |
-| `orders_completed_total` / `orders_refunded_total` | - | Settled orders |
-| `resolvers_active` | = 0 | No resolvers available |
-| `rpc_errors_total` | > 10/min | RPC connectivity issues |
-| `restart_count` | > 5 | Service instability |
+| Metric                                             | Alert Threshold | Meaning                 |
+| -------------------------------------------------- | --------------- | ----------------------- |
+| `orders_announced_total`                           | -               | Orders arriving         |
+| `orders_completed_total` / `orders_refunded_total` | -               | Settled orders          |
+| `resolvers_active`                                 | = 0             | No resolvers available  |
+| `rpc_errors_total`                                 | > 10/min        | RPC connectivity issues |
+| `restart_count`                                    | > 5             | Service instability     |
 
 ### Health Check Script
 
@@ -298,6 +338,7 @@ pnpm --filter @wafflefinance/coordinator seed-demo
 ```
 
 View seeded data:
+
 ```bash
 # List all orders
 curl "$COORDINATOR_URL/orders/history?address=0x742d35cF0b7bbF6E175239d74a0e0a3d1C7B87E4" | jq

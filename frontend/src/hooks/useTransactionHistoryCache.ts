@@ -10,7 +10,7 @@ export interface Transaction {
   toToken: string;
   amount: string;
   estimatedAmount: string;
-  status: 'pending' | 'completed' | 'cancelled' | 'failed';
+  status: 'pending' | 'completed' | 'confirmed' | 'cancelled' | 'failed' | 'refunded' | 'expired' | 'timed_out';
   timestamp: number;
   ethTxHash?: string;
   stellarTxHash?: string;

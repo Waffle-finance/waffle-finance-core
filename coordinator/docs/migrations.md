@@ -8,17 +8,17 @@ Both SQLite (development) and PostgreSQL (production) are supported.
 ### Migration files
 
 Migrations live in `coordinator/migrations/` and are applied in lexicographic
-order by numeric prefix (`001_`, `002_`, …).  Each file is idempotent where
+order by numeric prefix (`001_`, `002_`, …). Each file is idempotent where
 possible (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS`).
 
-| File | Purpose |
-|------|---------|
-| `001_initial.sql` | Base schema: `orders`, `order_events`, `resolver_heartbeats` |
-| `002_solana_support.sql` | Adds `solana` to chain CHECK constraints |
-| `003_secret_encryption.sql` | Adds `preimage_enc_version` to `orders` |
-| `004_query_optimizations.sql` | Adds composite indexes for history lookups |
-| `005_schema_migrations.sql` | Creates the `schema_migrations` tracking table |
-| `006_stale_cleanup.sql` | Adds `archived_at` to `orders` |
+| File                          | Purpose                                                      |
+| ----------------------------- | ------------------------------------------------------------ |
+| `001_initial.sql`             | Base schema: `orders`, `order_events`, `resolver_heartbeats` |
+| `002_solana_support.sql`      | Adds `solana` to chain CHECK constraints                     |
+| `003_secret_encryption.sql`   | Adds `preimage_enc_version` to `orders`                      |
+| `004_query_optimizations.sql` | Adds composite indexes for history lookups                   |
+| `005_schema_migrations.sql`   | Creates the `schema_migrations` tracking table               |
+| `006_stale_cleanup.sql`       | Adds `archived_at` to `orders`                               |
 
 PostgreSQL uses parallel files where SQL syntax differs (e.g. `002_solana_support_postgres.sql`).
 
@@ -35,10 +35,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 ```
 
 The coordinator seeds this table on first open (SQLite) or records each migration
-after it runs (Postgres).  The latest entry corresponds to the current schema
+after it runs (Postgres). The latest entry corresponds to the current schema
 version constant `CURRENT_SCHEMA_VERSION` in `persistence/db.ts`.
 
 ## Supported upgrade path
+
+Before applying a production migration, create a verified coordinator database
+backup with `pnpm --filter @wafflefinance/coordinator db:backup`. See
+[`backup-restore.md`](./backup-restore.md) for SQLite and PostgreSQL examples.
 
 1. **Add a new migration file** with the next numeric prefix (e.g. `007_new_feature.sql`).
 2. **Update `CURRENT_SCHEMA_VERSION`** in `coordinator/src/persistence/db.ts` to match the new file name.
@@ -60,7 +64,7 @@ On every startup the coordinator:
    - The latest applied migration equals `CURRENT_SCHEMA_VERSION`.
 
 If any check fails, startup aborts with a clear error message and the process exits
-with a non-zero code.  This prevents partial-migration states from serving traffic.
+with a non-zero code. This prevents partial-migration states from serving traffic.
 
 ## Developer checklist
 

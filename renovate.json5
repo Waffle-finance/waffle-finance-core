@@ -1,0 +1,190 @@
+// Renovate configuration for WaffleFinance.
+//
+// Purpose: automate dependency-PR creation without sacrificing review quality
+// for security-sensitive dependencies. See docs/DEPENDENCY_UPDATES.md.
+//
+// Core rules:
+//   - Group noisy updates so reviewers see a small number of small PRs.
+//   - Pin or isolate any dependency that touches user funds.
+//   - Honour an idle window so updates don't pile up.
+//   - Vulnerability alerts run on-demand and bypass every grouping rule.
+//     Security patches must never wait for the weekend.
+
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Wafflefinance is a cross-chain bridge that handles user funds.
+  // "config:recommended" gives us sane defaults (semver awareness,
+  // lockfile maintenance, base branching); "workarounds:all" papers over
+  // known Renovate bugs that don't yet have a proper fix.
+  "extends": ["config:recommended", "workarounds:all"],
+
+  // Public dashboard issue. Reviewers see every open/pending update here.
+  // They can rebase, retry, or close PRs from the dashboard without
+  // editing this file.
+  "dependencyDashboard": true,
+
+  // Keep pnpm lockfile updated and deterministic. Without this, Renovate
+  // only edits package.json and leaves lockfile drift for the next CI run.
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"],
+    "commitMessageTopic": "lockfile maintenance",
+    "groupName": "Lockfile Maintenance (Weekly)",
+  },
+
+  // Default cadence for everything that isn't a vulnerability fix or a
+  // grouped batch — idle weekdays keeps PR volume low.
+  "schedule": ["before 6am on monday"],
+  "timezone": "UTC",
+
+  // Default branch is the integration branch.
+  "baseBranches": ["main"],
+
+  // Cap per-branch PR count to keep the queue reviewable. 10 → 5 keeps
+  // the dashboard actionable for a two-reviewer rotation.
+  "prConcurrentLimit": 5,
+
+  // Auto-merge is OFF by default in Renovate and stays off here. Every
+  // Renovate PR requires a human reviewer and a green CI run. Do not
+  // enable `automerge` without at least 90 days of clean Renovate CI
+  // history on the affected group.
+
+  // Vulnerability alerts skip grouping and the weekend window.
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "labels": ["security", "dependencies"],
+    "groupName": null,        // never batch security PRs with others
+    "commitMessageTopic": "security patch",
+    "prPriority": 10,
+    "assignees": [],
+  },
+
+  // Track OSV-style advisories beyond the GitHub Advisory DB.
+  "osvVulnerabilityAlerts": {
+    "enabled": true,
+  },
+
+  // Strict policy for the smart-contract packages. Updates here move
+  // real user funds; reviewers MUST understand the diff before merging.
+  "packageRules": [
+    // -- 1. OpenZeppelin and other audit-critical primitives ---------------
+    //
+    // OpenZeppelin v5 is pinned because:
+    //   - upgrades touch the upgradeable proxy / inheritance graph,
+    //   - every prior major release has shipped breaking storage-layout
+    //     changes that affect deployed bytecode,
+    //   - audit scope of the current deployment is 5.0.x.
+    // Bumping OpenZeppelin requires a re-audit, so Renovate stays out.
+    //
+    // Use a wildcard-prefix match to ignore the metapackage + any
+    // future @openzeppelin/* subpackages without editing this file.
+    {
+      "description": "Pin OpenZeppelin — manual upgrade requires re-audit.",
+      "matchPackagePatterns": ["^@openzeppelin/contracts($|/.*)"],
+      "enabled": false,
+    },
+
+    // -- 2. Solidity contract deps (other than OpenZeppelin) ---------------
+    {
+      "description": "Hardhat/foundry tooling — grouped weekly, manual review.",
+      "matchFileNames": ["contracts/**"],
+      "groupName": "Solidity Toolchain (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "contracts"],
+      "dependencyDashboardApproval": true,
+    },
+
+    // -- 3. Soroban (Rust/Stellar) contracts -------------------------------
+    //
+    // Same reasoning as Solidity — funds move under these crates.
+    {
+      "description": "Soroban Rust deps — grouped weekly, manual review.",
+      "matchManagers": ["cargo"],
+      "groupName": "Soroban Rust Dependencies (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "soroban"],
+      "dependencyDashboardApproval": true,
+    },
+
+    // -- 4. SDK + shared types -------------------------------------------
+    //
+    // The SDK is consumed by every other service; a regression here
+    // breaks every downstream package. Group all SDK bumps together so
+    // reviewers see one PR.
+    {
+      "description": "SDK runtime deps — grouped weekly.",
+      "matchFileNames": ["packages/sdk/**"],
+      "groupName": "SDK Runtime (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "sdk"],
+    },
+
+    // -- 5. Other services, runtime deps ---------------------------------
+    {
+      "description": "Service runtime deps (coordinator/relayer/resolver) — grouped weekly.",
+      "matchFileNames": [
+        "coordinator/package.json",
+        "relayer/package.json",
+        "resolver/package.json",
+      ],
+      "groupName": "Service Runtime (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies"],
+    },
+
+    // -- 6. Frontend runtime + dev deps ----------------------------------
+    {
+      "description": "Frontend runtime deps — grouped weekly.",
+      "matchFileNames": ["frontend/**"],
+      "matchDepTypes": ["dependencies"],
+      "groupName": "Frontend Runtime (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "frontend"],
+    },
+
+    // -- 7. ALL devDependencies ------------------------------------------
+    //
+    // Largest noise reduction. dev deps never move user funds and never
+    // reach production bundles — group them into a single weekly PR so
+    // we get one review instead of thirty.
+    {
+      "description": "All devDependencies across workspace — one weekly PR.",
+      "matchDepTypes": ["devDependencies"],
+      "groupName": "DevDependencies (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "chore"],
+    },
+
+    // -- 8. GitHub Actions -----------------------------------------------
+    //
+    // Action versions are pinned by Renovate to commit SHA by default,
+    // but keep them grouped so the review is one diff.
+    {
+      "description": "GitHub Actions — grouped weekly.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions (Weekly)",
+      "schedule": ["before 6am on monday"],
+      "labels": ["dependencies", "ci"],
+    },
+
+    // -- 9. Major-version bumps -----------------------------------------
+    //
+    // Major bumps are NOT grouped with weekly batches — they get a
+    // standalone PR with a "major" label so reviewers know to expect
+    // breaking changes.
+    {
+      "description": "Major bumps — standalone PRs.",
+      "matchUpdateTypes": ["major"],
+      "groupName": null,
+      "labels": ["dependencies", "breaking"],
+      "prPriority": 5,
+    },
+  ],
+
+  // Surface failures and conflicts loudly. Renovate creates rebase/squash
+  // MR-style PRs; merged failures show in the dashboard.
+  "rebaseWhen": "behind-base-branch",
+  "rebaseLabel": "renovate-rebase",
+}

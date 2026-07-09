@@ -32,11 +32,11 @@ import { createApp } from "../src/server/app.js";
 const log = pino({ level: "silent" });
 
 /** Ethereum address used as src/dst in eth_to_xlm tests. */
-const ETH_ADDR    = "0x1111111111111111111111111111111111111111";
+const ETH_ADDR = "0x1111111111111111111111111111111111111111";
 /** Stellar address used as dst in eth_to_xlm and src in xlm_to_eth tests. */
 const STELLAR_ADDR = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422";
 /** Solana address used as src in sol_to_eth tests. */
-const SOLANA_ADDR  = "11111111111111111111111111111111";
+const SOLANA_ADDR = "11111111111111111111111111111111";
 
 /**
  * Spin up a fresh, fully isolated Express application backed by an
@@ -44,12 +44,12 @@ const SOLANA_ADDR  = "11111111111111111111111111111111";
  * so tests cannot share or corrupt each other's state.
  */
 async function freshApp() {
-  const dir  = mkdtempSync(resolve(tmpdir(), "waffle-smoke-"));
-  const db   = await openDatabase(`file:${dir}/test.db`);
+  const dir = mkdtempSync(resolve(tmpdir(), "waffle-smoke-"));
+  const db = await openDatabase(`file:${dir}/test.db`);
   const repo = new OrdersRepository(db);
-  const orders  = new OrderService(repo, log);
+  const orders = new OrderService(repo, log);
   const secrets = new SecretService(orders, log);
-  const quotes  = new QuoteService(log);
+  const quotes = new QuoteService(log);
   return createApp({ log, corsOrigin: "*", orders, secrets, quotes });
 }
 
@@ -61,7 +61,7 @@ async function freshApp() {
  * failures reproducible without requiring the SDK crypto module.
  */
 function makeSecret(seedByte: string): { preimage: string; hashlock: string } {
-  const rawHex  = seedByte.repeat(32);               // 64 hex chars = 32 bytes
+  const rawHex = seedByte.repeat(32);               // 64 hex chars = 32 bytes
   const preimage = `0x${rawHex}`;
   const hashlock = `0x${createHash("sha256").update(Buffer.from(rawHex, "hex")).digest("hex")}`;
   return { preimage, hashlock };
@@ -196,8 +196,27 @@ describe("smoke: announce an order", () => {
 //
 // The src-locked step advances the order into a state that permits the
 // secret-reveal transition (see coordinator/src/state-machine/order-machine.ts).
+//
+// src-locked is a privileged operator endpoint (see issue #138) — this flow
+// must present a valid operator bearer token, the same as production
+// relayer/resolver callers would.
 
 describe("smoke: reveal a secret", () => {
+  const TEST_OPERATOR_KEY = "smoke-test-operator-token";
+  const originalOperatorKeys = process.env.COORDINATOR_OPERATOR_KEYS;
+
+  beforeEach(() => {
+    process.env.COORDINATOR_OPERATOR_KEYS = TEST_OPERATOR_KEY;
+  });
+
+  afterEach(() => {
+    if (originalOperatorKeys === undefined) {
+      delete process.env.COORDINATOR_OPERATOR_KEYS;
+    } else {
+      process.env.COORDINATOR_OPERATOR_KEYS = originalOperatorKeys;
+    }
+  });
+
   it("preimage is retrievable after announce → src-lock → reveal", async () => {
     const app = await freshApp();
     const { preimage, hashlock } = makeSecret("b2");
@@ -225,6 +244,7 @@ describe("smoke: reveal a secret", () => {
     // Step 2 — record source lock (transitions status to src_locked)
     const srcLocked = await request(app)
       .post(`/api/orders/${orderId}/src-locked`)
+      .set("Authorization", `Bearer ${TEST_OPERATOR_KEY}`)
       .send({
         orderId: "solana-order-0001",
         txHash: "0xaabbccdd00000000000000000000000000000000000000000000000000000001",
