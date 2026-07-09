@@ -11,7 +11,7 @@ export interface TelemetryPayload {
   state?: Record<string, any>;
 }
 
-export function classifyError(error: any, walletType: 'metamask' | 'freighter' | 'unknown'): {
+export function classifyError(error: any, _walletType: 'metamask' | 'freighter' | 'unknown'): {
   failureType: TelemetryFailureType;
   errorCode?: string | number;
   errorMessage: string;

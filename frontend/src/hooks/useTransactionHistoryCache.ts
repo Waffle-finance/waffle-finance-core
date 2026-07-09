@@ -32,6 +32,7 @@ export interface Transaction {
   lastUpdatedTimestamp?: number;
   errorState?: string;
   correlationId?: string;
+  hashlock?: string;
 }
 
 interface HistoryCachePayload {
@@ -214,6 +215,7 @@ function mapCoordinatorOrderToTransaction(order: any): Transaction {
     lastUpdatedTimestamp: order.lastUpdatedTimestamp || order.updatedAt,
     errorState: order.errorState || undefined,
     correlationId: order.correlationId || undefined,
+    hashlock: order.hashlock || undefined,
   };
 }
 
