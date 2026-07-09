@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { privateKeyToAccount } from "viem/accounts";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
-import { resolveEthereumRpcUrl } from "./ethereum-rpc-url.js";
 
 // Common Schemas
 export const networkModeSchema = z.enum(["testnet", "mainnet"]).default("testnet");

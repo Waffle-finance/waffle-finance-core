@@ -56,19 +56,15 @@ describe("Cursor Pagination Integration", () => {
   describe("OrderService.historyWithCursor", () => {
     it("integrates cache with database queries", async () => {
       await createTestOrders(service, 5, VALID_ETH_ADDR);
-      
-      // First request should hit database
-      const start1 = Date.now();
+
+      // First request should hit database and populate cache.
       const result1 = await service.historyWithCursor(VALID_ETH_ADDR, 3);
-      const time1 = Date.now() - start1;
-      
-      // Second identical request should hit cache
-      const start2 = Date.now();
+      expect(service.getCacheStats().size).toBe(1);
+
+      // Second identical request should hit cache (no re-cached entry).
       const result2 = await service.historyWithCursor(VALID_ETH_ADDR, 3);
-      const time2 = Date.now() - start2;
-      
+      expect(service.getCacheStats().size).toBe(1);
       expect(result1).toEqual(result2);
-      expect(time2).toBeLessThan(time1); // Cache should be faster
     });
 
     it("invalidates cache on new order announcement", async () => {
