@@ -5,10 +5,10 @@
 
 import { EventEmitter } from 'events';
 import { OrdersService } from './orders.js';
-import { ethereumListener } from './ethereum-listener.js';
 import FusionEventManager, { EventType } from '../events/event-handlers.js';
 import { ActiveOrder } from './types.js';
 import { getCurrentTimestamp } from './utils.js';
+import { KeyedMutex } from '../utils/concurrency.js';
 
 // Recovery status types
 export enum RecoveryStatus {
@@ -76,6 +76,7 @@ export class RecoveryService extends EventEmitter {
   private recoveryRequests: Map<string, RecoveryRequest> = new Map();
   private monitoringInterval: NodeJS.Timeout | null = null;
   private stats: RecoveryStats;
+  private recoveryMutex = new KeyedMutex();
 
   constructor(
     ordersService: OrdersService,
@@ -142,9 +143,11 @@ export class RecoveryService extends EventEmitter {
       const currentTime = getCurrentTimestamp();
 
       for (const order of activeOrders.items) {
-        if (this.shouldInitiateRecovery(order, currentTime)) {
-          await this.initiateTimeoutRecovery(order);
-        }
+        await this.recoveryMutex.runExclusive(order.orderHash, async () => {
+          if (this.shouldInitiateRecovery(order, currentTime)) {
+            await this.initiateTimeoutRecovery(order);
+          }
+        });
       }
     } catch (error) {
       console.error('❌ Recovery monitoring error:', error);
@@ -429,7 +432,9 @@ export class RecoveryService extends EventEmitter {
     recovery.status = RecoveryStatus.Pending;
     recovery.updatedAt = getCurrentTimestamp();
 
-    await this.executeRecovery(recoveryId);
+    await this.recoveryMutex.runExclusive(recovery.orderHash, async () => {
+      await this.executeRecovery(recoveryId);
+    });
   }
 
   /**
@@ -462,7 +467,9 @@ export class RecoveryService extends EventEmitter {
     console.log(`🔄 orderHash=${orderHash} Manual recovery initiated: ${recoveryId} by ${initiator}`);
     
     // Execute recovery
-    await this.executeRecovery(recoveryId);
+    await this.recoveryMutex.runExclusive(orderHash, async () => {
+      await this.executeRecovery(recoveryId);
+    });
     
     return recoveryId;
   }

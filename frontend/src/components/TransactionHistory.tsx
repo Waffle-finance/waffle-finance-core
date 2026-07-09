@@ -10,13 +10,15 @@ interface TransactionHistoryProps {
   stellarAddress?: string;
 }
 
-type TransactionFilter = 'all' | 'pending' | 'completed' | 'cancelled';
+type TransactionFilter = 'all' | 'pending' | 'completed' | 'confirmed' | 'cancelled' | 'failed' | 'refunded' | 'expired' | 'timed_out';
 
 const FILTER_OPTIONS: Array<{ key: TransactionFilter; label: string }> = [
   { key: 'all', label: 'All' },
   { key: 'pending', label: 'Pending' },
   { key: 'completed', label: 'Completed' },
-  { key: 'cancelled', label: 'Cancelled' },
+  { key: 'failed', label: 'Failed' },
+  { key: 'refunded', label: 'Refunded' },
+  { key: 'timed_out', label: 'Timed out' },
 ];
 
 const PRODUCTION_API_BASE_URL = 'https://oversync-k36vx.ondigitalocean.app';
@@ -48,9 +50,23 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     apiBase: API_BASE_URL,
   });
 
+  const getStatusLabel = (status: Transaction['status']): string => {
+    switch (status) {
+      case 'confirmed':
+        return 'Confirmed';
+      case 'timed_out':
+        return 'Timed out';
+      case 'expired':
+        return 'Expired';
+      default:
+        return status.charAt(0).toUpperCase() + status.slice(1);
+    }
+  };
+
   const getStatusColor = (status: Transaction['status']) => {
     switch (status) {
       case 'completed':
+      case 'confirmed':
         return 'text-green-400 bg-green-500/20';
       case 'pending':
         return 'text-yellow-400 bg-yellow-500/20';
@@ -58,6 +74,11 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
         return 'text-gray-400 bg-gray-500/20';
       case 'failed':
         return 'text-red-400 bg-red-500/20';
+      case 'refunded':
+        return 'text-emerald-400 bg-emerald-500/20';
+      case 'expired':
+      case 'timed_out':
+        return 'text-orange-400 bg-orange-500/20';
       default:
         return 'text-gray-400 bg-gray-500/20';
     }
@@ -66,13 +87,18 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
   const getStatusIcon = (status: Transaction['status']) => {
     switch (status) {
       case 'completed':
+      case 'confirmed':
         return <CheckCircle className="h-4 w-4" />;
       case 'pending':
         return <Clock className="h-4 w-4" />;
       case 'cancelled':
-        return <XCircle className="h-4 w-4" />;
       case 'failed':
         return <XCircle className="h-4 w-4" />;
+      case 'refunded':
+        return <Undo2 className="h-4 w-4" />;
+      case 'expired':
+      case 'timed_out':
+        return <Clock className="h-4 w-4" />;
       default:
         return <Clock className="h-4 w-4" />;
     }
@@ -168,6 +194,43 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
    * heuristic: Ethereum hashes are 0x-prefixed, Stellar hashes are not.
    */
 
+  const getRefundExplorerUrl = (tx: Transaction): string => {
+    if (!tx.refundTxHash) return '#';
+    return getRefundNetwork(tx) === 'ethereum'
+      ? getEtherscanUrl(tx.refundTxHash)
+      : getStellarExplorerUrl(tx.refundTxHash);
+  };
+
+  const getRefundNetworkLabel = (tx: Transaction): string =>
+    getRefundNetwork(tx) === 'ethereum' ? 'Ethereum' : 'Stellar';
+
+  /**
+   * A pending ETH→XLM swap is "refundable" once we have all three on-chain
+   * coordinates and the order is still in pending/failed/expired state. We do NOT
+   * gate on time here — RefundDialog itself enforces the timelock and only
+   * unlocks the button after it expires.
+   */
+  const canRefund = (tx: Transaction): boolean => {
+    return (
+      tx.direction === 'eth-to-xlm' &&
+      (tx.status === 'pending' || tx.status === 'failed' || tx.status === 'expired' || tx.status === 'timed_out') &&
+      !tx.refundedAt &&
+      !!tx.onChainOrderId &&
+      !!tx.htlcContractAddress &&
+      !!tx.timelockUnixSeconds
+    );
+  };
+
+  const canManualRefundXlm = (tx: Transaction): boolean => {
+    return (
+      tx.direction === 'xlm-to-eth' &&
+      tx.status === 'failed' &&
+      tx.autoRefundFailed === true &&
+      !tx.refundedAt &&
+      !!(tx.stellarTxHash || tx.txHash) &&
+      !!(tx.stellarAddress || stellarAddress)
+    );
+  };
 
   const markRefunded = (
     orderId: string,
@@ -179,7 +242,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
         tx.id === orderId
           ? {
               ...tx,
-              status: 'cancelled' as const,
+              status: 'refunded' as const,
               refundTxHash: refundHash,
               refundNetwork,
               refundedAt: Date.now(),
@@ -300,7 +363,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                 <div className="flex items-center gap-3">
                   <div className={`flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${getStatusColor(tx.status)}`}>
                     {getStatusIcon(tx.status)}
-                    <span className="capitalize">{tx.status}</span>
+                    <span>{getStatusLabel(tx.status)}</span>
                   </div>
                   <span className="text-xs text-slate-400">
                     {formatTime(tx.timestamp)}

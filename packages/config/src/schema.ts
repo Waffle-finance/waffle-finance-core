@@ -197,6 +197,11 @@ export const resolverConfigSchema = z.object({
       })
       .transform((v) => v as string | null),
   }),
+  rpc: z.object({
+    maxRetries: z.coerce.number().int().nonnegative().default(3),
+    baseDelayMs: z.coerce.number().int().nonnegative().default(100),
+    maxDelayMs: z.coerce.number().int().nonnegative().default(2000),
+  }).default({}),
 });
 
 export type ResolverConfig = z.infer<typeof resolverConfigSchema>;

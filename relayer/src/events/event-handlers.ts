@@ -136,6 +136,7 @@ export interface EventListener {
 export class FusionEventManager extends EventEmitter {
   private eventListeners: Map<string, EventListener> = new Map();
   private eventHistory: EventMessage[] = [];
+  private processedEventKeys: Set<string> = new Set();
   private readonly MAX_HISTORY_SIZE = 500;
   private ordersService: OrdersService;
   private progressiveFillManager?: ProgressiveFillManager;
@@ -298,6 +299,29 @@ export class FusionEventManager extends EventEmitter {
    * Emit event to all matching listeners
    */
   emitEvent(eventType: EventType, data: any, metadata: EventMessage['metadata'] = {}): void {
+    // Generate idempotency key for deduplication
+    let idempotencyKey = '';
+    if (metadata.orderHash) {
+      const uniqueId = data.txHash || (data.fragmentIndex !== undefined ? data.fragmentIndex.toString() : null) || JSON.stringify(data);
+      idempotencyKey = `${eventType}:${metadata.orderHash}:${uniqueId}`;
+    } else {
+      idempotencyKey = `${eventType}:${data.txHash || JSON.stringify(data)}`;
+    }
+
+    if (this.processedEventKeys.has(idempotencyKey)) {
+      const hashTag = metadata.orderHash ? ` orderHash=${metadata.orderHash}` : '';
+      console.log(`📡${hashTag} Duplicate event ignored: ${eventType}`);
+      return;
+    }
+    
+    this.processedEventKeys.add(idempotencyKey);
+    if (this.processedEventKeys.size > 2000) {
+      const iterator = this.processedEventKeys.values();
+      if (iterator.next().value) {
+        this.processedEventKeys.delete(iterator.next().value!);
+      }
+    }
+
     const eventMessage: EventMessage = {
       eventId: this.generateId(),
       eventType,

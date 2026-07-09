@@ -85,6 +85,67 @@ describe("OrderService", () => {
 
   // Cross-field (direction/chain) and address validation now lives in
   // `announceSchema` — see announce-schema.test.ts for the full matrix.
+
+  it("ignores duplicate srcLock and dstLock events idempotently", async () => {
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+    const order = await orders.announce({
+      direction: "eth_to_xlm",
+      hashlock: VALID_HASHLOCK,
+      srcChain: "ethereum",
+      srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native",
+      srcAmount: "1",
+      srcSafetyDeposit: "1",
+      dstChain: "stellar",
+      dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native",
+      dstAmount: "1"
+    });
+
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "1",
+      txHash: "0xsrc",
+      blockNumber: 1,
+      timelock: 0
+    });
+
+    const list1 = await orders.get(order.publicId);
+    expect(list1!.status).toBe("src_locked");
+
+    // Send the same srcLock again
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "1",
+      txHash: "0xsrc",
+      blockNumber: 1,
+      timelock: 0
+    });
+
+    // Send dstLock
+    await orders.recordDstLock({
+      publicId: order.publicId,
+      orderId: "2",
+      txHash: "0xdst",
+      blockNumber: 2,
+      timelock: 0,
+      resolver: null
+    });
+
+    // Send the same dstLock again
+    await orders.recordDstLock({
+      publicId: order.publicId,
+      orderId: "2",
+      txHash: "0xdst",
+      blockNumber: 2,
+      timelock: 0,
+      resolver: null
+    });
+
+    const list2 = await orders.get(order.publicId);
+    expect(list2!.status).toBe("dst_locked");
+  });
 });
 
 describe("SecretService", () => {
