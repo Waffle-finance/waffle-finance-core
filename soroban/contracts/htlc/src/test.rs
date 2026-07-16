@@ -1,11 +1,19 @@
+
 #![cfg(test)]
 
-use crate::{Error, HtlcContract, HtlcContractClient, Order, OrderStatus};
+use crate::{
+    DataKey, Error, HtlcContract, HtlcContractClient, Order, OrderStatus,
+    ASSUMED_MIN_LEDGER_TIME_SECS, FINALISED_ORDER_TTL_LEDGERS, INSTANCE_TTL_EXTEND_TO,
+    INSTANCE_TTL_THRESHOLD, MAX_TIMELOCK_SECONDS, ORDER_TTL_MARGIN_LEDGERS,
+};
 use wafflefinance_resolver_registry::{ResolverRegistry, ResolverRegistryClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Ledger, LedgerInfo,
+    },
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env,
+    Address, Bytes, BytesN, Env, Symbol,
 };
 
 fn deploy_token<'a>(env: &Env, admin: &Address) -> (Address, StellarAssetClient<'a>, TokenClient<'a>) {
@@ -542,5 +550,280 @@ fn clear_resolver_registry_restores_permissionless_create_order() {
         &600u64,
     );
     assert_eq!(order_id, 1);
+}
+
+// ---------------------------------------------------------------------
+// State-archival (TTL) management
+// ---------------------------------------------------------------------
+
+/// Advance only the ledger sequence number (TTLs are denominated in
+/// ledgers, so this is what erodes an entry's remaining TTL).
+fn advance_sequence(env: &Env, ledgers: u32) {
+    env.ledger().with_mut(|li| {
+        li.sequence_number += ledgers;
+    });
+}
+
+fn order_ttl(env: &Env, htlc: &HtlcContractClient, order_id: u64) -> u32 {
+    env.as_contract(&htlc.address, || {
+        env.storage().persistent().get_ttl(&DataKey::Order(order_id))
+    })
+}
+
+fn instance_ttl(env: &Env, htlc: &HtlcContractClient) -> u32 {
+    env.as_contract(&htlc.address, || env.storage().instance().get_ttl())
+}
+
+/// Keep the SAC token's own ledger entries alive across large sequence
+/// jumps. The test env archives the token's instance and balance
+/// entries like any other entry, which would make transfers fail for
+/// reasons unrelated to the HTLC under test. The balance key mirrors
+/// the built-in SAC's `DataKey::Balance(Address)` encoding.
+fn keep_token_alive(env: &Env, asset: &Address, holders: &[&Address]) {
+    const LONG: u32 = 5_000_000;
+    env.as_contract(asset, || {
+        env.storage().instance().extend_ttl(LONG, LONG);
+        for holder in holders {
+            let key = (Symbol::new(env, "Balance"), (*holder).clone());
+            env.storage().persistent().extend_ttl(&key, LONG, LONG);
+        }
+    });
+}
+
+/// Create a funded order with the given timelock and return its id.
+fn create_test_order(
+    env: &Env,
+    htlc: &HtlcContractClient,
+    asset: &Address,
+    sac: &StellarAssetClient,
+    timelock_seconds: u64,
+) -> u64 {
+    let sender = Address::generate(env);
+    let beneficiary = Address::generate(env);
+    sac.mint(&sender, &100_0000000);
+    let preimage = Bytes::from_array(env, &[21u8; 32]);
+    let hashlock = sha256_32(env, &preimage);
+    htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &timelock_seconds,
+    )
+}
+
+#[test]
+fn order_ttl_at_creation_covers_max_timelock_plus_margin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let order_id = create_test_order(&env, &htlc, &asset, &sac, MAX_TIMELOCK_SECONDS);
+
+    let ttl = order_ttl(&env, &htlc, order_id);
+    // The entry must stay live for the full timelock (converted at the
+    // conservative close time) plus the safety margin.
+    let expected = (MAX_TIMELOCK_SECONDS / ASSUMED_MIN_LEDGER_TIME_SECS) as u32
+        + ORDER_TTL_MARGIN_LEDGERS;
+    assert!(ttl >= expected, "ttl {ttl} < expected {expected}");
+    // Sanity: the covered wall-clock time exceeds the timelock itself.
+    assert!(ttl as u64 * ASSUMED_MIN_LEDGER_TIME_SECS > MAX_TIMELOCK_SECONDS);
+}
+
+#[test]
+fn order_ttl_scales_with_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let short = create_test_order(&env, &htlc, &asset, &sac, 600);
+    let long = create_test_order(&env, &htlc, &asset, &sac, MAX_TIMELOCK_SECONDS);
+
+    let short_ttl = order_ttl(&env, &htlc, short);
+    let long_ttl = order_ttl(&env, &htlc, long);
+    assert!(short_ttl >= ORDER_TTL_MARGIN_LEDGERS);
+    // A longer timelock buys a proportionally longer entry TTL — the
+    // TTL is not a fixed creation-time constant.
+    let expected_gap = ((MAX_TIMELOCK_SECONDS - 600) / ASSUMED_MIN_LEDGER_TIME_SECS) as u32;
+    assert_eq!(long_ttl - short_ttl, expected_gap);
+}
+
+#[test]
+fn claim_and_refund_extend_terminal_order_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[22u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let claimed_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+    let refunded_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+
+    // Erode some TTL so the terminal extension is observable.
+    advance_sequence(&env, 10_000);
+    assert!(order_ttl(&env, &htlc, claimed_id) < FINALISED_ORDER_TTL_LEDGERS);
+
+    htlc.claim_order(&claimed_id, &preimage, &beneficiary);
+    assert_eq!(order_ttl(&env, &htlc, claimed_id), FINALISED_ORDER_TTL_LEDGERS);
+
+    advance_ledger(&env, 601);
+    htlc.refund_order(&refunded_id, &beneficiary);
+    assert_eq!(order_ttl(&env, &htlc, refunded_id), FINALISED_ORDER_TTL_LEDGERS);
+}
+
+#[test]
+fn extend_order_ttl_keeps_live_order_alive() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let order_id = create_test_order(&env, &htlc, &asset, &sac, 600);
+    let initial_ttl = order_ttl(&env, &htlc, order_id);
+
+    // Burn most of the entry's TTL without advancing wall-clock time,
+    // then let a third party bump it back.
+    advance_sequence(&env, initial_ttl - 100);
+    assert_eq!(order_ttl(&env, &htlc, order_id), 100);
+
+    htlc.extend_order_ttl(&order_id);
+    // The order is still funded with its full timelock remaining, so
+    // the keep-alive restores the creation-sized TTL.
+    assert_eq!(order_ttl(&env, &htlc, order_id), initial_ttl);
+}
+
+#[test]
+fn extend_order_ttl_unknown_order_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    let res = htlc.try_extend_order_ttl(&999u64);
+    assert_eq!(res.err().unwrap().unwrap(), Error::OrderNotFound.into());
+}
+
+#[test]
+fn instance_ttl_extended_on_admin_setters() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    // initialize itself extends the instance TTL.
+    assert!(instance_ttl(&env, &htlc) >= INSTANCE_TTL_EXTEND_TO);
+
+    // Erode the instance TTL to below the refresh threshold; each admin
+    // setter must bump it back to the full target.
+    let erosion = INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1;
+    advance_sequence(&env, erosion);
+    assert!(instance_ttl(&env, &htlc) < INSTANCE_TTL_THRESHOLD);
+    htlc.set_min_safety_deposit(&1);
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+
+    advance_sequence(&env, erosion);
+    let new_admin = Address::generate(&env);
+    htlc.set_admin(&new_admin);
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+}
+
+#[test]
+fn instance_ttl_extended_on_create_claim_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    let erosion = INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1;
+    let half = erosion / 2;
+
+    // --- create_order refreshes an instance below the threshold ---
+    advance_sequence(&env, erosion);
+    assert!(instance_ttl(&env, &htlc) < INSTANCE_TTL_THRESHOLD);
+
+    // The token is deployed only now, so its entries are fresh.
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[24u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let claimed_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &MAX_TIMELOCK_SECONDS,
+    );
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+    let refunded_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+    keep_token_alive(&env, &asset, &[&sender, &htlc.address]);
+
+    // --- claim_order refreshes an instance below the threshold ---
+    // Erode in two steps with permissionless keep-alives in between so
+    // the order entries survive while the instance TTL crosses the
+    // threshold. The mid-cycle keep-alives run with the instance still
+    // above the threshold, so they don't refresh it themselves.
+    advance_sequence(&env, half);
+    htlc.extend_order_ttl(&claimed_id);
+    htlc.extend_order_ttl(&refunded_id);
+    advance_sequence(&env, erosion - half);
+    assert!(instance_ttl(&env, &htlc) < INSTANCE_TTL_THRESHOLD);
+    htlc.claim_order(&claimed_id, &preimage, &beneficiary);
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+
+    // --- refund_order refreshes an instance below the threshold ---
+    htlc.extend_order_ttl(&refunded_id);
+    advance_ledger(&env, 601); // expire the 600 s order
+    advance_sequence(&env, half);
+    htlc.extend_order_ttl(&refunded_id);
+    advance_sequence(&env, erosion - half);
+    assert!(instance_ttl(&env, &htlc) < INSTANCE_TTL_THRESHOLD);
+    let cleaner = Address::generate(&env);
+    htlc.refund_order(&refunded_id, &cleaner);
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
 }
 

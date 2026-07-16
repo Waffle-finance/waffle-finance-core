@@ -18,6 +18,40 @@
 //! constrained by the on-ledger hashlock + timelock. No address —
 //! including the coordinator or admin — can move locked funds without
 //! satisfying these conditions.
+//!
+//! # State archival (TTL) behaviour
+//!
+//! Soroban archives ledger entries whose TTL expires. For a
+//! funds-holding contract this is a liveness hazard: an archived
+//! `Order` entry makes `claim_order`/`refund_order` fail exactly when
+//! funds are at stake, and an archived instance makes *every*
+//! invocation fail until the instance is restored. This contract
+//! manages TTLs so that neither happens in normal operation:
+//!
+//! - **Instance storage** (admin, order-id counter, config) is
+//!   re-extended on every state-mutating entry point, so any activity
+//!   keeps the contract alive for at least [`INSTANCE_TTL_EXTEND_TO`]
+//!   ledgers (~30 days).
+//! - **Order entries** get a TTL at creation derived from the order's
+//!   own `timelock_seconds` (converted to ledgers assuming the
+//!   fastest plausible ledger close time) plus a
+//!   [`ORDER_TTL_MARGIN_LEDGERS`] safety margin (~14 days), so the
+//!   entry outlives the claim window and the post-expiry refund
+//!   window.
+//! - `claim_order` / `refund_order` re-extend the entry when writing
+//!   the terminal state, so claimed/refunded records stay queryable
+//!   for indexers and reconciliation for ~30 days.
+//! - [`HtlcContract::extend_order_ttl`] is a public, permissionless
+//!   keep-alive: anyone can bump a live order's TTL if a claim window
+//!   risks straddling an archival boundary (e.g. after a long period
+//!   of network-wide TTL reductions).
+//!
+//! If an entry is archived anyway (e.g. the contract sits idle past
+//! its instance TTL), no funds are lost: archived persistent and
+//! instance entries can be restored with a standard
+//! `RestoreFootprint` operation (paying the rent bump), after which
+//! claim/refund proceed normally under the original hashlock +
+//! timelock rules.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
@@ -35,6 +69,44 @@ const MAX_TIMELOCK_SECONDS: u64 = 86_400;
 /// Minimum allowed timelock duration in seconds (5 minutes).
 /// Ensures there is enough time for the user to actually claim.
 const MIN_TIMELOCK_SECONDS: u64 = 300;
+
+// ---------------------------------------------------------------------
+// State-archival (TTL) parameters
+//
+// Soroban TTLs are denominated in ledgers, while order timelocks are
+// denominated in seconds. Mainnet targets ~5 s per ledger, but close
+// times can dip below that; converting with a conservative 4 s/ledger
+// over-provisions the ledger count so the wall-clock coverage still
+// holds if ledgers close faster than the target.
+// ---------------------------------------------------------------------
+
+/// Conservative (fastest plausible) ledger close time used to convert
+/// seconds to ledgers when sizing TTLs.
+const ASSUMED_MIN_LEDGER_TIME_SECS: u64 = 4;
+
+/// Ledgers per day at [`ASSUMED_MIN_LEDGER_TIME_SECS`] (21,600).
+const LEDGERS_PER_DAY: u32 = (24 * 3600 / ASSUMED_MIN_LEDGER_TIME_SECS) as u32;
+
+/// When the instance TTL falls below this threshold (~14 days), a
+/// state-mutating call re-extends it. Chosen so that any activity at
+/// least fortnightly keeps the instance permanently live.
+const INSTANCE_TTL_THRESHOLD: u32 = 14 * LEDGERS_PER_DAY;
+
+/// Target instance TTL (~30 days). A quiet contract stays invocable
+/// for a month after its last state-mutating call before the instance
+/// (and admin/config entries) can be archived and need restoring.
+const INSTANCE_TTL_EXTEND_TO: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Safety margin (~14 days) added on top of an order's timelock when
+/// sizing its entry TTL. Covers the post-expiry refund window and
+/// clock/close-time drift, so the entry cannot be archived while
+/// either claim or refund is still actionable.
+const ORDER_TTL_MARGIN_LEDGERS: u32 = 14 * LEDGERS_PER_DAY;
+
+/// TTL (~30 days) applied to an order entry when it reaches a terminal
+/// state (claimed/refunded), keeping the record queryable for indexers
+/// and off-chain reconciliation.
+const FINALISED_ORDER_TTL_LEDGERS: u32 = 30 * LEDGERS_PER_DAY;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -164,7 +236,7 @@ impl HtlcContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextOrderId, &1u64);
         env.storage().instance().set(&DataKey::MinSafetyDeposit, &min_safety_deposit);
-        env.storage().instance().extend_ttl(50_000, 100_000);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Set or update the resolver registry contract address. Pass
@@ -172,12 +244,14 @@ impl HtlcContract {
     pub fn set_resolver_registry(env: Env, registry: Address) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::ResolverRegistry, &registry);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Remove the resolver registry binding (any address may create orders).
     pub fn clear_resolver_registry(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().remove(&DataKey::ResolverRegistry);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Update the minimum safety deposit.
@@ -187,12 +261,14 @@ impl HtlcContract {
             panic_with_error!(&env, Error::InvalidAmount);
         }
         env.storage().instance().set(&DataKey::MinSafetyDeposit, &new_minimum);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Transfer admin role to a new address.
     pub fn set_admin(env: Env, new_admin: Address) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        Self::extend_instance_ttl(&env);
     }
 
     // ---------------------------------------------------------------------
@@ -299,9 +375,14 @@ impl HtlcContract {
         };
 
         env.storage().persistent().set(&DataKey::Order(order_id), &order);
+        // Size the entry's TTL to the order's actual lifetime (timelock
+        // plus margin) rather than a fixed constant, so the entry cannot
+        // be archived while claim or refund is still actionable.
+        let order_ttl = Self::order_ttl_ledgers(timelock_seconds);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Order(order_id), 50_000, 100_000);
+            .extend_ttl(&DataKey::Order(order_id), order_ttl, order_ttl);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (topic_created(), sender, beneficiary, hashlock),
@@ -358,6 +439,13 @@ impl HtlcContract {
         order.preimage = preimage.clone();
         order.finalised_at = env.ledger().timestamp();
         env.storage().persistent().set(&DataKey::Order(order_id), &order);
+        // Keep the terminal record alive for indexers/reconciliation.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Order(order_id),
+            FINALISED_ORDER_TTL_LEDGERS,
+            FINALISED_ORDER_TTL_LEDGERS,
+        );
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (topic_claimed(), order.beneficiary.clone(), order.hashlock.clone()),
@@ -402,11 +490,50 @@ impl HtlcContract {
         order.status = OrderStatus::Refunded;
         order.finalised_at = env.ledger().timestamp();
         env.storage().persistent().set(&DataKey::Order(order_id), &order);
+        // Keep the terminal record alive for indexers/reconciliation.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Order(order_id),
+            FINALISED_ORDER_TTL_LEDGERS,
+            FINALISED_ORDER_TTL_LEDGERS,
+        );
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (topic_refunded(), order.refund_address.clone(), order.hashlock.clone()),
             (order_id, caller, order.amount, order.safety_deposit),
         );
+    }
+
+    /// Permissionless keep-alive for an order's ledger entry.
+    ///
+    /// Anyone can call this to re-extend an order entry's TTL so it
+    /// cannot be archived while the order is still actionable — e.g.
+    /// when a claim window straddles an archival boundary. A funded
+    /// order is extended to cover its remaining timelock plus the
+    /// standard margin; a finalised order is extended by the terminal
+    /// retention period. Panics with [`Error::OrderNotFound`] if no
+    /// live entry exists for `order_id`.
+    pub fn extend_order_ttl(env: Env, order_id: u64) {
+        Self::require_initialised(&env);
+
+        let key = DataKey::Order(order_id);
+        let order: Order = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+
+        let extend_to = match order.status {
+            OrderStatus::Funded => {
+                let remaining_seconds = order
+                    .timelock
+                    .saturating_sub(env.ledger().timestamp());
+                Self::order_ttl_ledgers(remaining_seconds)
+            }
+            OrderStatus::Claimed | OrderStatus::Refunded => FINALISED_ORDER_TTL_LEDGERS,
+        };
+        env.storage().persistent().extend_ttl(&key, extend_to, extend_to);
+        Self::extend_instance_ttl(&env);
     }
 
     // ---------------------------------------------------------------------
@@ -450,6 +577,27 @@ impl HtlcContract {
         if !env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(env, Error::NotInitialised);
         }
+    }
+
+    /// Re-extend the instance TTL (admin, order-id counter, config).
+    /// Called from every state-mutating entry point so that ongoing
+    /// activity keeps the contract alive indefinitely.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+    }
+
+    /// TTL, in ledgers, that covers `timelock_seconds` of wall-clock
+    /// time (converted at the conservative
+    /// [`ASSUMED_MIN_LEDGER_TIME_SECS`] close time, rounded up) plus
+    /// [`ORDER_TTL_MARGIN_LEDGERS`].
+    fn order_ttl_ledgers(timelock_seconds: u64) -> u32 {
+        // timelock_seconds is bounded by MAX_TIMELOCK_SECONDS (86,400),
+        // so the conversion cannot overflow u32.
+        let timelock_ledgers =
+            timelock_seconds.div_ceil(ASSUMED_MIN_LEDGER_TIME_SECS) as u32;
+        timelock_ledgers + ORDER_TTL_MARGIN_LEDGERS
     }
 
     fn require_admin(env: &Env) {
