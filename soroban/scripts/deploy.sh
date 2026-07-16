@@ -50,23 +50,22 @@ fi
 ADMIN=$(stellar keys address "$DEPLOYER")
 echo "Deployer / admin address: $ADMIN"
 
-echo "== Deploying HTLC =="
+# Both contracts configure themselves in a constructor, so deployment
+# and initialisation are a single atomic transaction — there is no
+# window in which a third party can front-run an `initialize` call and
+# claim adminship. Constructor arguments are passed after `--`.
+
+echo "== Deploying HTLC (constructor sets admin + min safety deposit) =="
 HTLC_ID=$(stellar contract deploy \
     --network "$NETWORK" \
     --source "$DEPLOYER" \
-    --wasm "$HTLC_WASM")
+    --wasm "$HTLC_WASM" \
+    -- \
+    --admin "$ADMIN" \
+    --min_safety_deposit 1000000)
 echo "HTLC contract id: $HTLC_ID"
 
-echo "Initialising HTLC..."
-stellar contract invoke \
-    --network "$NETWORK" \
-    --source "$DEPLOYER" \
-    --id "$HTLC_ID" \
-    -- initialize \
-    --admin "$ADMIN" \
-    --min_safety_deposit 1000000
-
-echo "== Deploying ResolverRegistry =="
+echo "== Deploying ResolverRegistry (constructor sets admin + stake config) =="
 # For now we pass the native asset (XLM) as the stake asset on both
 # networks. Override the second argument here to use a different SAC.
 NATIVE_ASSET=$(stellar contract id asset --network "$NETWORK" --asset native)
@@ -74,19 +73,13 @@ NATIVE_ASSET=$(stellar contract id asset --network "$NETWORK" --asset native)
 REG_ID=$(stellar contract deploy \
     --network "$NETWORK" \
     --source "$DEPLOYER" \
-    --wasm "$REG_WASM")
-echo "ResolverRegistry contract id: $REG_ID"
-
-echo "Initialising ResolverRegistry..."
-stellar contract invoke \
-    --network "$NETWORK" \
-    --source "$DEPLOYER" \
-    --id "$REG_ID" \
-    -- initialize \
+    --wasm "$REG_WASM" \
+    -- \
     --admin "$ADMIN" \
     --stake_asset "$NATIVE_ASSET" \
     --min_stake 1000000000 \
-    --slash_beneficiary "$ADMIN"
+    --slash_beneficiary "$ADMIN")
+echo "ResolverRegistry contract id: $REG_ID"
 
 echo "Linking HTLC -> ResolverRegistry..."
 stellar contract invoke \

@@ -1,33 +1,10 @@
 {
   "generators": {
-    "address": 2,
+    "address": 5,
     "nonce": 0
   },
   "auth": [
     [],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "set_min_safety_deposit",
-              "args": [
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 500
-                  }
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
     []
   ],
   "ledger": {
@@ -43,40 +20,7 @@
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "ledger_key_nonce": {
-                "nonce": 801925984706572462
-              }
-            },
-            "durability": "temporary"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "ledger_key_nonce": {
-                    "nonce": 801925984706572462
-                  }
-                },
-                "durability": "temporary",
-                "val": "void"
-              }
-            },
-            "ext": "v0"
-          },
-          6311999
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -87,7 +31,7 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
                 "key": "ledger_key_contract_instance",
                 "durability": "persistent",
                 "val": {
@@ -112,14 +56,14 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "MinSafetyDeposit"
+                              "symbol": "MinStake"
                             }
                           ]
                         },
                         "val": {
                           "i128": {
                             "hi": 0,
-                            "lo": 500
+                            "lo": 1000000000
                           }
                         }
                       },
@@ -127,12 +71,36 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "NextOrderId"
+                              "symbol": "ResolverList"
                             }
                           ]
                         },
                         "val": {
-                          "u64": 1
+                          "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "SlashBeneficiary"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StakeAsset"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                         }
                       }
                     ]
@@ -142,7 +110,7 @@
             },
             "ext": "v0"
           },
-          648000
+          100000
         ]
       ],
       [
@@ -163,7 +131,7 @@
             },
             "ext": "v0"
           },
-          648000
+          100000
         ]
       ]
     ]

@@ -1,10 +1,9 @@
 {
   "generators": {
-    "address": 2,
+    "address": 5,
     "nonce": 0
   },
   "auth": [
-    [],
     [],
     [
       [
@@ -12,13 +11,13 @@
         {
           "function": {
             "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "set_min_safety_deposit",
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+              "function_name": "set_min_stake",
               "args": [
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 500
+                    "lo": 500000000
                   }
                 }
               ]
@@ -28,7 +27,25 @@
         }
       ]
     ],
-    []
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+              "function_name": "set_slash_beneficiary",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ]
   ],
   "ledger": {
     "protocol_version": 22,
@@ -76,7 +93,40 @@
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 5541220902715666415
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 5541220902715666415
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -87,7 +137,7 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
                 "key": "ledger_key_contract_instance",
                 "durability": "persistent",
                 "val": {
@@ -112,14 +162,14 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "MinSafetyDeposit"
+                              "symbol": "MinStake"
                             }
                           ]
                         },
                         "val": {
                           "i128": {
                             "hi": 0,
-                            "lo": 500
+                            "lo": 500000000
                           }
                         }
                       },
@@ -127,12 +177,36 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "NextOrderId"
+                              "symbol": "ResolverList"
                             }
                           ]
                         },
                         "val": {
-                          "u64": 1
+                          "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "SlashBeneficiary"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StakeAsset"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                         }
                       }
                     ]
@@ -142,7 +216,7 @@
             },
             "ext": "v0"
           },
-          648000
+          100000
         ]
       ],
       [
@@ -163,10 +237,41 @@
             },
             "ext": "v0"
           },
-          648000
+          100000
         ]
       ]
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000004",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "cfg"
+              },
+              {
+                "symbol": "slash_ben"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }

@@ -8,12 +8,13 @@ use crate::{
 };
 use wafflefinance_resolver_registry::{ResolverRegistry, ResolverRegistryClient};
 use soroban_sdk::{
+    symbol_short,
     testutils::{
         storage::{Instance as _, Persistent as _},
-        Address as _, Ledger, LedgerInfo,
+        Address as _, Events, Ledger, LedgerInfo, MockAuth, MockAuthInvoke,
     },
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, Symbol,
+    vec, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val,
 };
 
 fn deploy_token<'a>(env: &Env, admin: &Address) -> (Address, StellarAssetClient<'a>, TokenClient<'a>) {
@@ -32,11 +33,29 @@ fn sha256_32(env: &Env, bytes: &Bytes) -> BytesN<32> {
 
 fn setup(env: &Env, min_safety_deposit: i128) -> (Address, HtlcContractClient<'_>) {
     let admin = Address::generate(env);
-    let contract_id = env.register(HtlcContract, ());
+    // Deploy + configure atomically via the constructor.
+    let contract_id = env.register(HtlcContract, (admin.clone(), min_safety_deposit));
     let client = HtlcContractClient::new(env, &contract_id);
     env.mock_all_auths();
-    client.initialize(&admin, &min_safety_deposit);
     (admin, client)
+}
+
+/// Assert the last event published by the most recent invocation.
+/// Comparison happens between soroban Vecs because `Val` itself does
+/// not implement `PartialEq`.
+fn assert_last_event<T, D>(env: &Env, contract: &Address, topics: T, data: D)
+where
+    T: IntoVal<Env, soroban_sdk::Vec<Val>>,
+    D: IntoVal<Env, Val>,
+{
+    let all = env.events().all();
+    assert_eq!(
+        all.slice(all.len() - 1..),
+        vec![
+            env,
+            (contract.clone(), topics.into_val(env), data.into_val(env))
+        ]
+    );
 }
 
 fn advance_ledger(env: &Env, seconds: u64) {
@@ -346,13 +365,22 @@ fn admin_can_update_min_safety_deposit() {
 }
 
 #[test]
-fn initialise_twice_fails() {
+fn constructor_cannot_be_rerun_to_steal_admin() {
+    // The old post-deploy `initialize` could be front-run by anyone.
+    // With the constructor, configuration is atomic with deployment
+    // and there is no invocable (re-)initialisation entry point.
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, htlc) = setup(&env, 0);
-    let again = Address::generate(&env);
-    let res = htlc.try_initialize(&again, &0);
-    assert_eq!(res.err().unwrap().unwrap(), Error::AlreadyInitialised.into());
+    let (admin, htlc) = setup(&env, 0);
+
+    let attacker = Address::generate(&env);
+    let res = env.try_invoke_contract::<Val, soroban_sdk::Error>(
+        &htlc.address,
+        &Symbol::new(&env, "__constructor"),
+        vec![&env, attacker.into_val(&env), 0i128.into_val(&env)],
+    );
+    assert!(res.is_err());
+    assert_eq!(htlc.admin(), admin);
 }
 
 // ---------------------------------------------------------------------
@@ -369,9 +397,16 @@ fn setup_registry<'a>(
     let registry_admin = Address::generate(env);
     let slash_beneficiary = Address::generate(env);
     let min_stake: i128 = 100_0000000; // 100 stake-asset units
-    let registry_id = env.register(ResolverRegistry, ());
+    let registry_id = env.register(
+        ResolverRegistry,
+        (
+            registry_admin,
+            stake_asset.clone(),
+            min_stake,
+            slash_beneficiary,
+        ),
+    );
     let registry = ResolverRegistryClient::new(env, &registry_id);
-    registry.initialize(&registry_admin, stake_asset, &min_stake, &slash_beneficiary);
     (registry_id, registry, min_stake)
 }
 
@@ -753,8 +788,204 @@ fn instance_ttl_extended_on_admin_setters() {
 
     advance_sequence(&env, erosion);
     let new_admin = Address::generate(&env);
-    htlc.set_admin(&new_admin);
+    htlc.transfer_admin(&new_admin);
     assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+
+    advance_sequence(&env, erosion);
+    htlc.accept_admin();
+    assert_eq!(instance_ttl(&env, &htlc), INSTANCE_TTL_EXTEND_TO);
+}
+
+// ---------------------------------------------------------------------
+// Governance: two-step admin transfer + admin/config events
+// ---------------------------------------------------------------------
+
+#[test]
+fn admin_transfer_requires_accept_and_emits_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, htlc) = setup(&env, 0);
+    let new_admin = Address::generate(&env);
+
+    htlc.transfer_admin(&new_admin);
+    // The event log only holds the most recent invocation, so assert
+    // it before any getter calls.
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("adm_xfer"), symbol_short!("proposed")),
+        (admin.clone(), new_admin.clone()),
+    );
+    // Role has not moved yet; only a proposal exists.
+    assert_eq!(htlc.admin(), admin);
+    assert_eq!(htlc.pending_admin(), Some(new_admin.clone()));
+
+    htlc.accept_admin();
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("adm_xfer"), symbol_short!("accepted")),
+        (admin, new_admin.clone()),
+    );
+    assert_eq!(htlc.admin(), new_admin);
+    assert_eq!(htlc.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_requires_pending_admin_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(HtlcContract, (admin.clone(), 0i128));
+    let htlc = HtlcContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.transfer_admin(&new_admin);
+
+    // A third party's auth cannot complete the transfer: accept_admin
+    // demands require_auth from the pending admin itself.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_accept_admin().is_err());
+    assert_eq!(htlc.admin(), admin);
+
+    // With the pending admin's auth it succeeds.
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.accept_admin();
+    assert_eq!(htlc.admin(), new_admin);
+}
+
+#[test]
+fn revoke_pending_admin_recovers_mistaken_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, htlc) = setup(&env, 0);
+    let wrong_address = Address::generate(&env);
+
+    htlc.transfer_admin(&wrong_address);
+    htlc.revoke_pending_admin();
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("adm_xfer"), symbol_short!("revoked")),
+        (admin.clone(), wrong_address),
+    );
+    assert_eq!(htlc.pending_admin(), None);
+    assert_eq!(htlc.admin(), admin);
+
+    // Nothing left to accept or revoke.
+    assert_eq!(
+        htlc.try_accept_admin().err().unwrap().unwrap(),
+        Error::NoPendingTransfer.into()
+    );
+    assert_eq!(
+        htlc.try_revoke_pending_admin().err().unwrap().unwrap(),
+        Error::NoPendingTransfer.into()
+    );
+}
+
+#[test]
+fn admin_functions_stay_with_current_admin_mid_transfer() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(HtlcContract, (admin.clone(), 0i128));
+    let htlc = HtlcContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.transfer_admin(&new_admin);
+
+    // Mid-transfer, the pending admin's auth is not enough to touch
+    // admin-gated config.
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_min_safety_deposit",
+            args: (5i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_set_min_safety_deposit(&5).is_err());
+
+    // The current admin remains fully in control.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_min_safety_deposit",
+            args: (7i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.set_min_safety_deposit(&7);
+    assert_eq!(htlc.min_safety_deposit(), 7);
+}
+
+#[test]
+fn config_mutations_emit_events_with_old_and_new_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, _sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 100);
+
+    htlc.set_min_safety_deposit(&500);
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("cfg"), symbol_short!("min_sd")),
+        (100i128, 500i128),
+    );
+
+    let (registry_id, _registry, _min_stake) = setup_registry(&env, &asset);
+    htlc.set_resolver_registry(&registry_id);
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("cfg"), symbol_short!("registry")),
+        (None::<Address>, Some(registry_id.clone())),
+    );
+
+    htlc.clear_resolver_registry();
+    assert_last_event(
+        &env,
+        &htlc.address,
+        (symbol_short!("cfg"), symbol_short!("registry")),
+        (Some(registry_id), None::<Address>),
+    );
 }
 
 #[test]

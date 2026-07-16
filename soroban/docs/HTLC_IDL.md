@@ -75,9 +75,9 @@ pub enum Error {
 ### Entrypoint Functions
 
 #### Admin & Initialization
-*   **`initialize(env: Env, admin: Address, min_safety_deposit: i128)`**
-    *   *Description:* Initializes the contract instance. Can only be invoked once.
-    *   *Authorization:* `admin.require_auth()`
+*   **`__constructor(env: Env, admin: Address, min_safety_deposit: i128)`**
+    *   *Description:* Runs atomically at deploy time (constructor args are passed to `stellar contract deploy` after `--`). Replaces the old post-deploy `initialize`, closing the admin front-running window.
+    *   *Authorization:* Implicit via the deploy transaction.
 *   **`set_resolver_registry(env: Env, registry: Address)`**
     *   *Description:* Sets the address of the `ResolverRegistry` contract.
     *   *Authorization:* Admin signature required.
@@ -87,9 +87,17 @@ pub enum Error {
 *   **`set_min_safety_deposit(env: Env, new_minimum: i128)`**
     *   *Description:* Updates the minimum safety deposit.
     *   *Authorization:* Admin signature required.
-*   **`set_admin(env: Env, new_admin: Address)`**
-    *   *Description:* Transfers the admin role to a new address.
+*   **`transfer_admin(env: Env, new_admin: Address)`**
+    *   *Description:* Proposes a new admin. The role only moves once the proposed address calls `accept_admin`.
     *   *Authorization:* Admin signature required.
+*   **`accept_admin(env: Env)`**
+    *   *Description:* Completes a pending admin transfer.
+    *   *Authorization:* `pending_admin.require_auth()`
+*   **`revoke_pending_admin(env: Env)`**
+    *   *Description:* Cancels a pending admin transfer (escape hatch for a mistaken `transfer_admin`).
+    *   *Authorization:* Admin signature required.
+
+All admin/config mutations emit events: `("adm_xfer", "proposed" | "accepted" | "revoked")` and `("cfg", <setting>)` topics with `(old, new)` values as data.
 
 #### Core Actions
 *   **`create_order(env: Env, sender: Address, beneficiary: Address, refund_address: Address, asset: Address, amount: i128, safety_deposit: i128, hashlock: BytesN<32>, timelock_seconds: u64) -> u64`**
@@ -170,17 +178,23 @@ pub enum Error {
 ### Entrypoint Functions
 
 #### Admin & Initialization
-*   **`initialize(env: Env, admin: Address, stake_asset: Address, min_stake: i128, slash_beneficiary: Address)`**
-    *   *Description:* Initializes the registry config.
-    *   *Authorization:* `admin.require_auth()`
+*   **`__constructor(env: Env, admin: Address, stake_asset: Address, min_stake: i128, slash_beneficiary: Address)`**
+    *   *Description:* Runs atomically at deploy time (constructor args are passed to `stellar contract deploy` after `--`). Replaces the old post-deploy `initialize`, closing the admin front-running window.
+    *   *Authorization:* Implicit via the deploy transaction.
 *   **`slash(env: Env, resolver: Address, amount: i128)`**
     *   *Description:* Slashes `amount` of stake from `resolver` and transfers it to the `slash_beneficiary`. Disables (`active = false`) the resolver if remaining stake falls below `min_stake`.
     *   *Authorization:* Admin signature required.
 *   **`set_min_stake(env: Env, new_minimum: i128)`**
     *   *Description:* Updates minimum stake required for registration.
     *   *Authorization:* Admin signature required.
-*   **`set_admin(env: Env, new_admin: Address)`**
-    *   *Description:* Transfers admin role to a new address.
+*   **`transfer_admin(env: Env, new_admin: Address)`**
+    *   *Description:* Proposes a new admin. The role only moves once the proposed address calls `accept_admin`.
+    *   *Authorization:* Admin signature required.
+*   **`accept_admin(env: Env)`**
+    *   *Description:* Completes a pending admin transfer.
+    *   *Authorization:* `pending_admin.require_auth()`
+*   **`revoke_pending_admin(env: Env)`**
+    *   *Description:* Cancels a pending admin transfer.
     *   *Authorization:* Admin signature required.
 *   **`set_slash_beneficiary(env: Env, new_beneficiary: Address)`**
     *   *Description:* Updates the address receiving slashed funds.
