@@ -1,3 +1,5 @@
+# Cargo.lock is intentionally tracked: contracts need reproducible
+# dependency resolution (soroban-env-host declares open-ended version
+# ranges, e.g. ed25519-dalek >=2.0.0, that break on new major releases).
 target/
-Cargo.lock
 .stellar/
