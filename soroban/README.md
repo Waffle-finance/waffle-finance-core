@@ -82,19 +82,15 @@ stellar contract install \
     --source deployer \
     --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm
 
-# Deploy + initialise
+# Deploy (the constructor configures the contract atomically, so
+# there is no separate initialize step to front-run)
 HTLC_ID=$(stellar contract deploy \
     --network testnet \
     --source deployer \
-    --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm)
-
-stellar contract invoke \
-    --network testnet \
-    --source deployer \
-    --id $HTLC_ID \
-    -- initialize \
+    --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm \
+    -- \
     --admin $(stellar keys address deployer) \
-    --min_safety_deposit 1000000
+    --min_safety_deposit 1000000)
 ```
 
 Repeat for `wafflefinance_resolver_registry.wasm`. Record the contract IDs

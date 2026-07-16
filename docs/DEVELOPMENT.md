@@ -206,18 +206,15 @@ stellar keys generate --global --network testnet deployer
 stellar keys fund deployer --network testnet
 stellar contract build
 
+# The constructor configures the contract atomically at deploy time;
+# constructor arguments are passed after `--`.
 HTLC_ID=$(stellar contract deploy \
   --network testnet \
   --source deployer \
-  --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm)
-
-stellar contract invoke \
-  --network testnet \
-  --source deployer \
-  --id "$HTLC_ID" \
-  -- initialize \
+  --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm \
+  -- \
   --admin "$(stellar keys address deployer)" \
-  --min_safety_deposit 1000000
+  --min_safety_deposit 1000000)
 
 # After deploy: regenerate TypeScript bindings
 stellar contract bindings typescript \

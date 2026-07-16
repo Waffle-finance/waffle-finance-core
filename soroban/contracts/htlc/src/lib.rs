@@ -19,6 +19,15 @@
 //! including the coordinator or admin — can move locked funds without
 //! satisfying these conditions.
 //!
+//! # Governance
+//!
+//! Configuration (admin, minimum safety deposit) is set atomically at
+//! deploy time via the constructor, so adminship of a fresh deployment
+//! cannot be front-run. Admin handover is two-step
+//! (`transfer_admin` + `accept_admin`, with `revoke_pending_admin` as
+//! an escape hatch) and every admin/config mutation emits an event
+//! (`adm_xfer` / `cfg` topics) carrying the old and new values.
+//!
 //! # State archival (TTL) behaviour
 //!
 //! Soroban archives ledger entries whose TTL expires. For a
@@ -112,7 +121,9 @@ const FINALISED_ORDER_TTL_LEDGERS: u32 = 30 * LEDGERS_PER_DAY;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Error {
-    /// Contract has already been initialised.
+    /// Contract has already been initialised. Retained for ABI
+    /// stability; unreachable now that configuration happens in the
+    /// constructor.
     AlreadyInitialised = 1,
     /// Contract has not been initialised yet.
     NotInitialised = 2,
@@ -140,6 +151,8 @@ pub enum Error {
     ResolverNotAuthorised = 13,
     /// Internal arithmetic overflow.
     Overflow = 14,
+    /// No admin transfer is pending.
+    NoPendingTransfer = 15,
 }
 
 /// Lifecycle state for a single HTLC order.
@@ -195,6 +208,9 @@ pub struct Order {
 enum DataKey {
     /// Admin address that can update configuration (e.g. min safety deposit).
     Admin,
+    /// Address proposed by the admin to take over the role. The
+    /// transfer only completes when this address calls `accept_admin`.
+    PendingAdmin,
     /// Next order id counter.
     NextOrderId,
     /// Order data, keyed by id.
@@ -212,6 +228,12 @@ enum DataKey {
 fn topic_created() -> Symbol { symbol_short!("created") }
 fn topic_claimed() -> Symbol { symbol_short!("claimed") }
 fn topic_refunded() -> Symbol { symbol_short!("refunded") }
+/// Admin-transfer lifecycle: paired with "proposed" / "accepted" /
+/// "revoked" and (old, new) address data.
+fn topic_admin_transfer() -> Symbol { symbol_short!("adm_xfer") }
+/// Config mutations: paired with a per-setting symbol and (old, new)
+/// value data.
+fn topic_config() -> Symbol { symbol_short!("cfg") }
 
 #[contract]
 pub struct HtlcContract;
@@ -222,17 +244,21 @@ impl HtlcContract {
     // Lifecycle
     // ---------------------------------------------------------------------
 
-    /// Initialise the contract. Must be called exactly once after deploy.
+    /// Configure the contract atomically at deploy time. Running this
+    /// as a constructor (instead of a separate post-deploy `initialize`
+    /// transaction) closes the front-running window in which a third
+    /// party could claim adminship of a freshly deployed contract.
     /// `admin` can update `min_safety_deposit` and the optional
     /// `ResolverRegistry` address. The admin can NEVER move user funds.
-    pub fn initialize(env: Env, admin: Address, min_safety_deposit: i128) {
+    pub fn __constructor(env: Env, admin: Address, min_safety_deposit: i128) {
+        // The host only runs the constructor once, at deploy; this
+        // guard is defense-in-depth against any re-invocation path.
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialised);
         }
         if min_safety_deposit < 0 {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextOrderId, &1u64);
         env.storage().instance().set(&DataKey::MinSafetyDeposit, &min_safety_deposit);
@@ -243,15 +269,25 @@ impl HtlcContract {
     /// `Option::None` semantics by calling `clear_resolver_registry`.
     pub fn set_resolver_registry(env: Env, registry: Address) {
         Self::require_admin(&env);
+        let old: Option<Address> = env.storage().instance().get(&DataKey::ResolverRegistry);
         env.storage().instance().set(&DataKey::ResolverRegistry, &registry);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_config(), symbol_short!("registry")),
+            (old, Some(registry)),
+        );
     }
 
     /// Remove the resolver registry binding (any address may create orders).
     pub fn clear_resolver_registry(env: Env) {
         Self::require_admin(&env);
+        let old: Option<Address> = env.storage().instance().get(&DataKey::ResolverRegistry);
         env.storage().instance().remove(&DataKey::ResolverRegistry);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_config(), symbol_short!("registry")),
+            (old, None::<Address>),
+        );
     }
 
     /// Update the minimum safety deposit.
@@ -260,15 +296,68 @@ impl HtlcContract {
         if new_minimum < 0 {
             panic_with_error!(&env, Error::InvalidAmount);
         }
+        let old: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinSafetyDeposit)
+            .unwrap_or(0);
         env.storage().instance().set(&DataKey::MinSafetyDeposit, &new_minimum);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_config(), symbol_short!("min_sd")),
+            (old, new_minimum),
+        );
     }
 
-    /// Transfer admin role to a new address.
-    pub fn set_admin(env: Env, new_admin: Address) {
+    /// Propose a new admin. The role only changes hands once
+    /// `new_admin` calls `accept_admin`, so a typo'd address cannot
+    /// permanently brick the admin functions — the current admin stays
+    /// in control (and can `revoke_pending_admin`) until acceptance.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
         Self::require_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        let current = Self::admin(env.clone());
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("proposed")),
+            (current, new_admin),
+        );
+    }
+
+    /// Complete a pending admin transfer. Must be authorised by the
+    /// pending admin itself, proving the address is usable.
+    pub fn accept_admin(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingTransfer));
+        pending.require_auth();
+        let old = Self::admin(env.clone());
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("accepted")),
+            (old, pending),
+        );
+    }
+
+    /// Cancel a pending admin transfer (escape hatch for a mistaken
+    /// `transfer_admin`). Only the current admin may revoke.
+    pub fn revoke_pending_admin(env: Env) {
+        Self::require_admin(&env);
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingTransfer));
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("revoked")),
+            (Self::admin(env.clone()), pending),
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -567,6 +656,10 @@ impl HtlcContract {
 
     pub fn resolver_registry(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::ResolverRegistry)
+    }
+
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     // ---------------------------------------------------------------------

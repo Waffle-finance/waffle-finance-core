@@ -12,16 +12,31 @@
 //! (funds are always locked by hashlock + timelock). The registry is
 //! a coordination layer: it lets the off-chain order book know which
 //! resolvers have skin in the game.
+//!
+//! # Governance
+//!
+//! Configuration (admin, stake asset, minimum stake, slash
+//! beneficiary) is set atomically at deploy time via the constructor,
+//! so adminship of a fresh deployment cannot be front-run. Admin
+//! handover is two-step (`transfer_admin` + `accept_admin`, with
+//! `revoke_pending_admin` as an escape hatch) and every admin/config
+//! mutation emits an event (`adm_xfer` / `cfg` topics) carrying the
+//! old and new values.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
     symbol_short, token, Address, Env, Symbol, Vec,
 };
 
+#[cfg(test)]
+mod test;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Error {
+    /// Retained for ABI stability; unreachable now that configuration
+    /// happens in the constructor.
     AlreadyInitialised = 1,
     NotInitialised = 2,
     Unauthorized = 3,
@@ -30,6 +45,8 @@ pub enum Error {
     InvalidAmount = 6,
     AlreadyRegistered = 7,
     Overflow = 8,
+    /// No admin transfer is pending.
+    NoPendingTransfer = 9,
 }
 
 #[contracttype]
@@ -47,6 +64,9 @@ pub struct ResolverInfo {
 #[derive(Clone)]
 enum DataKey {
     Admin,
+    /// Address proposed by the admin to take over the role. The
+    /// transfer only completes when this address calls `accept_admin`.
+    PendingAdmin,
     StakeAsset,
     MinStake,
     SlashBeneficiary,
@@ -58,26 +78,37 @@ fn topic_registered() -> Symbol { symbol_short!("register") }
 fn topic_increased() -> Symbol { symbol_short!("increase") }
 fn topic_unregistered() -> Symbol { symbol_short!("unreg") }
 fn topic_slashed() -> Symbol { symbol_short!("slashed") }
+/// Admin-transfer lifecycle: paired with "proposed" / "accepted" /
+/// "revoked" and (old, new) address data.
+fn topic_admin_transfer() -> Symbol { symbol_short!("adm_xfer") }
+/// Config mutations: paired with a per-setting symbol and (old, new)
+/// value data.
+fn topic_config() -> Symbol { symbol_short!("cfg") }
 
 #[contract]
 pub struct ResolverRegistry;
 
 #[contractimpl]
 impl ResolverRegistry {
-    pub fn initialize(
+    /// Configure the contract atomically at deploy time. Running this
+    /// as a constructor (instead of a separate post-deploy `initialize`
+    /// transaction) closes the front-running window in which a third
+    /// party could claim adminship of a freshly deployed contract.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         stake_asset: Address,
         min_stake: i128,
         slash_beneficiary: Address,
     ) {
+        // The host only runs the constructor once, at deploy; this
+        // guard is defense-in-depth against any re-invocation path.
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialised);
         }
         if min_stake < 0 {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::StakeAsset, &stake_asset);
         env.storage().instance().set(&DataKey::MinStake, &min_stake);
@@ -273,19 +304,88 @@ impl ResolverRegistry {
         if new_minimum < 0 {
             panic_with_error!(&env, Error::InvalidAmount);
         }
+        let old: i128 = env.storage().instance().get(&DataKey::MinStake).unwrap_or(0);
         env.storage().instance().set(&DataKey::MinStake, &new_minimum);
-    }
-
-    pub fn set_admin(env: Env, new_admin: Address) {
-        Self::require_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (topic_config(), symbol_short!("min_stake")),
+            (old, new_minimum),
+        );
     }
 
     pub fn set_slash_beneficiary(env: Env, new_beneficiary: Address) {
         Self::require_admin(&env);
+        let old: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashBeneficiary)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialised));
         env.storage()
             .instance()
             .set(&DataKey::SlashBeneficiary, &new_beneficiary);
+        env.events().publish(
+            (topic_config(), symbol_short!("slash_ben")),
+            (old, new_beneficiary),
+        );
+    }
+
+    /// Propose a new admin. The role only changes hands once
+    /// `new_admin` calls `accept_admin`, so a typo'd address cannot
+    /// permanently brick `slash` and the config setters — the current
+    /// admin stays in control (and can `revoke_pending_admin`) until
+    /// acceptance.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        Self::require_admin(&env);
+        let current = Self::admin(env.clone());
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("proposed")),
+            (current, new_admin),
+        );
+    }
+
+    /// Complete a pending admin transfer. Must be authorised by the
+    /// pending admin itself, proving the address is usable.
+    pub fn accept_admin(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingTransfer));
+        pending.require_auth();
+        let old = Self::admin(env.clone());
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("accepted")),
+            (old, pending),
+        );
+    }
+
+    /// Cancel a pending admin transfer (escape hatch for a mistaken
+    /// `transfer_admin`). Only the current admin may revoke.
+    pub fn revoke_pending_admin(env: Env) {
+        Self::require_admin(&env);
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingTransfer));
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (topic_admin_transfer(), symbol_short!("revoked")),
+            (Self::admin(env.clone()), pending),
+        );
+    }
+
+    pub fn admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialised))
+    }
+
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     fn require_initialised(env: &Env) {
