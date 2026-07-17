@@ -1114,3 +1114,920 @@ fn create_order_rejects_resolver_who_requested_unregistration() {
         "HTLC must reject a resolver that has requested unregistration"
     );
 }
+
+// =====================================================================
+// AUTH ENFORCEMENT — negative tests using selective mock_auths
+// Every require_auth call site in lib.rs has a failing-path test here.
+// =====================================================================
+
+// Helper: build a contract with no mock (auth checking is live).
+fn setup_no_mock(env: &Env, min_safety_deposit: i128) -> (Address, HtlcContractClient<'_>) {
+    let admin = Address::generate(env);
+    let contract_id = env.register(HtlcContract, (admin.clone(), min_safety_deposit));
+    (admin, HtlcContractClient::new(env, &contract_id))
+}
+
+
+
+// ---------------------------------------------------------------------
+// create_order: sender.require_auth()
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_order_requires_sender_auth() {
+    let env = Env::default();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    // Mint tokens — the SAC mint itself needs admin auth.
+    env.mock_auths(&[MockAuth {
+        address: &asset_admin,
+        invoke: &MockAuthInvoke {
+            contract: &asset,
+            fn_name: "mint",
+            args: (sender.clone(), 100_0000000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[30u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+
+    // Attempt create_order with a STRANGER's auth — must fail.
+    let stranger = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "create_order",
+            args: (
+                sender.clone(),
+                beneficiary.clone(),
+                sender.clone(),
+                asset.clone(),
+                10_0000000i128,
+                0i128,
+                hashlock.clone(),
+                600u64,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = htlc.try_create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &600u64,
+    );
+    assert!(res.is_err(), "create_order must reject when sender auth is absent");
+    // Admin state must be intact.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(htlc.admin(), admin);
+}
+
+// ---------------------------------------------------------------------
+// claim_order: caller.require_auth()
+// ---------------------------------------------------------------------
+
+#[test]
+fn claim_order_requires_caller_auth() {
+    // Set up order with mock_all, then remove auth and prove claim fails.
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[31u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &600u64,
+    );
+
+    // Now try to claim with a stranger's auth (not the intended caller).
+    let stranger = Address::generate(&env);
+    let caller = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "claim_order",
+            args: (order_id, preimage.clone(), caller.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = htlc.try_claim_order(&order_id, &preimage, &caller);
+    assert!(res.is_err(), "claim_order must fail when caller auth is absent");
+}
+
+// ---------------------------------------------------------------------
+// refund_order: caller.require_auth()
+// ---------------------------------------------------------------------
+
+#[test]
+fn refund_order_requires_caller_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[32u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &600u64,
+    );
+    advance_ledger(&env, 601);
+
+    let stranger = Address::generate(&env);
+    let caller = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "refund_order",
+            args: (order_id, caller.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = htlc.try_refund_order(&order_id, &caller);
+    assert!(res.is_err(), "refund_order must fail when caller auth is absent");
+}
+
+// ---------------------------------------------------------------------
+// Admin-gated functions: non-admin must be rejected
+// ---------------------------------------------------------------------
+
+#[test]
+fn set_min_safety_deposit_requires_admin_auth() {
+    let env = Env::default();
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let stranger = Address::generate(&env);
+
+    // Stranger's auth — must fail.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "set_min_safety_deposit",
+            args: (500i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_set_min_safety_deposit(&500).is_err());
+
+    // Admin's auth — must succeed.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "set_min_safety_deposit",
+            args: (500i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.set_min_safety_deposit(&500);
+    env.mock_all_auths();
+    assert_eq!(htlc.min_safety_deposit(), 500);
+}
+
+#[test]
+fn set_resolver_registry_requires_admin_auth() {
+    let env = Env::default();
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let stranger = Address::generate(&env);
+    let registry_addr = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "set_resolver_registry",
+            args: (registry_addr.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_set_resolver_registry(&registry_addr).is_err());
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "set_resolver_registry",
+            args: (registry_addr.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.set_resolver_registry(&registry_addr);
+    env.mock_all_auths();
+    assert_eq!(htlc.resolver_registry(), Some(registry_addr));
+}
+
+#[test]
+fn clear_resolver_registry_requires_admin_auth() {
+    let env = Env::default();
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let stranger = Address::generate(&env);
+    let registry_addr = Address::generate(&env);
+
+    // Set registry first.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "set_resolver_registry",
+            args: (registry_addr.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.set_resolver_registry(&registry_addr);
+
+    // Stranger cannot clear.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "clear_resolver_registry",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_clear_resolver_registry().is_err());
+
+    // Admin can.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "clear_resolver_registry",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.clear_resolver_registry();
+    env.mock_all_auths();
+    assert_eq!(htlc.resolver_registry(), None);
+}
+
+#[test]
+fn transfer_admin_requires_current_admin_auth() {
+    let env = Env::default();
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let stranger = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    // Stranger cannot propose.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_transfer_admin(&new_admin).is_err());
+    env.mock_all_auths();
+    assert_eq!(htlc.pending_admin(), None);
+
+    // Admin can.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.transfer_admin(&new_admin);
+    env.mock_all_auths();
+    assert_eq!(htlc.pending_admin(), Some(new_admin));
+}
+
+#[test]
+fn revoke_pending_admin_requires_current_admin_auth() {
+    let env = Env::default();
+    let (admin, htlc) = setup_no_mock(&env, 0);
+    let stranger = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    // Propose first (admin auth).
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.transfer_admin(&new_admin);
+
+    // Stranger cannot revoke.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "revoke_pending_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(htlc.try_revoke_pending_admin().is_err());
+    env.mock_all_auths();
+    assert_eq!(htlc.pending_admin(), Some(new_admin.clone()));
+
+    // Admin can.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &htlc.address,
+            fn_name: "revoke_pending_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    htlc.revoke_pending_admin();
+    env.mock_all_auths();
+    assert_eq!(htlc.pending_admin(), None);
+}
+
+// =====================================================================
+// EVENT ASSERTIONS — exact topic tuple + payload for created/claimed/refunded
+// Pins the wire format the coordinator/resolver index on.
+// =====================================================================
+
+#[test]
+fn create_order_emits_created_event_with_exact_shape() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[40u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let safety = 1_000_000i128;
+    let timelock_secs = 600u64;
+
+    let now = env.ledger().timestamp();
+    let expected_timelock = now + timelock_secs;
+
+    // Assert immediately after the call — the event log is per-invocation.
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &amount, &safety, &hashlock, &timelock_secs,
+    );
+    assert_last_event(
+        &env,
+        &htlc.address,
+        // topics: (symbol "created", sender, beneficiary, hashlock)
+        (symbol_short!("created"), sender.clone(), beneficiary.clone(), hashlock.clone()),
+        // data:   (order_id, asset, amount, safety_deposit, timelock)
+        (order_id, asset.clone(), amount, safety, expected_timelock),
+    );
+}
+
+#[test]
+fn claim_order_emits_claimed_event_with_exact_shape() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let caller = Address::generate(&env); // separate relay address
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[41u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let safety = 1_000_000i128;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &amount, &safety, &hashlock, &600u64,
+    );
+
+    htlc.claim_order(&order_id, &preimage, &caller);
+    assert_last_event(
+        &env,
+        &htlc.address,
+        // topics: (symbol "claimed", beneficiary, hashlock)
+        (symbol_short!("claimed"), beneficiary.clone(), hashlock.clone()),
+        // data:   (order_id, caller, preimage, amount, safety_deposit)
+        (order_id, caller.clone(), preimage.clone(), amount, safety),
+    );
+}
+
+#[test]
+fn refund_order_emits_refunded_event_with_exact_shape() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let refund_to = Address::generate(&env);
+    let caller = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[42u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let safety = 1_000_000i128;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &refund_to, &asset,
+        &amount, &safety, &hashlock, &600u64,
+    );
+
+    advance_ledger(&env, 601);
+    htlc.refund_order(&order_id, &caller);
+    assert_last_event(
+        &env,
+        &htlc.address,
+        // topics: (symbol "refunded", refund_address, hashlock)
+        (symbol_short!("refunded"), refund_to.clone(), hashlock.clone()),
+        // data:   (order_id, caller, amount, safety_deposit)
+        (order_id, caller.clone(), amount, safety),
+    );
+}
+
+// =====================================================================
+// TIMELOCK BOUNDARY VALUES
+// 299 s → InvalidTimelock, 300 s → valid, 86 400 s → valid, 86 401 s → invalid
+// Plus: claim at timestamp == timelock (valid) vs refund at == timelock (invalid)
+// =====================================================================
+
+#[test]
+fn timelock_299_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[50u8; 32]));
+
+    assert_eq!(
+        htlc.try_create_order(
+            &sender, &beneficiary, &sender, &asset,
+            &10_0000000i128, &0i128, &hashlock, &299u64,
+        ).err().unwrap().unwrap(),
+        Error::InvalidTimelock.into()
+    );
+}
+
+#[test]
+fn timelock_300_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[51u8; 32]));
+
+    let id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &300u64,
+    );
+    assert!(htlc.get_order(&id).is_some());
+}
+
+#[test]
+fn timelock_86400_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[52u8; 32]));
+
+    let id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &86_400u64,
+    );
+    assert!(htlc.get_order(&id).is_some());
+}
+
+#[test]
+fn timelock_86401_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[53u8; 32]));
+
+    assert_eq!(
+        htlc.try_create_order(
+            &sender, &beneficiary, &sender, &asset,
+            &10_0000000i128, &0i128, &hashlock, &86_401u64,
+        ).err().unwrap().unwrap(),
+        Error::InvalidTimelock.into()
+    );
+}
+
+// ---------------------------------------------------------------------
+// claim at timestamp == timelock is VALID (condition: > timelock to expire)
+// refund at timestamp == timelock is INVALID (condition: <= timelock → NotExpired)
+// ---------------------------------------------------------------------
+
+#[test]
+fn claim_at_exactly_timelock_succeeds() {
+    // lib.rs:331: if env.ledger().timestamp() > order.timelock → Expired
+    // So timestamp == timelock is still claimable.
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[54u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let timelock_secs = 600u64;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &amount, &0i128, &hashlock, &timelock_secs,
+    );
+
+    // Advance to exactly the timelock timestamp (not past it).
+    advance_ledger(&env, timelock_secs);
+
+    // Must succeed — timestamp == timelock is the boundary that is still claimable.
+    htlc.claim_order(&order_id, &preimage, &beneficiary);
+    assert_eq!(token.balance(&beneficiary), amount);
+    assert_eq!(htlc.get_order(&order_id).unwrap().status, OrderStatus::Claimed);
+}
+
+#[test]
+fn refund_at_exactly_timelock_fails() {
+    // lib.rs:384: if env.ledger().timestamp() <= order.timelock → NotExpired
+    // So timestamp == timelock is NOT yet refundable.
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let caller = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[55u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let timelock_secs = 600u64;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &timelock_secs,
+    );
+
+    // Advance to exactly the timelock timestamp.
+    advance_ledger(&env, timelock_secs);
+
+    // Must fail — refund requires strictly past the timelock.
+    assert_eq!(
+        htlc.try_refund_order(&order_id, &caller).err().unwrap().unwrap(),
+        Error::NotExpired.into()
+    );
+}
+
+#[test]
+fn refund_one_second_past_timelock_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let refund_to = Address::generate(&env);
+    let caller = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[56u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let timelock_secs = 600u64;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &refund_to, &asset,
+        &amount, &0i128, &hashlock, &timelock_secs,
+    );
+
+    // One second past the timelock.
+    advance_ledger(&env, timelock_secs + 1);
+    htlc.refund_order(&order_id, &caller);
+    assert_eq!(token.balance(&refund_to), amount);
+}
+
+// =====================================================================
+// INVALID AMOUNT BRANCHES
+// amount <= 0 and safety_deposit < 0
+// =====================================================================
+
+#[test]
+fn create_order_zero_amount_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[60u8; 32]));
+
+    assert_eq!(
+        htlc.try_create_order(
+            &sender, &beneficiary, &sender, &asset,
+            &0i128, &0i128, &hashlock, &600u64,
+        ).err().unwrap().unwrap(),
+        Error::InvalidAmount.into()
+    );
+}
+
+#[test]
+fn create_order_negative_amount_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[61u8; 32]));
+
+    assert_eq!(
+        htlc.try_create_order(
+            &sender, &beneficiary, &sender, &asset,
+            &(-1i128), &0i128, &hashlock, &600u64,
+        ).err().unwrap().unwrap(),
+        Error::InvalidAmount.into()
+    );
+}
+
+#[test]
+fn create_order_negative_safety_deposit_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+    let hashlock = sha256_32(&env, &Bytes::from_array(&env, &[62u8; 32]));
+
+    assert_eq!(
+        htlc.try_create_order(
+            &sender, &beneficiary, &sender, &asset,
+            &10_0000000i128, &(-1i128), &hashlock, &600u64,
+        ).err().unwrap().unwrap(),
+        Error::InvalidAmount.into()
+    );
+}
+
+#[test]
+fn set_min_safety_deposit_negative_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    assert_eq!(
+        htlc.try_set_min_safety_deposit(&(-1i128)).err().unwrap().unwrap(),
+        Error::InvalidAmount.into()
+    );
+}
+
+// =====================================================================
+// OrderNotFound — claim, refund, and get_order on nonexistent ids
+// =====================================================================
+
+#[test]
+fn claim_order_nonexistent_id_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+    let caller = Address::generate(&env);
+    let preimage = Bytes::from_array(&env, &[70u8; 32]);
+
+    assert_eq!(
+        htlc.try_claim_order(&999u64, &preimage, &caller).err().unwrap().unwrap(),
+        Error::OrderNotFound.into()
+    );
+}
+
+#[test]
+fn refund_order_nonexistent_id_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+    let caller = Address::generate(&env);
+
+    // Advance time so NotExpired doesn't fire first.
+    advance_ledger(&env, 100_000);
+
+    assert_eq!(
+        htlc.try_refund_order(&999u64, &caller).err().unwrap().unwrap(),
+        Error::OrderNotFound.into()
+    );
+}
+
+#[test]
+fn get_order_nonexistent_id_returns_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    assert!(htlc.get_order(&999u64).is_none());
+}
+
+// =====================================================================
+// ZERO SAFETY-DEPOSIT TERMINAL FLOWS
+// claim and refund when safety_deposit == 0 must not attempt a zero transfer
+// =====================================================================
+
+#[test]
+fn claim_order_with_zero_safety_deposit_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let caller = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[80u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &amount, &0i128, &hashlock, &600u64,
+    );
+
+    htlc.claim_order(&order_id, &preimage, &caller);
+
+    assert_eq!(token.balance(&beneficiary), amount);
+    // Caller gets nothing (no safety deposit).
+    assert_eq!(token.balance(&caller), 0);
+    assert_eq!(token.balance(&htlc.address), 0);
+    assert_eq!(htlc.get_order(&order_id).unwrap().status, OrderStatus::Claimed);
+}
+
+#[test]
+fn refund_order_with_zero_safety_deposit_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let refund_to = Address::generate(&env);
+    let caller = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[81u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &refund_to, &asset,
+        &amount, &0i128, &hashlock, &600u64,
+    );
+
+    advance_ledger(&env, 601);
+    htlc.refund_order(&order_id, &caller);
+
+    assert_eq!(token.balance(&refund_to), amount);
+    // Caller gets nothing (no safety deposit).
+    assert_eq!(token.balance(&caller), 0);
+    assert_eq!(token.balance(&htlc.address), 0);
+    assert_eq!(htlc.get_order(&order_id).unwrap().status, OrderStatus::Refunded);
+}
+
+// =====================================================================
+// AUTH-SHAPE TEST — create_order auth tree covers the token transfer
+// sub-invocation, guarding against SDK upgrade regressions that might
+// drop the sub-invoke from the auth tree.
+// =====================================================================
+
+#[test]
+fn create_order_auth_tree_covers_token_transfer_sub_invocation() {
+    // We supply a full MockAuth that includes the token::transfer
+    // sub-invocation in its sub_invokes list.  If the SDK no longer
+    // nests the transfer under the sender's auth, the MockAuth
+    // verification will reject the invocation and the test will fail.
+    let env = Env::default();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(HtlcContract, (admin.clone(), 0i128));
+    let htlc = HtlcContractClient::new(&env, &contract_id);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    // Mint with mock_all so we don't have to model the SAC auth tree.
+    env.mock_all_auths();
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[90u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 10_0000000i128;
+    let safety = 0i128;
+    let total = amount; // amount + safety
+
+    // Now set up a selective mock that explicitly models the sub-invoke.
+    env.mock_auths(&[MockAuth {
+        address: &sender,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_order",
+            args: (
+                sender.clone(),
+                beneficiary.clone(),
+                sender.clone(),
+                asset.clone(),
+                amount,
+                safety,
+                hashlock.clone(),
+                600u64,
+            )
+                .into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &asset,
+                fn_name: "transfer",
+                args: (sender.clone(), contract_id.clone(), total).into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    // If the sub-invocation is correctly nested under sender's auth
+    // this call succeeds; if the SDK drops the nesting it will panic.
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &amount, &safety, &hashlock, &600u64,
+    );
+    env.mock_all_auths();
+    assert!(htlc.get_order(&order_id).is_some());
+}
