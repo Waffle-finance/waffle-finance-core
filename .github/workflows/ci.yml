@@ -100,3 +100,6 @@ jobs:
 
       - name: Build contracts
         run: cargo build
+
+      - name: Test Soroban contracts
+        run: cargo test
