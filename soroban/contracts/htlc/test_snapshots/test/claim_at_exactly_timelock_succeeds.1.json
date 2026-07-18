@@ -83,7 +83,7 @@
                   }
                 },
                 {
-                  "bytes": "784ad05e9d7a6aeaca70c0acc22d65d14d9dbbc383ee442a3e15484bf7a594e6"
+                  "bytes": "22af5eb7a99e9a167adafc9b1c22f688cb7d7f87cd31c10e00dda28bd0953cfc"
                 },
                 {
                   "u64": 600
@@ -132,7 +132,7 @@
                   "u64": 1
                 },
                 {
-                  "bytes": "5454545454545454545454545454545454545454545454545454545454545454"
+                  "bytes": "3636363636363636363636363636363636363636363636363636363636363636"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -336,7 +336,7 @@
                         "symbol": "hashlock"
                       },
                       "val": {
-                        "bytes": "784ad05e9d7a6aeaca70c0acc22d65d14d9dbbc383ee442a3e15484bf7a594e6"
+                        "bytes": "22af5eb7a99e9a167adafc9b1c22f688cb7d7f87cd31c10e00dda28bd0953cfc"
                       }
                     },
                     {
@@ -352,7 +352,7 @@
                         "symbol": "preimage"
                       },
                       "val": {
-                        "bytes": "5454545454545454545454545454545454545454545454545454545454545454"
+                        "bytes": "3636363636363636363636363636363636363636363636363636363636363636"
                       }
                     },
                     {

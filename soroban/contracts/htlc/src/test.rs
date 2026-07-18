@@ -397,6 +397,8 @@ fn setup_registry<'a>(
     let registry_admin = Address::generate(env);
     let slash_beneficiary = Address::generate(env);
     let min_stake: i128 = 100_0000000; // 100 stake-asset units
+    // unbonding_period must be >= MIN_UNBONDING_PERIOD_SECS (86 400 s).
+    let unbonding_period: u64 = wafflefinance_resolver_registry::MIN_UNBONDING_PERIOD_SECS;
     let registry_id = env.register(
         ResolverRegistry,
         (
@@ -404,6 +406,7 @@ fn setup_registry<'a>(
             stake_asset.clone(),
             min_stake,
             slash_beneficiary,
+            unbonding_period,
         ),
     );
     let registry = ResolverRegistryClient::new(env, &registry_id);
@@ -1059,14 +1062,61 @@ fn instance_ttl_extended_on_create_claim_refund() {
 }
 
 
-// NOTE: create_order_rejects_resolver_who_requested_unregistration is
-// intentionally omitted here — it depends on request_unregister and
-// MIN_UNBONDING_PERIOD_SECS from the two-phase-exit feature (PR #257)
-// which has not yet landed in this fork. It will be re-enabled once
-// that feature is merged.
+// ---------------------------------------------------------------------
+// Cross-contract: unbonding resolver is rejected by create_order
+// (Acceptance criterion: request_unregister immediately sets
+//  is_active == false and HTLC rejects the resolver.)
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_order_rejects_resolver_who_requested_unregistration() {
+    // A resolver that has called request_unregister is inactive, so
+    // the HTLC must reject them even while their stake is still locked
+    // in the registry during the unbonding window.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let (registry_id, registry, min_stake) = setup_registry(&env, &asset);
+    htlc.set_resolver_registry(&registry_id);
+
+    let resolver = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&resolver, &(min_stake + 100_0000000));
+    registry.register(&resolver, &min_stake);
+    assert!(registry.is_active(&resolver));
+
+    // The resolver initiates exit — this immediately flips is_active
+    // to false in the registry.
+    registry.request_unregister(&resolver);
+    assert!(!registry.is_active(&resolver));
+
+    let preimage = Bytes::from_array(&env, &[99u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+
+    // HTLC create_order must now reject the resolver.
+    let res = htlc.try_create_order(
+        &resolver,
+        &beneficiary,
+        &resolver,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+    assert_eq!(
+        res.err().unwrap().unwrap(),
+        Error::ResolverNotAuthorised.into(),
+        "HTLC must reject a resolver that has requested unregistration"
+    );
+}
 
 // =====================================================================
-// AUTH ENFORCEMENT ΓÇö negative tests using selective mock_auths
+// AUTH ENFORCEMENT — negative tests using selective mock_auths
 // Every require_auth call site in lib.rs has a failing-path test here.
 // =====================================================================
 
@@ -1092,7 +1142,7 @@ fn create_order_requires_sender_auth() {
     let sender = Address::generate(&env);
     let beneficiary = Address::generate(&env);
 
-    // Mint tokens ΓÇö the SAC mint itself needs admin auth.
+    // Mint tokens — the SAC mint itself needs admin auth.
     env.mock_auths(&[MockAuth {
         address: &asset_admin,
         invoke: &MockAuthInvoke {
@@ -1107,7 +1157,7 @@ fn create_order_requires_sender_auth() {
     let preimage = Bytes::from_array(&env, &[30u8; 32]);
     let hashlock = sha256_32(&env, &preimage);
 
-    // Attempt create_order with a STRANGER's auth ΓÇö must fail.
+    // Attempt create_order with a STRANGER's auth — must fail.
     let stranger = Address::generate(&env);
     env.mock_auths(&[MockAuth {
         address: &stranger,
@@ -1233,7 +1283,7 @@ fn set_min_safety_deposit_requires_admin_auth() {
     let (admin, htlc) = setup_no_mock(&env, 0);
     let stranger = Address::generate(&env);
 
-    // Stranger's auth ΓÇö must fail.
+    // Stranger's auth — must fail.
     env.mock_auths(&[MockAuth {
         address: &stranger,
         invoke: &MockAuthInvoke {
@@ -1245,7 +1295,7 @@ fn set_min_safety_deposit_requires_admin_auth() {
     }]);
     assert!(htlc.try_set_min_safety_deposit(&500).is_err());
 
-    // Admin's auth ΓÇö must succeed.
+    // Admin's auth — must succeed.
     env.mock_auths(&[MockAuth {
         address: &admin,
         invoke: &MockAuthInvoke {
@@ -1423,7 +1473,7 @@ fn revoke_pending_admin_requires_current_admin_auth() {
 }
 
 // =====================================================================
-// EVENT ASSERTIONS ΓÇö exact topic tuple + payload for created/claimed/refunded
+// EVENT ASSERTIONS — exact topic tuple + payload for created/claimed/refunded
 // Pins the wire format the coordinator/resolver index on.
 // =====================================================================
 
@@ -1448,7 +1498,7 @@ fn create_order_emits_created_event_with_exact_shape() {
     let now = env.ledger().timestamp();
     let expected_timelock = now + timelock_secs;
 
-    // Assert immediately after the call ΓÇö the event log is per-invocation.
+    // Assert immediately after the call — the event log is per-invocation.
     let order_id = htlc.create_order(
         &sender, &beneficiary, &sender, &asset,
         &amount, &safety, &hashlock, &timelock_secs,
@@ -1535,7 +1585,7 @@ fn refund_order_emits_refunded_event_with_exact_shape() {
 
 // =====================================================================
 // TIMELOCK BOUNDARY VALUES
-// 299 s ΓåÆ InvalidTimelock, 300 s ΓåÆ valid, 86 400 s ΓåÆ valid, 86 401 s ΓåÆ invalid
+// 299 s → InvalidTimelock, 300 s → valid, 86 400 s → valid, 86 401 s → invalid
 // Plus: claim at timestamp == timelock (valid) vs refund at == timelock (invalid)
 // =====================================================================
 
@@ -1621,12 +1671,12 @@ fn timelock_86401_rejected() {
 
 // ---------------------------------------------------------------------
 // claim at timestamp == timelock is VALID (condition: > timelock to expire)
-// refund at timestamp == timelock is INVALID (condition: <= timelock ΓåÆ NotExpired)
+// refund at timestamp == timelock is INVALID (condition: <= timelock → NotExpired)
 // ---------------------------------------------------------------------
 
 #[test]
 fn claim_at_exactly_timelock_succeeds() {
-    // lib.rs:331: if env.ledger().timestamp() > order.timelock ΓåÆ Expired
+    // lib.rs:331: if env.ledger().timestamp() > order.timelock → Expired
     // So timestamp == timelock is still claimable.
     let env = Env::default();
     env.mock_all_auths();
@@ -1651,7 +1701,7 @@ fn claim_at_exactly_timelock_succeeds() {
     // Advance to exactly the timelock timestamp (not past it).
     advance_ledger(&env, timelock_secs);
 
-    // Must succeed ΓÇö timestamp == timelock is the boundary that is still claimable.
+    // Must succeed — timestamp == timelock is the boundary that is still claimable.
     htlc.claim_order(&order_id, &preimage, &beneficiary);
     assert_eq!(token.balance(&beneficiary), amount);
     assert_eq!(htlc.get_order(&order_id).unwrap().status, OrderStatus::Claimed);
@@ -1659,7 +1709,7 @@ fn claim_at_exactly_timelock_succeeds() {
 
 #[test]
 fn refund_at_exactly_timelock_fails() {
-    // lib.rs:384: if env.ledger().timestamp() <= order.timelock ΓåÆ NotExpired
+    // lib.rs:384: if env.ledger().timestamp() <= order.timelock → NotExpired
     // So timestamp == timelock is NOT yet refundable.
     let env = Env::default();
     env.mock_all_auths();
@@ -1684,7 +1734,7 @@ fn refund_at_exactly_timelock_fails() {
     // Advance to exactly the timelock timestamp.
     advance_ledger(&env, timelock_secs);
 
-    // Must fail ΓÇö refund requires strictly past the timelock.
+    // Must fail — refund requires strictly past the timelock.
     assert_eq!(
         htlc.try_refund_order(&order_id, &caller).err().unwrap().unwrap(),
         Error::NotExpired.into()
@@ -1802,7 +1852,7 @@ fn set_min_safety_deposit_negative_rejected() {
 }
 
 // =====================================================================
-// OrderNotFound ΓÇö claim, refund, and get_order on nonexistent ids
+// OrderNotFound — claim, refund, and get_order on nonexistent ids
 // =====================================================================
 
 #[test]
@@ -1914,7 +1964,7 @@ fn refund_order_with_zero_safety_deposit_succeeds() {
 }
 
 // =====================================================================
-// AUTH-SHAPE TEST ΓÇö create_order auth tree covers the token transfer
+// AUTH-SHAPE TEST — create_order auth tree covers the token transfer
 // sub-invocation, guarding against SDK upgrade regressions that might
 // drop the sub-invoke from the auth tree.
 // =====================================================================
