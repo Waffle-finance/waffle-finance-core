@@ -205,6 +205,18 @@
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "UnbondingPeriod"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 86400
+                        }
                       }
                     ]
                   }

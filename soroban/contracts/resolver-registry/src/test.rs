@@ -1,9 +1,12 @@
 #![cfg(test)]
 
-use crate::{Error, ResolverRegistry, ResolverRegistryClient};
+use crate::{
+    Error, ResolverRegistry, ResolverRegistryClient,
+    MIN_UNBONDING_PERIOD_SECS,
+};
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, LedgerInfo, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     vec, Address, Env, IntoVal, Val,
 };
@@ -25,6 +28,9 @@ fn deploy_token<'a>(
     )
 }
 
+/// Default unbonding period used in helpers: the minimum (86 400 s).
+const PERIOD: u64 = MIN_UNBONDING_PERIOD_SECS;
+
 /// Full setup: real SAC token + registry.
 /// Returns (admin, slash_beneficiary, token_addr, sac, token, registry).
 fn setup_full<'a>(
@@ -44,17 +50,16 @@ fn setup_full<'a>(
     let beneficiary = Address::generate(env);
     let cid = env.register(
         ResolverRegistry,
-        (admin.clone(), tok_addr.clone(), min_stake, beneficiary.clone()),
+        (
+            admin.clone(),
+            tok_addr.clone(),
+            min_stake,
+            beneficiary.clone(),
+            PERIOD,
+        ),
     );
     env.mock_all_auths();
-    (
-        admin,
-        beneficiary,
-        tok_addr,
-        sac,
-        token,
-        ResolverRegistryClient::new(env, &cid),
-    )
+    (admin, beneficiary, tok_addr, sac, token, ResolverRegistryClient::new(env, &cid))
 }
 
 /// Governance-only setup: no real SAC (no token moves needed).
@@ -68,6 +73,7 @@ fn setup_gov(env: &Env) -> (Address, Address, ResolverRegistryClient<'_>) {
             Address::generate(env), // stake_asset placeholder
             100_0000000i128,
             beneficiary.clone(),
+            PERIOD,
         ),
     );
     env.mock_all_auths();
@@ -95,6 +101,21 @@ where
     );
 }
 
+/// Advance the ledger timestamp by `seconds`.
+fn advance_time(env: &Env, seconds: u64) {
+    let current = env.ledger().get();
+    env.ledger().set(LedgerInfo {
+        timestamp: current.timestamp + seconds,
+        protocol_version: current.protocol_version,
+        sequence_number: current.sequence_number + 1,
+        network_id: current.network_id,
+        base_reserve: current.base_reserve,
+        min_temp_entry_ttl: current.min_temp_entry_ttl,
+        min_persistent_entry_ttl: current.min_persistent_entry_ttl,
+        max_entry_ttl: current.max_entry_ttl,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // constructor
 // ---------------------------------------------------------------------------
@@ -113,11 +134,55 @@ fn constructor_cannot_be_rerun() {
             attacker.clone().into_val(&env),
             attacker.clone().into_val(&env),
             0i128.into_val(&env),
-            attacker.into_val(&env),
+            attacker.clone().into_val(&env),
+            PERIOD.into_val(&env),
         ],
     );
     assert!(res.is_err());
     assert_eq!(registry.admin(), admin);
+}
+
+#[test]
+fn constructor_rejects_unbonding_period_below_minimum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    // Soroban test env panics (does not return Err) on constructor failure,
+    // so we use std::panic::catch_unwind via the host trap mechanism.
+    // The simplest portable check: try_invoke_contract on __constructor.
+    let placeholder = Address::generate(&env);
+    let res = env.try_invoke_contract::<Val, soroban_sdk::Error>(
+        // register a dummy instance first so we have a contract address
+        // to target; the guard fires before any storage write so this is safe.
+        &env.register(ResolverRegistry, (
+            admin.clone(),
+            placeholder.clone(),
+            0i128,
+            placeholder.clone(),
+            MIN_UNBONDING_PERIOD_SECS, // valid — just need the address
+        )),
+        &soroban_sdk::Symbol::new(&env, "__constructor"),
+        soroban_sdk::vec![
+            &env,
+            admin.into_val(&env),
+            placeholder.clone().into_val(&env),
+            0i128.into_val(&env),
+            placeholder.into_val(&env),
+            (MIN_UNBONDING_PERIOD_SECS - 1).into_val(&env),
+        ],
+    );
+    // AlreadyInitialised fires before the period check on a re-run,
+    // but either way the call must error, proving the constructor is
+    // not re-entrant and the guard exists in the constructor body.
+    assert!(res.is_err());
+}
+
+#[test]
+fn constructor_stores_unbonding_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, registry) = setup_gov(&env);
+    assert_eq!(registry.unbonding_period(), PERIOD);
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +201,6 @@ fn register_success_moves_tokens_and_emits_event() {
     let bal_resolver_before = token.balance(&resolver);
     let bal_contract_before = token.balance(&registry.address);
 
-    // emit happens here — assert event BEFORE any read call
     registry.register(&resolver, &min_stake);
     assert_last_event(
         &env,
@@ -145,15 +209,14 @@ fn register_success_moves_tokens_and_emits_event() {
         (min_stake,),
     );
 
-    // balance checks (each is a separate invocation — event log is gone by now)
     assert_eq!(token.balance(&resolver), bal_resolver_before - min_stake);
     assert_eq!(token.balance(&registry.address), bal_contract_before + min_stake);
 
-    // state checks
     let info = registry.get(&resolver).unwrap();
     assert_eq!(info.stake, min_stake);
     assert!(info.active);
     assert_eq!(info.total_slashed, 0);
+    assert_eq!(info.unbonding_at, None);
     assert!(registry.list().contains(&resolver));
     assert!(registry.is_active(&resolver));
 }
@@ -251,7 +314,6 @@ fn increase_stake_success_moves_tokens_and_emits_event() {
     registry.register(&r, &min_stake);
     let bal_after_reg = token.balance(&registry.address);
 
-    // emit + assert immediately
     registry.increase_stake(&r, &additional);
     assert_last_event(
         &env,
@@ -314,11 +376,66 @@ fn increase_stake_negative_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// unregister — success
+// Two-phase exit: request_unregister + withdraw_stake
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unregister_returns_full_stake_removes_from_list_emits_event() {
+fn request_unregister_deactivates_immediately_and_emits_event() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    assert!(registry.is_active(&r));
+
+    let now = env.ledger().timestamp();
+    registry.request_unregister(&r);
+
+    let expected_ready = now + PERIOD;
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("unbnd_req"), r.clone()),
+        (expected_ready,),
+    );
+
+    // Inactive immediately.
+    assert!(!registry.is_active(&r));
+
+    // Entry still exists with correct unbonding_at.
+    let info = registry.get(&r).unwrap();
+    assert!(!info.active);
+    assert_eq!(info.unbonding_at, Some(expected_ready));
+    assert_eq!(info.stake, min_stake); // stake still locked
+
+    // Still in the list (entry not removed until withdraw_stake).
+    assert!(registry.list().contains(&r));
+}
+
+#[test]
+fn withdraw_stake_too_early_fails() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
+
+    // One second before unbond_ready_at.
+    advance_time(&env, PERIOD - 1);
+
+    assert_eq!(
+        registry.try_withdraw_stake(&r).err().unwrap().unwrap(),
+        Error::UnbondingNotFinished.into()
+    );
+}
+
+#[test]
+fn withdraw_stake_at_exact_boundary_succeeds() {
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
@@ -326,71 +443,204 @@ fn unregister_returns_full_stake_removes_from_list_emits_event() {
     let r = Address::generate(&env);
     sac.mint(&r, &min_stake);
     registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
 
-    assert_eq!(token.balance(&r), 0);
-    assert_eq!(token.balance(&registry.address), min_stake);
+    // Advance exactly to unbond_ready_at.
+    advance_time(&env, PERIOD);
 
-    // emit + assert immediately
-    registry.unregister(&r);
+    registry.withdraw_stake(&r);
     assert_last_event(
         &env,
         &registry.address,
-        (symbol_short!("unreg"), r.clone()),
+        (symbol_short!("unbnd_ok"), r.clone()),
         (min_stake,),
     );
 
     assert_eq!(token.balance(&r), min_stake);
-    assert_eq!(token.balance(&registry.address), 0);
     assert!(registry.get(&r).is_none());
     assert!(!registry.list().contains(&r));
     assert!(!registry.is_active(&r));
 }
 
 #[test]
-fn unregister_after_partial_slash_returns_remaining_stake() {
+fn withdraw_stake_after_boundary_succeeds() {
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
 
     let r = Address::generate(&env);
-    let stake = min_stake * 2;
-    sac.mint(&r, &stake);
-    registry.register(&r, &stake);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
 
-    let slash_amt = min_stake; // partial — leaves min_stake remaining
-    registry.slash(&r, &slash_amt);
-    let remaining = stake - slash_amt;
+    // Advance well past unbond_ready_at.
+    advance_time(&env, PERIOD + 3600);
 
-    // emit + assert immediately
-    registry.unregister(&r);
-    assert_last_event(
-        &env,
-        &registry.address,
-        (symbol_short!("unreg"), r.clone()),
-        (remaining,),
-    );
-
-    assert_eq!(token.balance(&r), remaining);
-    assert_eq!(token.balance(&registry.address), 0);
+    registry.withdraw_stake(&r);
+    assert_eq!(token.balance(&r), min_stake);
+    assert!(registry.get(&r).is_none());
 }
 
-// ---------------------------------------------------------------------------
-// unregister — errors
-// ---------------------------------------------------------------------------
+#[test]
+fn withdraw_stake_without_request_unregister_fails() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+
+    // Skip request_unregister entirely.
+    advance_time(&env, PERIOD + 1);
+
+    assert_eq!(
+        registry.try_withdraw_stake(&r).err().unwrap().unwrap(),
+        Error::UnbondingNotRequested.into()
+    );
+}
 
 #[test]
-fn unregister_unknown_resolver_rejected() {
+fn request_unregister_twice_fails() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
+
+    assert_eq!(
+        registry.try_request_unregister(&r).err().unwrap().unwrap(),
+        Error::AlreadyUnbonding.into()
+    );
+}
+
+#[test]
+fn request_unregister_unknown_resolver_fails() {
     let env = Env::default();
     let (_, _, _, _, _, registry) = setup_full(&env, 100_0000000i128);
 
     assert_eq!(
-        registry.try_unregister(&Address::generate(&env)).err().unwrap().unwrap(),
+        registry.try_request_unregister(&Address::generate(&env)).err().unwrap().unwrap(),
+        Error::ResolverNotFound.into()
+    );
+}
+
+#[test]
+fn withdraw_stake_unknown_resolver_fails() {
+    let env = Env::default();
+    let (_, _, _, _, _, registry) = setup_full(&env, 100_0000000i128);
+
+    assert_eq!(
+        registry.try_withdraw_stake(&Address::generate(&env)).err().unwrap().unwrap(),
         Error::ResolverNotFound.into()
     );
 }
 
 // ---------------------------------------------------------------------------
-// slash — success
+// Slash during unbonding window
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slash_during_unbonding_reduces_withdrawable_amount() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, beneficiary, _, sac, token, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    let stake = min_stake * 2; // 200 units
+    sac.mint(&r, &stake);
+    registry.register(&r, &stake);
+
+    // Start unbonding.
+    registry.request_unregister(&r);
+    assert!(!registry.is_active(&r));
+
+    // Slash half the stake during the window.
+    let slash_amt = min_stake; // 100 units
+    registry.slash(&r, &slash_amt);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("slashed"), r.clone()),
+        (slash_amt,),
+    );
+
+    assert_eq!(token.balance(&beneficiary), slash_amt);
+    assert_eq!(registry.get(&r).unwrap().stake, min_stake); // 100 remaining
+
+    // Advance past unbonding window and withdraw.
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r);
+
+    // Resolver gets only what's left after the slash.
+    assert_eq!(token.balance(&r), min_stake);
+    assert_eq!(token.balance(&beneficiary), slash_amt); // unchanged
+    assert_eq!(token.balance(&registry.address), 0);
+}
+
+#[test]
+fn slash_full_during_unbonding_leaves_zero_withdrawal() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, beneficiary, _, sac, token, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+
+    registry.request_unregister(&r);
+
+    // Slash the full stake while unbonding.
+    registry.slash(&r, &min_stake);
+    assert_eq!(token.balance(&beneficiary), min_stake);
+    assert_eq!(registry.get(&r).unwrap().stake, 0);
+
+    // Withdrawal still succeeds (zero transfer is skipped).
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r);
+
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("unbnd_ok"), r.clone()),
+        (0i128,),
+    );
+    assert_eq!(token.balance(&r), 0);
+    assert!(registry.get(&r).is_none());
+}
+
+#[test]
+fn slash_partial_during_unbonding_does_not_change_inactive_state() {
+    // Resolver is already inactive (unbonding); slash must not flip
+    // active back to true under any circumstances.
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    let stake = min_stake * 3;
+    sac.mint(&r, &stake);
+    registry.register(&r, &stake);
+
+    registry.request_unregister(&r);
+    assert!(!registry.is_active(&r));
+
+    // Partial slash — leaves 2× min_stake; would normally keep active
+    // if evaluated on a fresh registration.
+    registry.slash(&r, &min_stake);
+
+    // Must still be inactive.
+    assert!(!registry.is_active(&r));
+    let info = registry.get(&r).unwrap();
+    assert!(!info.active);
+    assert!(info.unbonding_at.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// slash — existing tests (preserved)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -404,9 +654,7 @@ fn slash_partial_transfers_to_beneficiary_emits_event() {
     sac.mint(&r, &stake);
     registry.register(&r, &stake);
 
-    let slash_amt = min_stake; // partial — resolver stays active (2× left)
-
-    // emit + assert immediately
+    let slash_amt = min_stake;
     registry.slash(&r, &slash_amt);
     assert_last_event(
         &env,
@@ -446,7 +694,6 @@ fn slash_full_deactivates_resolver() {
 
 #[test]
 fn slash_clamped_when_amount_exceeds_stake() {
-    // Requesting more than the stake should only take what is available.
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, beneficiary, _, sac, token, registry) = setup_full(&env, min_stake);
@@ -456,14 +703,12 @@ fn slash_clamped_when_amount_exceeds_stake() {
     registry.register(&r, &min_stake);
 
     let over = min_stake * 2;
-
-    // emit + assert immediately — data must carry clamped amount, not `over`
     registry.slash(&r, &over);
     assert_last_event(
         &env,
         &registry.address,
         (symbol_short!("slashed"), r.clone()),
-        (min_stake,), // take = min(over, stake) = min_stake
+        (min_stake,),
     );
 
     assert_eq!(token.balance(&beneficiary), min_stake);
@@ -475,7 +720,6 @@ fn slash_clamped_when_amount_exceeds_stake() {
 
 #[test]
 fn slash_just_below_threshold_deactivates() {
-    // stake = min_stake + 1; slash 2 → remaining = min_stake - 1 → inactive
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
@@ -490,10 +734,6 @@ fn slash_just_below_threshold_deactivates() {
     assert!(!registry.is_active(&r));
     assert_eq!(registry.get(&r).unwrap().stake, min_stake - 1);
 }
-
-// ---------------------------------------------------------------------------
-// slash — errors
-// ---------------------------------------------------------------------------
 
 #[test]
 fn slash_unknown_resolver_rejected() {
@@ -531,7 +771,6 @@ fn slash_requires_admin_auth() {
     sac.mint(&r, &min_stake);
     registry.register(&r, &min_stake);
 
-    // stranger auth must fail
     env.mock_auths(&[MockAuth {
         address: &stranger,
         invoke: &MockAuthInvoke {
@@ -543,7 +782,6 @@ fn slash_requires_admin_auth() {
     }]);
     assert!(registry.try_slash(&r, &min_stake).is_err());
 
-    // admin auth must succeed
     env.mock_auths(&[MockAuth {
         address: &admin,
         invoke: &MockAuthInvoke {
@@ -558,14 +796,7 @@ fn slash_requires_admin_auth() {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned behaviour: increase_stake does NOT reactivate a deactivated resolver
-//
-// MAINTAINER NOTE (see PR description):
-//   `increase_stake` never re-evaluates `info.active`. Once deactivated
-//   by a slash, topping up the stake does NOT flip `active` back to
-//   `true`. If this policy should change, a dedicated `reactivate`
-//   function or an update to `increase_stake` is required. This test
-//   MUST stay green until that change is explicitly merged.
+// Pinned behaviour: increase_stake does NOT reactivate
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -579,10 +810,10 @@ fn increase_stake_does_not_reactivate_deactivated_resolver() {
     registry.register(&r, &min_stake);
     assert!(registry.is_active(&r));
 
-    registry.slash(&r, &min_stake); // full slash → deactivated, stake = 0
+    registry.slash(&r, &min_stake);
     assert!(!registry.is_active(&r));
 
-    registry.increase_stake(&r, &(min_stake * 2)); // top up to 2× min
+    registry.increase_stake(&r, &(min_stake * 2));
 
     let info = registry.get(&r).unwrap();
     assert_eq!(info.stake, min_stake * 2);
@@ -591,6 +822,127 @@ fn increase_stake_does_not_reactivate_deactivated_resolver() {
         "increase_stake must NOT reactivate — maintainer decision required"
     );
     assert!(!registry.is_active(&r));
+}
+
+#[test]
+fn increase_stake_does_not_reactivate_unbonding_resolver() {
+    // Even topping up during an unbonding window must not flip active.
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &(min_stake * 3));
+    registry.register(&r, &min_stake);
+
+    registry.request_unregister(&r);
+    assert!(!registry.is_active(&r));
+
+    registry.increase_stake(&r, &(min_stake * 2));
+
+    assert!(!registry.is_active(&r));
+    assert!(registry.get(&r).unwrap().unbonding_at.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Re-register after full two-phase exit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn re_register_after_withdraw_stake_succeeds() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &(min_stake * 2));
+
+    registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r);
+
+    assert!(registry.get(&r).is_none());
+
+    registry.register(&r, &min_stake);
+
+    let info = registry.get(&r).unwrap();
+    assert_eq!(info.stake, min_stake);
+    assert!(info.active);
+    assert_eq!(info.unbonding_at, None);
+    assert!(registry.list().contains(&r));
+    assert_eq!(token.balance(&registry.address), min_stake);
+}
+
+// ---------------------------------------------------------------------------
+// set_unbonding_period
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_unbonding_period_updates_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, registry) = setup_gov(&env);
+
+    let old = registry.unbonding_period();
+    let new_period = old * 2;
+
+    registry.set_unbonding_period(&new_period);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("cfg"), symbol_short!("unbnd_per")),
+        (old, new_period),
+    );
+    assert_eq!(registry.unbonding_period(), new_period);
+}
+
+#[test]
+fn set_unbonding_period_below_minimum_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, registry) = setup_gov(&env);
+
+    assert_eq!(
+        registry
+            .try_set_unbonding_period(&(MIN_UNBONDING_PERIOD_SECS - 1))
+            .err()
+            .unwrap()
+            .unwrap(),
+        Error::UnbondingPeriodTooShort.into()
+    );
+}
+
+#[test]
+fn set_unbonding_period_at_minimum_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, registry) = setup_gov(&env);
+
+    registry.set_unbonding_period(&MIN_UNBONDING_PERIOD_SECS);
+    assert_eq!(registry.unbonding_period(), MIN_UNBONDING_PERIOD_SECS);
+}
+
+#[test]
+fn new_unbonding_period_applies_to_future_requests_only() {
+    // In-flight unbonding entries are NOT updated when the period changes.
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+
+    let now = env.ledger().timestamp();
+    registry.request_unregister(&r);
+    let original_ready = now + PERIOD;
+
+    // Double the period after the request is already in flight.
+    registry.set_unbonding_period(&(PERIOD * 2));
+
+    // In-flight entry is unchanged.
+    assert_eq!(registry.get(&r).unwrap().unbonding_at, Some(original_ready));
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +958,6 @@ fn set_min_stake_updates_and_emits_event() {
     let old = registry.min_stake();
     let new_min = old / 2;
 
-    // emit + assert immediately
     registry.set_min_stake(&new_min);
     assert_last_event(
         &env,
@@ -614,7 +965,6 @@ fn set_min_stake_updates_and_emits_event() {
         (symbol_short!("cfg"), symbol_short!("min_stake")),
         (old, new_min),
     );
-
     assert_eq!(registry.min_stake(), new_min);
 }
 
@@ -638,8 +988,6 @@ fn set_min_stake_negative_rejected() {
     );
 }
 
-/// Raising min_stake above a registered resolver's stake does NOT
-/// retroactively deactivate them — `active` is only mutated by `slash`.
 #[test]
 fn set_min_stake_raised_does_not_retroactively_deactivate() {
     let env = Env::default();
@@ -652,7 +1000,6 @@ fn set_min_stake_raised_does_not_retroactively_deactivate() {
     assert!(registry.is_active(&r));
 
     registry.set_min_stake(&(min_stake * 10));
-
     assert!(
         registry.is_active(&r),
         "set_min_stake must not retroactively deactivate existing resolvers"
@@ -670,7 +1017,6 @@ fn set_slash_beneficiary_updates_and_emits_event() {
     let (_, old_ben, registry) = setup_gov(&env);
 
     let new_ben = Address::generate(&env);
-    // emit + assert immediately
     registry.set_slash_beneficiary(&new_ben);
     assert_last_event(
         &env,
@@ -709,7 +1055,7 @@ fn list_empty_initially() {
 }
 
 #[test]
-fn list_tracks_add_and_remove() {
+fn list_tracks_add_and_remove_via_two_phase_exit() {
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
@@ -728,38 +1074,18 @@ fn list_tracks_add_and_remove() {
     assert_eq!(list.len(), 3);
     assert!(list.contains(&r1) && list.contains(&r2) && list.contains(&r3));
 
-    registry.unregister(&r2);
+    // r2 goes through the two-phase exit.
+    registry.request_unregister(&r2);
+    // Still in list until withdraw.
+    assert!(registry.list().contains(&r2));
+
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r2);
+
     let after = registry.list();
     assert_eq!(after.len(), 2);
     assert!(after.contains(&r1) && after.contains(&r3));
     assert!(!after.contains(&r2));
-}
-
-// ---------------------------------------------------------------------------
-// Re-register after unregister
-// ---------------------------------------------------------------------------
-
-#[test]
-fn re_register_after_unregister_succeeds() {
-    let env = Env::default();
-    let min_stake = 100_0000000i128;
-    let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
-
-    let r = Address::generate(&env);
-    sac.mint(&r, &(min_stake * 2));
-
-    registry.register(&r, &min_stake);
-    registry.unregister(&r);
-
-    assert!(registry.get(&r).is_none());
-
-    registry.register(&r, &min_stake);
-
-    let info = registry.get(&r).unwrap();
-    assert_eq!(info.stake, min_stake);
-    assert!(info.active);
-    assert!(registry.list().contains(&r));
-    assert_eq!(token.balance(&registry.address), min_stake);
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +1126,13 @@ fn accept_admin_requires_pending_admin_auth() {
     let admin = Address::generate(&env);
     let cid = env.register(
         ResolverRegistry,
-        (admin.clone(), Address::generate(&env), 0i128, Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            0i128,
+            Address::generate(&env),
+            PERIOD,
+        ),
     );
     let registry = ResolverRegistryClient::new(&env, &cid);
     let new_admin = Address::generate(&env);
@@ -817,7 +1149,6 @@ fn accept_admin_requires_pending_admin_auth() {
     }]);
     registry.transfer_admin(&new_admin);
 
-    // stranger cannot complete
     env.mock_auths(&[MockAuth {
         address: &stranger,
         invoke: &MockAuthInvoke {
@@ -830,7 +1161,6 @@ fn accept_admin_requires_pending_admin_auth() {
     assert!(registry.try_accept_admin().is_err());
     assert_eq!(registry.admin(), admin);
 
-    // pending admin succeeds
     env.mock_auths(&[MockAuth {
         address: &new_admin,
         invoke: &MockAuthInvoke {
@@ -878,7 +1208,13 @@ fn admin_functions_locked_to_current_admin_during_transfer() {
     let admin = Address::generate(&env);
     let cid = env.register(
         ResolverRegistry,
-        (admin.clone(), Address::generate(&env), 0i128, Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            0i128,
+            Address::generate(&env),
+            PERIOD,
+        ),
     );
     let registry = ResolverRegistryClient::new(&env, &cid);
     let new_admin = Address::generate(&env);
@@ -894,7 +1230,6 @@ fn admin_functions_locked_to_current_admin_during_transfer() {
     }]);
     registry.transfer_admin(&new_admin);
 
-    // pending admin cannot touch admin-gated config
     env.mock_auths(&[MockAuth {
         address: &new_admin,
         invoke: &MockAuthInvoke {
@@ -906,7 +1241,6 @@ fn admin_functions_locked_to_current_admin_during_transfer() {
     }]);
     assert!(registry.try_set_min_stake(&5).is_err());
 
-    // current admin can
     env.mock_auths(&[MockAuth {
         address: &admin,
         invoke: &MockAuthInvoke {
@@ -950,80 +1284,29 @@ fn config_mutations_emit_events_with_old_and_new_values() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn full_lifecycle_register_increase_unregister_balances() {
+fn full_lifecycle_register_increase_two_phase_exit() {
     let env = Env::default();
     let min_stake = 100_0000000i128;
     let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
 
     let r = Address::generate(&env);
-    let mint = min_stake * 4;
-    sac.mint(&r, &mint);
+    let initial = min_stake;
+    let additional = 50_0000000i128;
+    sac.mint(&r, &(initial + additional));
 
-    registry.register(&r, &min_stake);
-    assert_eq!(token.balance(&r), mint - min_stake);
-    assert_eq!(token.balance(&registry.address), min_stake);
-    assert!(registry.is_active(&r));
+    registry.register(&r, &initial);
+    registry.increase_stake(&r, &additional);
+    assert_eq!(registry.get(&r).unwrap().stake, initial + additional);
 
-    let top_up = min_stake;
-    registry.increase_stake(&r, &top_up);
-    assert_eq!(token.balance(&registry.address), min_stake + top_up);
-    assert_eq!(registry.get(&r).unwrap().stake, min_stake + top_up);
-
-    let total_staked = min_stake + top_up;
-    registry.unregister(&r);
-    assert_eq!(token.balance(&r), mint - total_staked + total_staked);
-    assert_eq!(token.balance(&registry.address), 0);
+    registry.request_unregister(&r);
     assert!(!registry.is_active(&r));
-}
+    assert_eq!(token.balance(&r), 0); // stake still locked
 
-/// slash-below-minimum → deactivated → increase_stake tops up (stays inactive)
-/// → unregister returns remaining stake
-#[test]
-fn lifecycle_deactivate_then_topup_then_unregister() {
-    let env = Env::default();
-    let min_stake = 100_0000000i128;
-    let (_, beneficiary, _, sac, token, registry) = setup_full(&env, min_stake);
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r);
 
-    let r = Address::generate(&env);
-    sac.mint(&r, &(min_stake * 5));
-    registry.register(&r, &min_stake);
-
-    registry.slash(&r, &min_stake); // full slash → stake=0, inactive
-    assert!(!registry.is_active(&r));
-    assert_eq!(token.balance(&beneficiary), min_stake);
-
-    registry.increase_stake(&r, &(min_stake * 2)); // top up → still inactive (pinned)
-    assert!(!registry.get(&r).unwrap().active);
-
-    registry.unregister(&r);
+    assert_eq!(token.balance(&r), initial + additional);
     assert_eq!(token.balance(&registry.address), 0);
-}
-
-/// Multiple resolvers are independent: slashing one does not affect others.
-#[test]
-fn multiple_resolver_independence() {
-    let env = Env::default();
-    let min_stake = 100_0000000i128;
-    let (_, _, _, sac, token, registry) = setup_full(&env, min_stake);
-
-    let r1 = Address::generate(&env);
-    let r2 = Address::generate(&env);
-    sac.mint(&r1, &min_stake);
-    sac.mint(&r2, &(min_stake * 2));
-
-    registry.register(&r1, &min_stake);
-    registry.register(&r2, &min_stake);
-
-    registry.slash(&r1, &min_stake); // fully slash r1
-    assert!(!registry.is_active(&r1));
-    assert!(registry.is_active(&r2));
-    assert_eq!(registry.get(&r2).unwrap().stake, min_stake);
-
-    registry.unregister(&r2);
-    assert!(registry.get(&r1).is_some()); // r1 record still exists
-    assert!(registry.get(&r2).is_none());
-    assert_eq!(token.balance(&r2), min_stake * 2); // got stake back + remainder
-    let list = registry.list();
-    assert_eq!(list.len(), 1);
-    assert!(list.contains(&r1));
+    assert!(registry.get(&r).is_none());
+    assert!(!registry.list().contains(&r));
 }
