@@ -193,3 +193,18 @@ export const resolverLockActionsTotal = new Counter({
   labelNames: ["resolver_address", "action"] as const,
   registers: [registry],
 });
+
+/**
+ * Soroban event decode failures.
+ *
+ * Incremented whenever a Soroban contract event cannot be decoded —
+ * either because `scValToNative` throws on malformed XDR, or because
+ * the first topic is an unknown symbol not matching our HTLC events.
+ * A non-zero rate here indicates a contract ABI drift or a bad RPC node.
+ */
+export const sorobanDecodeErrors = new Counter({
+  name: "coordinator_soroban_decode_errors_total",
+  help: "Total Soroban contract events that could not be decoded, by reason",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});

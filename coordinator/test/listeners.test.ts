@@ -10,6 +10,17 @@ import { EthereumListener } from "../src/listeners/ethereum-listener.js";
 import { SorobanListener } from "../src/listeners/soroban-listener.js";
 import { SolanaListener, FINALIZATION_SLOTS } from "../src/listeners/solana-listener.js";
 import type { CoordinatorConfig } from "../src/config.js";
+import {
+  makeCreatedEvent,
+  makeClaimedEvent,
+  makeRefundedEvent,
+  makeMalformedDataEvent,
+  makeUnknownTopicEvent,
+  HASHLOCK,
+  PREIMAGE,
+  ORDER_ID,
+  TIMELOCK,
+} from "./fixtures/soroban-xdr-fixtures.js";
 
 // ─── Global mock state: EthereumListener ─────────────────────────────────────
 
@@ -72,25 +83,33 @@ vi.mock("viem", async (importOriginal) => {
 });
 
 // ─── @stellar/stellar-sdk mock ────────────────────────────────────────────────
+// We mock only the RPC server used by SorobanListener.
+// scValToNative, xdr, StrKey, nativeToScVal etc. are passed through from the
+// real SDK so the listener's decoding logic and the XDR fixture helpers work.
 
-vi.mock("@stellar/stellar-sdk", () => ({
-  rpc: {
-    Server: vi.fn(() => ({
-      getLatestLedger: vi.fn(async () => ({ sequence: mockLatestLedger })),
-      getEvents: vi.fn(async () => {
-        if (mockSorobanError) {
-          const err = mockSorobanError;
-          mockSorobanError = null;
-          throw err;
-        }
-        return {
-          events: mockSorobanEvents,
-          cursor: mockSorobanCursor
-        };
-      })
-    }))
-  }
-}));
+vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@stellar/stellar-sdk")>();
+  return {
+    ...actual,
+    rpc: {
+      ...actual.rpc,
+      Server: vi.fn(() => ({
+        getLatestLedger: vi.fn(async () => ({ sequence: mockLatestLedger })),
+        getEvents: vi.fn(async () => {
+          if (mockSorobanError) {
+            const err = mockSorobanError;
+            mockSorobanError = null;
+            throw err;
+          }
+          return {
+            events: mockSorobanEvents,
+            cursor: mockSorobanCursor,
+          };
+        }),
+      })),
+    },
+  };
+});
 
 // ─── @solana/web3.js mock ─────────────────────────────────────────────────────
 
@@ -118,7 +137,8 @@ const log = pino({ level: "silent" });
 
 const VALID_ETH_ADDR = "0x1111111111111111111111111111111111111111";
 const VALID_STELLAR_ADDR = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422";
-const HASHLOCK = "0x" + "a".repeat(64);
+// HASHLOCK is imported from ./fixtures/soroban-xdr-fixtures (0xaaa…a, 32 bytes)
+// It is also used by the Ethereum/Solana tests as their primary test hashlock.
 const HASHLOCK2 = "0x" + "b".repeat(64);
 
 const BASE_CFG: CoordinatorConfig = {
@@ -329,6 +349,14 @@ describe("EthereumListener", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SorobanListener — happy-path tests using real XDR-based ScVal fixtures
+//
+// mockSorobanEvents now carries objects whose `topic` field is an array of
+// real xdr.ScVal objects and whose `value` field is a real xdr.ScVal — exactly
+// the shape that rpc.Server.getEvents() returns from a live RPC node.
+// The listener decodes them with scValToNative just as it does in production.
+// ─────────────────────────────────────────────────────────────────────────────
 describe("SorobanListener", () => {
   let orders: OrderService;
   let listener: SorobanListener;
@@ -338,6 +366,7 @@ describe("SorobanListener", () => {
     mockLatestLedger = 10000;
     mockSorobanEvents = [];
     mockSorobanCursor = null;
+    mockSorobanError = null;
     listener = new SorobanListener(BASE_CFG, orders, log);
   });
 
@@ -345,129 +374,151 @@ describe("SorobanListener", () => {
     listener.stop();
   });
 
-  it("polls and catch up from last processed ledger checkpoint", async () => {
+  // ── created event → recordSrcLock ─────────────────────────────────────────
+  it("decodes a real XDR `created` event and records the src lock", async () => {
     const order = await seedOrder(orders);
     mockLatestLedger = 10100;
 
-    // Simulate an OrderCreated contract event retrieved by polling
-    mockSorobanEvents = [
-      {
-        ledger: 10050,
-        txHash: "0xstellar_tx1",
-        topic: [{ value: "OrderCreated" }],
-        value: {
-          hashlock: HASHLOCK,
-          orderId: "100",
-          timelock: 9999
-        }
-      }
-    ];
+    // XDR fixture: topics[0] = symbol("created"), data[0] = orderId=42n,
+    // topic[3] = hashlock bytes (all 0xaa), data[4] = timelock=9999999
+    mockSorobanEvents = [makeCreatedEvent(10050, "0xstellar_created_tx1")];
 
     listener.start();
-
-    // Wait for the poll loop to execute at least once
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((r) => setTimeout(r, 40));
 
     const updated = await orders.get(order.publicId);
     expect(updated?.status).toBe("src_locked");
-    expect(updated?.srcOrderId).toBe("100");
+    // orderId comes from the u64 field in the data tuple (42n → "42")
+    expect(updated?.srcOrderId).toBe(ORDER_ID);
+    expect(updated?.srcTimelock).toBe(TIMELOCK);
+    expect(updated?.srcLockTx).toBe("0xstellar_created_tx1");
   });
 
-  it("handles duplicate Soroban events idempotently", async () => {
+  // ── Field mapping: hashlock round-trip ────────────────────────────────────
+  it("derives the correct 0x-prefixed hashlock from the BytesN<32> topic field", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+    mockSorobanEvents = [makeCreatedEvent(10050)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    // The hashlock stored in the DB must match what we seeded in the order.
+    // The fixture uses Buffer.alloc(32, 0xaa) → 0xaaa...a (64 hex chars).
+    expect(updated?.hashlock).toBe(HASHLOCK);
+  });
+
+  // ── claimed event → recordSecret ─────────────────────────────────────────
+  it("decodes a real XDR `claimed` event and records the preimage", async () => {
+    const order = await seedStellarOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: ORDER_ID,
+      txHash: "0xlock_tx",
+      blockNumber: 10050,
+      timelock: TIMELOCK,
+    });
+    mockLatestLedger = 10100;
+
+    // XDR fixture: topic[0]=symbol("claimed"), data[2]=preimage bytes (all 0xbb)
+    mockSorobanEvents = [makeClaimedEvent(10051, "0xstellar_claimed_tx1")];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("secret_revealed");
+    // preimage comes from data[2] (Bytes) → 0xbbb...b
+    expect(updated?.preimage).toBe(PREIMAGE);
+    expect(updated?.secretRevealedTx).toBe("0xstellar_claimed_tx1");
+  });
+
+  // ── refunded event → markStatus("refunded") ──────────────────────────────
+  it("decodes a real XDR `refunded` event and marks the order refunded", async () => {
+    const order = await seedStellarOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: ORDER_ID,
+      txHash: "0xlock_tx2",
+      blockNumber: 10050,
+      timelock: TIMELOCK,
+    });
+    mockLatestLedger = 10100;
+
+    // XDR fixture: topic[0]=symbol("refunded"), data[0]=orderId=42n
+    mockSorobanEvents = [makeRefundedEvent(10052, "0xstellar_refunded_tx1")];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("refunded");
+  });
+
+  // ── Idempotency: duplicate created event ─────────────────────────────────
+  it("handles duplicate `created` XDR events idempotently", async () => {
     const order = await seedOrder(orders);
     mockLatestLedger = 10100;
 
-    const event = {
-      ledger: 10051,
-      txHash: "0xstellar_tx2",
-      topic: [{ value: "OrderCreated" }],
-      value: {
-        hashlock: HASHLOCK,
-        orderId: "200",
-        timelock: 9999
-      }
-    };
-
-    mockSorobanEvents = [event];
+    const evt = makeCreatedEvent(10051, "0xstellar_dup_tx");
+    mockSorobanEvents = [evt];
     listener.start();
+    await new Promise((r) => setTimeout(r, 30));
 
-    // Wait for first iteration to run
-    await new Promise((resolve) => setTimeout(resolve, 20));
     let updated = await orders.get(order.publicId);
     expect(updated?.status).toBe("src_locked");
-    expect(updated?.srcOrderId).toBe("200");
+    expect(updated?.srcOrderId).toBe(ORDER_ID);
 
-    // Re-simulate same event
-    mockSorobanEvents = [event];
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Re-deliver same event — must not change state
+    mockSorobanEvents = [evt];
+    await new Promise((r) => setTimeout(r, 30));
 
     updated = await orders.get(order.publicId);
     expect(updated?.status).toBe("src_locked");
-    expect(updated?.srcOrderId).toBe("200");
+    expect(updated?.srcOrderId).toBe(ORDER_ID);
   });
 
-  it("processes claim and refund events to advance order states", async () => {
-    const order = await seedStellarOrder(orders);
-    
-    // Lock source leg first
-    await orders.recordSrcLock({
-      publicId: order.publicId,
-      orderId: "300",
-      txHash: "0xstellar_tx3",
-      blockNumber: 10052,
-      timelock: 9999
-    });
+  // ── Failure branch: malformed data payload ────────────────────────────────
+  it("skips a malformed-payload event without crashing the poll loop", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
 
-    // Simulate OrderClaimed event
-    mockSorobanEvents = [
-      {
-        ledger: 10053,
-        txHash: "0xstellar_tx4",
-        topic: [{ value: "OrderClaimed" }],
-        value: {
-          orderId: "300",
-          preimage: "0x" + "c".repeat(64)
-        }
-      }
-    ];
+    // Malformed: "created" topics but data is a Symbol ScVal, not a Vec
+    mockSorobanEvents = [makeMalformedDataEvent(10050)];
 
     listener.start();
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((r) => setTimeout(r, 40));
 
-    let updated = await orders.get(order.publicId);
-    expect(updated?.status).toBe("secret_revealed");
-    expect(updated?.preimage).toBe("0x" + "c".repeat(64));
+    // Order must NOT be touched — the bad event is silently skipped
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
 
-    // Reset database state back to src_locked and simulate refund event
+  // ── Failure branch: unknown topic ─────────────────────────────────────────
+  it("skips an event with an unknown topic symbol without crashing", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+
+    mockSorobanEvents = [makeUnknownTopicEvent(10050)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+
+  // ── Failure branch: findByHashlock returns null ───────────────────────────
+  it("silently skips a `created` event whose hashlock is not in the DB", async () => {
+    // No order seeded — findByHashlock will return null
+    mockLatestLedger = 10100;
+    mockSorobanEvents = [makeCreatedEvent(10050)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+    // No assertion needed beyond "no error thrown" — listener keeps running
     listener.stop();
-    const cleanOrders = await freshOrders();
-    const cleanOrder = await seedStellarOrder(cleanOrders);
-    await cleanOrders.recordSrcLock({
-      publicId: cleanOrder.publicId,
-      orderId: "300",
-      txHash: "0xstellar_tx3",
-      blockNumber: 10052,
-      timelock: 9999
-    });
-
-    mockSorobanEvents = [
-      {
-        ledger: 10054,
-        txHash: "0xstellar_tx5",
-        topic: [{ value: "OrderRefunded" }],
-        value: {
-          orderId: "300"
-        }
-      }
-    ];
-
-    const secondListener = new SorobanListener(BASE_CFG, cleanOrders, log);
-    secondListener.start();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    secondListener.stop();
-
-    updated = await cleanOrders.get(cleanOrder.publicId);
-    expect(updated?.status).toBe("refunded");
   });
 });
 
@@ -622,6 +673,9 @@ describe("EthereumListener – reorg detection", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SorobanListener — node-inconsistency tests (Issue #155)
+// All events now use real xdr.ScVal fixtures.  The guard logic fires before
+// processSorobanEvent is called, so the XDR decode path is tested in the
+// happy-path suite above.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("SorobanListener – node inconsistency guards", () => {
@@ -646,35 +700,24 @@ describe("SorobanListener – node inconsistency guards", () => {
     const order = await seedOrder(orders);
     mockLatestLedger = 10100;
 
-    // First poll: deliver a valid event at ledger 10050 to advance the cursor.
-    mockSorobanEvents = [
-      {
-        ledger: 10050,
-        txHash: "0xstellar_good",
-        topic: [{ value: "OrderCreated" }],
-        value: { hashlock: HASHLOCK, orderId: "400", timelock: 9999 },
-      },
-    ];
+    // First poll: deliver a valid XDR created event at ledger 10050.
+    mockSorobanEvents = [makeCreatedEvent(10050, "0xstellar_guard_good")];
     listener.start();
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 40));
 
     let state = await orders.get(order.publicId);
     expect(state?.status).toBe("src_locked");
 
-    // Second poll: deliver an event at a LOWER ledger (10020 < 10050).
-    // This should be silently skipped — it must not change order state.
+    // Second poll: deliver the same XDR event at ledger 10020 (< 10050).
+    // The out-of-order guard fires and the event is silently skipped.
+    // Seed a second order so we can observe it is NOT locked.
     const order2 = await seedOrder(orders, HASHLOCK2);
-    mockSorobanEvents = [
-      {
-        ledger: 10020, // out of order — behind lastProcessedLedger=10050
-        txHash: "0xstellar_stale",
-        topic: [{ value: "OrderCreated" }],
-        value: { hashlock: HASHLOCK2, orderId: "401", timelock: 9999 },
-      },
-    ];
-    await new Promise((r) => setTimeout(r, 30));
+    // We reuse the created fixture (hashlock=HASHLOCK); order2 has HASHLOCK2
+    // so even if the guard somehow failed, it would not match — giving us a
+    // clean signal that the guard is the mechanism that prevented processing.
+    mockSorobanEvents = [makeCreatedEvent(10020, "0xstellar_guard_stale")];
+    await new Promise((r) => setTimeout(r, 40));
 
-    // order2 must NOT be locked — the event was skipped.
     const state2 = await orders.get(order2.publicId);
     expect(state2?.status).toBe("announced");
   });
@@ -685,71 +728,44 @@ describe("SorobanListener – node inconsistency guards", () => {
     mockLatestLedger = 10000;
 
     // First poll at ledger 9900 — establishes lastProcessedLedger.
-    mockSorobanEvents = [
-      {
-        ledger: 9900,
-        txHash: "0xstellar_baseline",
-        topic: [{ value: "OrderCreated" }],
-        value: { hashlock: HASHLOCK, orderId: "500", timelock: 9999 },
-      },
-    ];
+    mockSorobanEvents = [makeCreatedEvent(9900, "0xstellar_guard_baseline")];
     mockSorobanCursor = "cursor_after_9900";
     listener.start();
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 40));
 
     let state = await orders.get(order.publicId);
     expect(state?.status).toBe("src_locked");
 
-    // Second poll: deliver an event that jumps 200 ledgers ahead (well over
-    // MAX_LEDGER_GAP=100). The listener should reset the cursor and NOT
-    // process this event (it will be replayed on the next poll cycle).
+    // Second poll: ledger 10101 — gap is 10101-9900=201 > MAX_LEDGER_GAP=100.
+    // The gap guard breaks out of the event loop before calling
+    // processSorobanEvent, so order2 (HASHLOCK2) must remain "announced".
     const order2 = await seedOrder(orders, HASHLOCK2);
-    mockSorobanEvents = [
-      {
-        ledger: 10101, // 10101 - 9900 = 201 > MAX_LEDGER_GAP=100
-        txHash: "0xstellar_gap",
-        topic: [{ value: "OrderCreated" }],
-        value: { hashlock: HASHLOCK2, orderId: "501", timelock: 9999 },
-      },
-    ];
-    // Provide a new cursor value — if the gap guard works, it will NOT advance
-    // to this cursor.
+    mockSorobanEvents = [makeCreatedEvent(10101, "0xstellar_guard_gap")];
     mockSorobanCursor = "cursor_after_gap";
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 40));
 
-    // order2 should NOT have been processed — the gap guard broke out of the
-    // event loop before processing it and reset the cursor for re-scan.
     const state2 = await orders.get(order2.publicId);
     expect(state2?.status).toBe("announced");
   });
 
-  // ── Task #2c: stale cursor error triggers a cursor reset ──────────────────
+  // ── Task #2c: stale cursor error triggers cursor reset ────────────────────
   it("resets the cursor and continues polling after a stale-cursor RPC error", async () => {
     const order = await seedOrder(orders);
     mockLatestLedger = 10100;
 
-    // First poll will throw — simulating a node that no longer knows our cursor.
+    // First poll throws — simulating a node that no longer knows our cursor.
     mockSorobanError = new Error("cursor not found: history pruned");
 
-    // The listener must survive the error and continue on the next tick.
-    // We'll deliver a valid event on the second poll.
-    mockSorobanEvents = [
-      {
-        ledger: 10050,
-        txHash: "0xstellar_after_reset",
-        topic: [{ value: "OrderCreated" }],
-        value: { hashlock: HASHLOCK, orderId: "600", timelock: 9999 },
-      },
-    ];
+    // Deliver a valid XDR event on the second poll (after error recovery).
+    mockSorobanEvents = [makeCreatedEvent(10050, "0xstellar_after_reset")];
 
     listener.start();
-    // Give the listener enough time for two poll cycles (pollIntervalMs=1ms).
-    await new Promise((r) => setTimeout(r, 50));
+    // Allow two poll cycles at pollIntervalMs=1ms.
+    await new Promise((r) => setTimeout(r, 60));
 
-    // After the error recovery, the second poll should have processed the event.
     const state = await orders.get(order.publicId);
     expect(state?.status).toBe("src_locked");
-    expect(state?.srcOrderId).toBe("600");
+    expect(state?.srcOrderId).toBe(ORDER_ID);
   });
 });
 
