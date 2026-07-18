@@ -167,6 +167,46 @@ export const solanaPlaceholderMode = new Gauge({
 });
 
 // ---------------------------------------------------------------------------
+// XLM refund service counters
+// ---------------------------------------------------------------------------
+
+/**
+ * Total refund submissions suppressed because the RefundLedger already
+ * holds a committed or in-flight entry for that orderId. This is the
+ * primary signal for exactly-once compliance.
+ */
+export const refundDuplicatesSuppressed = new Counter({
+  name: 'relayer_xlm_refund_duplicates_suppressed_total',
+  help: 'Total XLM refund attempts suppressed by the RefundLedger idempotency guard',
+  labelNames: ['network_mode'] as const,
+  registers: [registry],
+});
+
+/**
+ * Total Horizon submit calls that returned a 504, 408, or network-level
+ * timeout. These are *ambiguous* — the tx may have landed. Callers should
+ * mark the order ambiguous in the RefundLedger and not retry immediately.
+ */
+export const refundHorizonTimeouts = new Counter({
+  name: 'relayer_xlm_refund_horizon_timeouts_total',
+  help: 'Total Horizon submit calls that returned a timeout or 504 (ambiguous outcome)',
+  labelNames: ['network_mode'] as const,
+  registers: [registry],
+});
+
+/**
+ * Total intra-call retries performed for transient (non-terminal, non-timeout)
+ * Horizon errors inside refundXlmToUser. One unit = one retry attempt, not
+ * one overall refund invocation.
+ */
+export const refundHorizonRetries = new Counter({
+  name: 'relayer_xlm_refund_horizon_retries_total',
+  help: 'Total transient-error retries inside refundXlmToUser',
+  labelNames: ['network_mode'] as const,
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
 // Convenience re-export
 // ---------------------------------------------------------------------------
 
@@ -181,4 +221,11 @@ export const watchdogMetrics = {
   maxStaleAge: watchdogMaxStaleAgeSeconds,
   pendingRefunds: watchdogPendingRefundsGauge,
   tickDuration: watchdogTickDurationSeconds,
+} as const;
+
+/** All XLM refund service metrics in one object — useful for test assertions. */
+export const refundMetrics = {
+  duplicatesSuppressed: refundDuplicatesSuppressed,
+  horizonTimeouts: refundHorizonTimeouts,
+  horizonRetries: refundHorizonRetries,
 } as const;
