@@ -15,6 +15,13 @@ import { ethers } from 'ethers';
 import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { refundXlmToUser, HorizonTimeoutError } from './services/xlm-refund.js';
 import { globalRefundLedger } from './services/refund-ledger.js';
+import { globalStellarProofLedger } from './services/stellar-proof-ledger.js';
+import {
+  verifyIncomingStellarPayment,
+  StellarTxNotFoundError,
+  StellarTxFailedError,
+  StellarPaymentMismatch,
+} from './services/horizon-verifier.js';
 import { requireAdminAuth } from './middleware/admin-auth.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './listeners/contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './utils/adaptive-poll.js';
@@ -1790,7 +1797,7 @@ async function initializeRelayer() {
         });
       }
 
-      console.log('≡ƒÆ░ XLMΓåÆETH: Processing dedicated endpoint...', { orderId, stellarTxHash, stellarAddress, ethAddress: normalizedEthAddress });
+      console.log('≡ƒÆ░ XLMΓåÆETH: Processing dedicated endpoint...', { orderId, stellarTxHash, stellarAddress, ethAddress });
       
       // Get stored order - BYPASSED FOR NOW (in-memory data lost on restart)
       let storedOrder = activeOrders.get(orderId);
@@ -1802,7 +1809,7 @@ async function initializeRelayer() {
       // }
 
       // Use provided data or defaults if order not found in memory
-      const userEthAddress = storedOrder?.ethAddress || normalizedEthAddress;
+      const userEthAddress = storedOrder?.ethAddress || ethAddress;
       const orderAmount = storedOrder?.amount || '10'; // Default for testing
 
       // ≡ƒ¢í∩╕Å Refund watchdog bookkeeping. We need:
@@ -1825,7 +1832,7 @@ async function initializeRelayer() {
       
       console.log('≡ƒÄ» XLMΓåÆETH: Sending ETH to user...', { userEthAddress, orderAmount });
       
-      try {
+      {
         // Γ£à NETWORK-AWARE: Use request network first, fallback to stored order
         const orderNetworkMode = requestNetwork || storedOrder?.networkMode || 'mainnet';
         const rpcUrl = resolveEthereumRpcUrl(orderNetworkMode === 'testnet' ? 'testnet' : 'mainnet');
@@ -1888,7 +1895,9 @@ async function initializeRelayer() {
             stellarTxHash,
           });
         }
-        
+      }
+
+      try {
         console.log('≡ƒÆ░ REAL MODE: Sending actual ETH transaction');
         console.log('≡ƒöù RPC URL:', rpcUrl);
         console.log('≡ƒöæ Using real private key:', privateKey.substring(0, 10) + '...');
@@ -2028,6 +2037,7 @@ async function initializeRelayer() {
         console.log('≡ƒÅá Sending to user address:', userEthAddress);
         
         // Create ETH transfer transaction
+        const ethAmountWei = BigInt(ethAmount);
         const tx = {
           to: userEthAddress,
           value: ethAmountWei,
@@ -2185,6 +2195,7 @@ async function initializeRelayer() {
                 originalStellarTxHash: stellarTxHash,
               },
         });
+      }
       }
 
     } catch (error: any) {
