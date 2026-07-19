@@ -113,14 +113,30 @@ export async function runCommand(): Promise<void> {
       });
 
       await stellar.start({
-        onContractEvent: (e) => {
+        onOrderCreated: (e) => {
           log.info(
-            { ledger: e.ledger, txHash: e.txHash, topics: e.topics.length },
-            "Soroban event"
+            { orderId: e.orderId, hashlock: e.hashlock, ledger: e.ledger },
+            "Soroban order created"
           );
-          ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "contract_event" });
+          ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_created" });
           listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
-        }
+        },
+        onOrderClaimed: (e) => {
+          log.info(
+            { orderId: e.orderId, preimage: e.preimage, ledger: e.ledger },
+            "Soroban order claimed"
+          );
+          ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_claimed" });
+          listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
+        },
+        onOrderRefunded: (e) => {
+          log.info(
+            { orderId: e.orderId, ledger: e.ledger },
+            "Soroban order refunded"
+          );
+          ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_refunded" });
+          listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
+        },
       });
     },
     async stop() {

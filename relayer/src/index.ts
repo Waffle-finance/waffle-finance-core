@@ -15,6 +15,7 @@ import { ethers } from 'ethers';
 import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { refundXlmToUser, HorizonTimeoutError } from './services/xlm-refund.js';
 import { globalRefundLedger } from './services/refund-ledger.js';
+import { requireAdminAuth } from './middleware/admin-auth.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './listeners/contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './utils/adaptive-poll.js';
 import { fetchIncomingEthPayments } from './listeners/eth-incoming-monitor.js';
@@ -632,8 +633,8 @@ async function initializeRelayer() {
     res.status(204).end();
   });
 
-  // Debug: verify lazy monitoring + stuck orders (safe to expose — no secrets).
-  app.get('/api/debug/chain-monitor', (_req, res) => {
+  // Debug: verify lazy monitoring + stuck orders (operator-only — requires auth).
+  app.get('/api/debug/chain-monitor', requireAdminAuth(), (_req, res) => {
     reconcileChainMonitoring();
     const statuses: Record<string, number> = {};
     for (const order of activeOrders.values()) {
@@ -2851,15 +2852,18 @@ async function initializeRelayer() {
   // Admin endpoints - must be inside initializeRelayer function
   
   // Admin endpoint to authorize relayer
-  app.post('/api/admin/authorize-relayer', async (req, res) => {
+  app.post('/api/admin/authorize-relayer', requireAdminAuth(), async (req, res) => {
     try {
       console.log('🔐 Authorizing relayer as resolver...');
       
-      const { adminPrivateKey } = req.body;
+      // Admin private key MUST come from the server environment, never from
+      // the request body. Accepting secrets over the wire would expose them
+      // in logs, proxies, and CDN caches.
+      const adminPrivateKey = process.env.RELAYER_ADMIN_PRIVATE_KEY;
       if (!adminPrivateKey) {
-        return res.status(400).json({
+        return res.status(500).json({
           success: false,
-          error: 'Admin private key required'
+          error: 'RELAYER_ADMIN_PRIVATE_KEY is not configured on this server',
         });
       }
       
@@ -2898,7 +2902,7 @@ async function initializeRelayer() {
   });
 
   // Check relayer authorization status
-  app.get('/api/admin/relayer-status', async (req, res) => {
+  app.get('/api/admin/relayer-status', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2930,7 +2934,7 @@ async function initializeRelayer() {
   });
 
   // Check configured resolver allowlist authorization status
-  app.get('/api/admin/resolvers', async (req, res) => {
+  app.get('/api/admin/resolvers', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2967,20 +2971,6 @@ async function initializeRelayer() {
   });
 
   console.log('✅ Admin endpoints registered');
-
-  // ═══════════════════════════════════════════════════════════════════════════════════════
-  // DEBUG ENDPOINT
-  // ═══════════════════════════════════════════════════════════════════════════════════════
-  
-  app.post('/api/debug/body', (req, res) => {
-    console.log('DEBUG: Request body:', req.body);
-    console.log('DEBUG: Request headers:', req.headers);
-    res.json({
-      success: true,
-      body: req.body,
-      headers: req.headers
-    });
-  });
 
   // ═══════════════════════════════════════════════════════════════════════════════════════
             // 1INCH ESCROW FACTORY ENDPOINTS - Using createDstEscrow approach
