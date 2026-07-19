@@ -2,22 +2,22 @@
  * Tests for the hardened XLM refund service.
  *
  * Coverage:
- *  - xlmStringToStroops / stroopsToXlmString / parseFallbackStroops ΓÇö integer math
+ *  - xlmStringToStroops / stroopsToXlmString / parseFallbackStroops — integer math
  *  - HorizonTimeoutError / HorizonTerminalError / HorizonTransientError taxonomy
  *  - refundXlmToUser happy path (amount resolved from tx lookup)
  *  - refundXlmToUser happy path (fallback stroops)
- *  - Horizon 504 ΓåÆ HorizonTimeoutError propagated without retry
- *  - Horizon terminal code ΓåÆ HorizonTerminalError propagated without retry
- *  - Horizon transient 503 ΓåÆ internally retried ΓåÆ eventual success
- *  - Horizon transient 503 ΓåÆ exhausted ΓåÆ HorizonTransientError surfaces
- *  - RefundLedger idempotency: committed entry ΓåÆ cache hit, no Horizon call
- *  - RefundLedger idempotency: in_flight entry ΓåÆ refused with error
+ *  - Horizon 504 → HorizonTimeoutError propagated without retry
+ *  - Horizon terminal code → HorizonTerminalError propagated without retry
+ *  - Horizon transient 503 → internally retried → eventual success
+ *  - Horizon transient 503 → exhausted → HorizonTransientError surfaces
+ *  - RefundLedger idempotency: committed entry → cache hit, no Horizon call
+ *  - RefundLedger idempotency: in_flight entry → refused with error
  *  - Duplicate-suppression metric incremented on cache hit
  *  - Horizon-timeout metric incremented on 504
  *  - Horizon-retry metric incremented on transient retry
  *  - RefundLedger unit: claim / commit / release / markAmbiguous / resolveAmbiguous
- *  - Watchdog tick: duplicate path ΓåÆ order synced from ledger, no refund call
- *  - Watchdog tick: Horizon timeout ΓåÆ order marked ambiguous, failure metric=horizon_timeout
+ *  - Watchdog tick: duplicate path → order synced from ledger, no refund call
+ *  - Watchdog tick: Horizon timeout → order marked ambiguous, failure metric=horizon_timeout
  *  - Watchdog tick: success with exact stroop amount in log
  *  - Metrics registry: new counter names present in Prometheus output
  */
@@ -93,7 +93,7 @@ async function runTick(deps: TickDeps): Promise<void> {
       try {
         if (!isXlmToEthAwaitingEth(order as any)) continue;
 
-        // Idempotency: committed elsewhere ΓåÆ sync order and skip
+        // Idempotency: committed elsewhere → sync order and skip
         const ledgerEntry = ledger.getEntry(orderId);
         if (ledgerEntry?.state.phase === 'committed') {
           if (!order['refundTxHash']) {
@@ -185,12 +185,12 @@ describe('xlmStringToStroops', () => {
   });
 
   it('truncates past 7 decimal digits without rounding', () => {
-    // "0.00000019" ΓåÆ truncated to "0.0000001" = 1 stroop
+    // "0.00000019" → truncated to "0.0000001" = 1 stroop
     expect(xlmStringToStroops('0.00000019')).toBe(1n);
   });
 
   it('pads short decimal part', () => {
-    // "10.5" ΓåÆ "10.5000000" = 105000000
+    // "10.5" → "10.5000000" = 105000000
     expect(xlmStringToStroops('10.5')).toBe(105000000n);
   });
 
@@ -290,7 +290,7 @@ describe('RefundLedger', () => {
     expect(ledger.claim('order-1')).toBe(false);
   });
 
-  it('commit transitions in_flight ΓåÆ committed', () => {
+  it('commit transitions in_flight → committed', () => {
     ledger.claim('order-1');
     ledger.commit('order-1', { txHash: '0xabc', amount: '10.0000000' });
     const entry = ledger.getEntry('order-1');
@@ -301,7 +301,7 @@ describe('RefundLedger', () => {
     }
   });
 
-  it('commit is idempotent ΓÇö second call is a no-op', () => {
+  it('commit is idempotent — second call is a no-op', () => {
     ledger.claim('order-1');
     ledger.commit('order-1', { txHash: '0xfirst', amount: '5.0000000' });
     ledger.commit('order-1', { txHash: '0xsecond', amount: '5.0000000' });
@@ -324,7 +324,7 @@ describe('RefundLedger', () => {
     expect(ledger.getEntry('order-1')?.state.phase).toBe('committed');
   });
 
-  it('markAmbiguous transitions in_flight ΓåÆ ambiguous', () => {
+  it('markAmbiguous transitions in_flight → ambiguous', () => {
     ledger.claim('order-1');
     ledger.markAmbiguous('order-1', 'Horizon 504');
     expect(ledger.getEntry('order-1')?.state.phase).toBe('ambiguous');
@@ -345,7 +345,7 @@ describe('RefundLedger', () => {
     expect(ledger.isCommitted('order-1')).toBe(true);
   });
 
-  it('resolveAmbiguous promotes ambiguous ΓåÆ committed', () => {
+  it('resolveAmbiguous promotes ambiguous → committed', () => {
     ledger.claim('order-1');
     ledger.markAmbiguous('order-1', 'timeout');
     ledger.resolveAmbiguous('order-1', { txHash: '0xconfirmed', amount: '3.0000000' });
@@ -379,7 +379,7 @@ describe('RefundLedger', () => {
 });
 
 // ===========================================================================
-// refundXlmToUser ΓÇö mocked Stellar SDK
+// refundXlmToUser — mocked Stellar SDK
 // ===========================================================================
 
 /**
@@ -459,7 +459,7 @@ function makeSDKStub(serverInstance: ReturnType<typeof makeHorizonServer>) {
 }
 
 // ---------------------------------------------------------------------------
-// Happy path ΓÇö amount resolved from tx lookup
+// Happy path — amount resolved from tx lookup
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: happy path with tx lookup', () => {
@@ -495,7 +495,7 @@ describe('refundXlmToUser: happy path with tx lookup', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Happy path ΓÇö fallback stroops (no tx hash supplied)
+// Happy path — fallback stroops (no tx hash supplied)
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: fallback stroops path', () => {
@@ -524,7 +524,7 @@ describe('refundXlmToUser: fallback stroops path', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Horizon 504 ΓåÆ HorizonTimeoutError, no retry
+// Horizon 504 → HorizonTimeoutError, no retry
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: Horizon 504 timeout', () => {
@@ -551,7 +551,7 @@ describe('refundXlmToUser: Horizon 504 timeout', () => {
       })
     ).rejects.toBeInstanceOf(HorizonTimeoutError);
 
-    // Only one submit attempt ΓÇö timeout stops retries immediately
+    // Only one submit attempt — timeout stops retries immediately
     expect(server.submitTransaction).toHaveBeenCalledTimes(1);
 
     vi.doUnmock('@stellar/stellar-sdk');
@@ -559,7 +559,7 @@ describe('refundXlmToUser: Horizon 504 timeout', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Horizon terminal result code ΓåÆ HorizonTerminalError, no retry
+// Horizon terminal result code → HorizonTerminalError, no retry
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: Horizon terminal error', () => {
@@ -596,14 +596,14 @@ describe('refundXlmToUser: Horizon terminal error', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Horizon transient 503 ΓåÆ retried ΓåÆ eventual success
+// Horizon transient 503 → retried → eventual success
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: transient error retried to success', () => {
   it('retries on 503 and succeeds on third attempt', async () => {
     // Use a minimal fake that avoids dynamic import re-caching issues.
     // We call the exported error classifier logic indirectly via the error
-    // classes themselves ΓÇö verifying the retry loop semantics via a
+    // classes themselves — verifying the retry loop semantics via a
     // lightweight integration over the classification helpers.
 
     // What we're really verifying here: a 503-shaped error is classified
@@ -643,7 +643,7 @@ describe('refundXlmToUser: transient error retried to success', () => {
           const codes = response?.data?.extras?.result_codes ?? {};
           throw new HorizonTerminalError('terminal', codes.transaction ?? 'unknown');
         }
-        // 503 ΓåÆ transient, retry
+        // 503 → transient, retry
         if (attempt < maxRetries) {
           await new Promise(r => setTimeout(r, 0)); // instant in test
         }
@@ -657,12 +657,12 @@ describe('refundXlmToUser: transient error retried to success', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Horizon transient ΓÇö exhausted retries ΓåÆ HorizonTransientError surfaces
+// Horizon transient — exhausted retries → HorizonTransientError surfaces
 // ---------------------------------------------------------------------------
 
 describe('refundXlmToUser: transient error exhausts retries', () => {
   it('surfaces HorizonTransientError when all retries are exhausted', async () => {
-    // Mirror the retry loop from refundXlmToUser ΓÇö verifies that when all
+    // Mirror the retry loop from refundXlmToUser — verifies that when all
     // maxRetries attempts fail with a transient 503, the last error surfaces.
     const transientError = Object.assign(new Error('service unavailable'), {
       response: { status: 503, data: {} },
@@ -681,7 +681,7 @@ describe('refundXlmToUser: transient error exhausts retries', () => {
         const response = (err as any)?.response;
         if (response?.status === 504) throw new HorizonTimeoutError('timeout');
         if (response?.status === 400) throw new HorizonTerminalError('terminal', 'unknown');
-        // 503 ΓåÆ transient
+        // 503 → transient
         if (attempt < maxRetries) {
           await new Promise(r => setTimeout(r, 0));
         }
@@ -692,7 +692,7 @@ describe('refundXlmToUser: transient error exhausts retries', () => {
     // After exhausting retries, lastErr is the original transient error.
     // classifyHorizonError would wrap it in HorizonTransientError:
     const classified = new HorizonTransientError(
-      `Horizon 503 error ΓÇö transient. (${(lastErr as Error).message})`
+      `Horizon 503 error — transient. (${(lastErr as Error).message})`
     );
     expect(classified).toBeInstanceOf(HorizonTransientError);
     expect(attempt).toBe(maxRetries + 1); // initial + maxRetries
@@ -700,10 +700,10 @@ describe('refundXlmToUser: transient error exhausts retries', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RefundLedger idempotency: committed entry ΓåÆ cache hit, no Horizon call
+// RefundLedger idempotency: committed entry → cache hit, no Horizon call
 // ---------------------------------------------------------------------------
 
-describe('refundXlmToUser: committed ledger entry ΓåÆ cache hit', () => {
+describe('refundXlmToUser: committed ledger entry → cache hit', () => {
   it('returns cached result without calling Horizon', async () => {
     const server = makeHorizonServer({ submitResponse: { hash: '0xshouldbeignored' } });
     const sdkStub = makeSDKStub(server);
@@ -739,10 +739,10 @@ describe('refundXlmToUser: committed ledger entry ΓåÆ cache hit', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RefundLedger idempotency: in_flight entry ΓåÆ refused with error
+// RefundLedger idempotency: in_flight entry → refused with error
 // ---------------------------------------------------------------------------
 
-describe('refundXlmToUser: in_flight ledger entry ΓåÆ refused', () => {
+describe('refundXlmToUser: in_flight ledger entry → refused', () => {
   it('throws without hitting Horizon when entry is in_flight', async () => {
     const server = makeHorizonServer({ submitResponse: { hash: '0xshouldbeignored' } });
     const sdkStub = makeSDKStub(server);
@@ -784,7 +784,7 @@ describe('refundXlmToUser: successful submit commits ledger', () => {
 
     // Fresh ledger with no prior entry for this unique orderId
     const ledger2 = new RefundLedger();
-    // Do NOT pre-claim ΓÇö pass ledger2 without an entry; function sees nothing
+    // Do NOT pre-claim — pass ledger2 without an entry; function sees nothing
     // and proceeds, then commits on success.
     const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
 
@@ -817,7 +817,7 @@ describe('refundXlmToUser: successful submit commits ledger', () => {
 // Watchdog tick: duplicate detection via ledger
 // ===========================================================================
 
-describe('watchdog tick: ledger committed ΓåÆ duplicate suppressed', () => {
+describe('watchdog tick: ledger committed → duplicate suppressed', () => {
   it('syncs order state from ledger and increments duplicate counter', async () => {
     const m = makeTestMetrics();
     const ledger = new RefundLedger();
@@ -837,7 +837,7 @@ describe('watchdog tick: ledger committed ΓåÆ duplicate suppressed', () => {
 
     await runTick({ activeOrders: orders, staleAfterMs: 5 * 60_000, networkMode: 'testnet', refundFn, m, ledger });
 
-    // Refund function was never called ΓÇö duplicate suppressed
+    // Refund function was never called — duplicate suppressed
     expect(refundFn).not.toHaveBeenCalled();
     // Order synced from ledger
     expect(order['status']).toBe('refunded');
@@ -849,10 +849,10 @@ describe('watchdog tick: ledger committed ΓåÆ duplicate suppressed', () => {
 });
 
 // ===========================================================================
-// Watchdog tick: Horizon timeout ΓåÆ ambiguous
+// Watchdog tick: Horizon timeout → ambiguous
 // ===========================================================================
 
-describe('watchdog tick: Horizon timeout ΓåÆ ambiguous state', () => {
+describe('watchdog tick: Horizon timeout → ambiguous state', () => {
   it('marks order watchdogFailedAt and increments horizon_timeout failure', async () => {
     const m = makeTestMetrics();
     const ledger = new RefundLedger();
@@ -875,7 +875,7 @@ describe('watchdog tick: Horizon timeout ΓåÆ ambiguous state', () => {
     expect(order['status']).not.toBe('refunded');
     // Ledger entry should be ambiguous
     expect(ledger.getEntry('order-timeout')?.state.phase).toBe('ambiguous');
-    // watchdogFailedAt set ΓÇö back-off will apply next tick
+    // watchdogFailedAt set — back-off will apply next tick
     expect(order['watchdogFailedAt']).toBeTypeOf('number');
   });
 });
@@ -913,7 +913,7 @@ describe('watchdog tick: success increments success counter', () => {
 });
 
 // ===========================================================================
-// Watchdog tick: exactly-once ΓÇö same order across two ticks
+// Watchdog tick: exactly-once — same order across two ticks
 // ===========================================================================
 
 describe('watchdog tick: exactly-once across two ticks', () => {
@@ -934,12 +934,12 @@ describe('watchdog tick: exactly-once across two ticks', () => {
     };
     const orders = new Map([['order-once', order]]);
 
-    // First tick ΓÇö should refund
+    // First tick — should refund
     await runTick({ activeOrders: orders, staleAfterMs: 5 * 60_000, networkMode: 'testnet', refundFn, m, ledger });
     expect(refundFn).toHaveBeenCalledTimes(1);
     expect(order['status']).toBe('refunded');
 
-    // Second tick ΓÇö isXlmToEthAwaitingEth returns false ΓåÆ skipped entirely
+    // Second tick — isXlmToEthAwaitingEth returns false → skipped entirely
     await runTick({ activeOrders: orders, staleAfterMs: 5 * 60_000, networkMode: 'testnet', refundFn, m, ledger });
     expect(refundFn).toHaveBeenCalledTimes(1); // still only 1
 
@@ -980,7 +980,7 @@ describe('metrics registry: new XLM refund counters present', () => {
 // ===========================================================================
 
 describe('stroop math: fee deduction edge cases', () => {
-  it('xlmStringToStroops ΓåÆ stroopsToXlmString round-trips without precision loss', () => {
+  it('xlmStringToStroops → stroopsToXlmString round-trips without precision loss', () => {
     const cases = [
       '0.0000001',
       '0.0000100',

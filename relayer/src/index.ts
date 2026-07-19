@@ -15,6 +15,7 @@ import { ethers } from 'ethers';
 import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { refundXlmToUser, HorizonTimeoutError } from './services/xlm-refund.js';
 import { globalRefundLedger } from './services/refund-ledger.js';
+import { requireAdminAuth } from './middleware/admin-auth.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './listeners/contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './utils/adaptive-poll.js';
 import { fetchIncomingEthPayments } from './listeners/eth-incoming-monitor.js';
@@ -632,8 +633,8 @@ async function initializeRelayer() {
     res.status(204).end();
   });
 
-  // Debug: verify lazy monitoring + stuck orders (safe to expose ΓÇö no secrets).
-  app.get('/api/debug/chain-monitor', (_req, res) => {
+  // Debug: verify lazy monitoring + stuck orders (operator-only — requires auth).
+  app.get('/api/debug/chain-monitor', requireAdminAuth(), (_req, res) => {
     reconcileChainMonitoring();
     const statuses: Record<string, number> = {};
     for (const order of activeOrders.values()) {
@@ -2090,10 +2091,10 @@ async function initializeRelayer() {
           : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
 
         if (refundSecretKey && stellarAddress) {
-          console.log('≡ƒöä Attempting automatic XLM refund to user...');
-          console.log('≡ƒÄ» Refunding to stellar address:', stellarAddress);
+          console.log('🔄 Attempting automatic XLM refund to user...');
+          console.log('🎯 Refunding to stellar address:', stellarAddress);
 
-          // Claim the idempotency lock ΓÇö if another path already committed
+          // Claim the idempotency lock — if another path already committed
           // a refund for this order, skip the Horizon submission entirely.
           const claimed = globalRefundLedger.claim(orderId);
           if (!claimed) {
@@ -2104,10 +2105,10 @@ async function initializeRelayer() {
                 storedOrder.status = 'refunded';
                 storedOrder.refundTxHash = existing.state.txHash;
               }
-              console.log(`Γ£à Refund already committed by another path (tx=${existing.state.txHash}); skipping`);
+              console.log(`✅ Refund already committed by another path (tx=${existing.state.txHash}); skipping`);
             } else {
               refundError = `Refund already in-flight or ambiguous for orderId=${orderId}`;
-              console.warn(`ΓÜá∩╕Å ${refundError}`);
+              console.warn(`⚠️ ${refundError}`);
             }
           } else {
             try {
@@ -2128,31 +2129,31 @@ async function initializeRelayer() {
                 storedOrder.status = 'refunded';
                 storedOrder.refundTxHash = refund.hash;
               }
-              console.log(`Γ£à Automatic XLM refund successful: ${refund.hash} (${refund.amount} XLM)`);
+              console.log(`✅ Automatic XLM refund successful: ${refund.hash} (${refund.amount} XLM)`);
             } catch (refundErr: any) {
               if (refundErr instanceof HorizonTimeoutError) {
-                // Ambiguous ΓÇö tx may have landed; ledger already marked ambiguous
+                // Ambiguous — tx may have landed; ledger already marked ambiguous
                 // inside refundXlmToUser. Do not release the lock.
                 refundIsAmbiguous = true;
-                refundError = `Horizon timeout ΓÇö refund status ambiguous: ${refundErr.message}`;
+                refundError = `Horizon timeout — refund status ambiguous: ${refundErr.message}`;
                 if (storedOrder) {
                   storedOrder.watchdogFailedAt = Date.now();
                   storedOrder.watchdogFailureReason = `horizon_timeout: ${refundErr.message}`;
                 }
                 globalRefundLedger.markAmbiguous(orderId, refundErr.message);
               } else {
-                // Definitive failure ΓÇö release lock so watchdog can retry
+                // Definitive failure — release lock so watchdog can retry
                 globalRefundLedger.release(orderId);
                 refundError = refundErr.message || 'Refund failed';
               }
-              console.error('Γ¥î Automatic XLM refund failed:', refundErr?.message ?? refundErr);
+              console.error('❌ Automatic XLM refund failed:', refundErr?.message ?? refundErr);
             }
           }
         } else {
           refundError = refundSecretKey
             ? 'Missing stellarAddress for refund'
             : `Relayer Stellar secret not configured for ${networkModeForRefund}`;
-          console.error('Γ¥î Cannot refund:', refundError);
+          console.error('❌ Cannot refund:', refundError);
         }
 
         res.status(500).json({
@@ -2168,7 +2169,7 @@ async function initializeRelayer() {
             status: refundIsAmbiguous ? 'ambiguous' : 'failed',
             error: refundError,
             message: refundIsAmbiguous
-              ? 'Refund status is ambiguous ΓÇö the watchdog will confirm and complete it shortly.'
+              ? 'Refund status is ambiguous — the watchdog will confirm and complete it shortly.'
               : 'Automatic refund failed. Please contact support with this order ID.',
             orderId,
             originalStellarTxHash: stellarTxHash
@@ -2218,9 +2219,9 @@ async function initializeRelayer() {
           return stellarTxHash; // worst-case: key by tx hash
         })();
 
-      console.log('≡ƒåÿ Manual refund requested:', { stellarTxHash, stellarAddress, refundNetwork, orderId });
+      console.log('🆘 Manual refund requested:', { stellarTxHash, stellarAddress, refundNetwork, orderId });
 
-      // ΓöÇΓöÇ Idempotency check ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+      // ── Idempotency check ─────────────────────────────────────────────
       const existing = globalRefundLedger.getEntry(orderId);
       if (existing?.state.phase === 'committed') {
         return res.status(200).json({
@@ -2230,7 +2231,7 @@ async function initializeRelayer() {
           destination: stellarAddress,
           network: refundNetwork,
           fromCache: true,
-          message: 'Refund was already processed ΓÇö returning committed result.'
+          message: 'Refund was already processed — returning committed result.'
         });
       }
       if (existing?.state.phase === 'in_flight' || existing?.state.phase === 'ambiguous') {
@@ -2256,7 +2257,7 @@ async function initializeRelayer() {
         });
       }
 
-      // ΓöÇΓöÇ Verify the original tx was sent to this relayer ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+      // ── Verify the original tx was sent to this relayer ────────────────
       // We must verify before claiming the lock so we don't permanently
       // block a valid future attempt if the verification itself fails.
       const { Horizon, Keypair } = await import('@stellar/stellar-sdk');
@@ -2281,7 +2282,7 @@ async function initializeRelayer() {
           });
         }
         verifiedAmount = paymentOp.amount;
-        console.log(`≡ƒÆ░ Verified original payment: ${verifiedAmount} XLM`);
+        console.log(`💰 Verified original payment: ${verifiedAmount} XLM`);
       } catch (lookupErr: any) {
         return res.status(404).json({
           error: 'Could not verify original transaction',
@@ -2289,7 +2290,7 @@ async function initializeRelayer() {
         });
       }
 
-      // ΓöÇΓöÇ Claim the idempotency lock ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+      // ── Claim the idempotency lock ─────────────────────────────────────
       const claimed = globalRefundLedger.claim(orderId);
       if (!claimed) {
         // Race: another concurrent request slipped in between our check and claim
@@ -2299,7 +2300,7 @@ async function initializeRelayer() {
         });
       }
 
-      // ΓöÇΓöÇ Submit refund via refundXlmToUser ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+      // ── Submit refund via refundXlmToUser ─────────────────────────────
       try {
         const refund = await refundXlmToUser({
           orderId,
@@ -2322,7 +2323,7 @@ async function initializeRelayer() {
           storedOrder.refundedAt = Date.now();
         }
 
-        console.log('Γ£à Manual refund successful:', refund.hash);
+        console.log('✅ Manual refund successful:', refund.hash);
 
         return res.json({
           success: true,
@@ -2335,7 +2336,7 @@ async function initializeRelayer() {
         });
       } catch (refundErr: any) {
         if (refundErr instanceof HorizonTimeoutError) {
-          // Do not release the lock ΓÇö tx may have landed; mark ambiguous
+          // Do not release the lock — tx may have landed; mark ambiguous
           globalRefundLedger.markAmbiguous(orderId, refundErr.message);
           return res.status(202).json({
             error: 'Refund submitted but outcome is ambiguous (Horizon timeout)',
@@ -2346,9 +2347,9 @@ async function initializeRelayer() {
           });
         }
 
-        // Definitive failure ΓÇö release so caller can retry
+        // Definitive failure — release so caller can retry
         globalRefundLedger.release(orderId);
-        console.error('Γ¥î Manual refund failed:', refundErr);
+        console.error('❌ Manual refund failed:', refundErr);
         return res.status(500).json({
           error: 'Manual refund failed',
           details: refundErr.message,
@@ -2356,7 +2357,7 @@ async function initializeRelayer() {
         });
       }
     } catch (err: any) {
-      console.error('Γ¥î Manual refund endpoint error:', err);
+      console.error('❌ Manual refund endpoint error:', err);
       res.status(500).json({
         error: 'Manual refund failed',
         details: err.message,
@@ -2851,15 +2852,18 @@ async function initializeRelayer() {
   // Admin endpoints - must be inside initializeRelayer function
   
   // Admin endpoint to authorize relayer
-  app.post('/api/admin/authorize-relayer', async (req, res) => {
+  app.post('/api/admin/authorize-relayer', requireAdminAuth(), async (req, res) => {
     try {
       console.log('≡ƒöÉ Authorizing relayer as resolver...');
       
-      const { adminPrivateKey } = req.body;
+      // Admin private key MUST come from the server environment, never from
+      // the request body. Accepting secrets over the wire would expose them
+      // in logs, proxies, and CDN caches.
+      const adminPrivateKey = process.env.RELAYER_ADMIN_PRIVATE_KEY;
       if (!adminPrivateKey) {
-        return res.status(400).json({
+        return res.status(500).json({
           success: false,
-          error: 'Admin private key required'
+          error: 'RELAYER_ADMIN_PRIVATE_KEY is not configured on this server',
         });
       }
       
@@ -2898,7 +2902,7 @@ async function initializeRelayer() {
   });
 
   // Check relayer authorization status
-  app.get('/api/admin/relayer-status', async (req, res) => {
+  app.get('/api/admin/relayer-status', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2930,7 +2934,7 @@ async function initializeRelayer() {
   });
 
   // Check configured resolver allowlist authorization status
-  app.get('/api/admin/resolvers', async (req, res) => {
+  app.get('/api/admin/resolvers', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2968,21 +2972,7 @@ async function initializeRelayer() {
 
   console.log('Γ£à Admin endpoints registered');
 
-  // ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
-  // DEBUG ENDPOINT
-  // ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
-  
-  app.post('/api/debug/body', (req, res) => {
-    console.log('DEBUG: Request body:', req.body);
-    console.log('DEBUG: Request headers:', req.headers);
-    res.json({
-      success: true,
-      body: req.body,
-      headers: req.headers
-    });
-  });
-
-  // ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+  // ═══════════════════════════════════════════════════════════════════════════════════════
             // 1INCH ESCROW FACTORY ENDPOINTS - Using createDstEscrow approach
   // ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 

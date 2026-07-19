@@ -8,34 +8,34 @@
  *
  * Design constraints
  * ------------------
- * 1. EXACT INTEGER MATH ΓÇö all XLM amounts are represented as stroops
+ * 1. EXACT INTEGER MATH — all XLM amounts are represented as stroops
  *    (1 XLM = 10_000_000 stroops) throughout. Floating-point is only used
  *    when reading Horizon's decimal-string responses and is immediately
  *    rounded to the nearest stroop. The Stellar SDK's `Operation.payment`
  *    accepts decimal strings; we convert stroops back to a 7-decimal string
  *    only at the final build step so no precision is ever lost mid-flight.
  *
- * 2. HORIZON TIMEOUT / 504 CLASSIFICATION ΓÇö a 504 or a network-level
+ * 2. HORIZON TIMEOUT / 504 CLASSIFICATION — a 504 or a network-level
  *    timeout means the transaction MAY have already landed. The function
  *    throws a `HorizonTimeoutError` so callers can distinguish "definitely
  *    failed" from "ambiguous, do not retry blindly". The RefundLedger uses
  *    this to mark the entry ambiguous rather than releasing the lock.
  *
- * 3. RETRYABLE vs TERMINAL ERRORS ΓÇö Horizon returns structured
+ * 3. RETRYABLE vs TERMINAL ERRORS — Horizon returns structured
  *    `extras.result_codes` on 4xx failures. Transaction codes that are
- *    definitively terminal (tx_bad_seq, tx_insufficient_balance, ΓÇª) are
+ *    definitively terminal (tx_bad_seq, tx_insufficient_balance, …) are
  *    wrapped in `HorizonTerminalError` and are never retried. Transient
  *    network errors receive `HorizonTransientError` and are retried with
  *    exponential back-off inside this function (up to maxRetries).
  *
- * 4. IDEMPOTENCY ΓÇö callers pass an optional `idempotencyKey` (the orderId).
+ * 4. IDEMPOTENCY — callers pass an optional `idempotencyKey` (the orderId).
  *    When set, the function checks if the key is already locked/committed in
  *    the supplied `RefundLedger` and returns the committed result without
  *    hitting Horizon again. Callers that don't own a RefundLedger can omit
  *    the key; deduplication is then the caller's responsibility.
  *
  * Order book bookkeeping (updating order.status, order.refundTxHash, etc.)
- * is left to callers ΓÇö this function is intentionally side-effect-light.
+ * is left to callers — this function is intentionally side-effect-light.
  */
 
 import { withRetry } from '../utils/retry-policy.js';
@@ -67,7 +67,7 @@ export interface RefundXlmArgs {
   refundSecret: string;
   /**
    * Fallback amount in stroops used when the original payment cannot be
-   * looked up ΓÇö e.g. the watchdog firing before Horizon has indexed the
+   * looked up — e.g. the watchdog firing before Horizon has indexed the
    * user's tx. Optional. Must be a positive integer string or number.
    */
   fallbackStroops?: string | number;
@@ -75,7 +75,7 @@ export interface RefundXlmArgs {
    * When provided the function will check the ledger for an existing
    * committed refund and skip Horizon if one is found. The caller is
    * responsible for calling claim()/commit()/release() around this
-   * function ΓÇö or use `withLedger` which does it automatically.
+   * function — or use `withLedger` which does it automatically.
    */
   ledger?: RefundLedger;
   /**
@@ -105,7 +105,7 @@ export interface RefundXlmResult {
 /**
  * The Horizon submit call timed out or returned a 504. The transaction
  * may or may not have landed. Callers MUST NOT retry immediately and MUST
- * NOT release the RefundLedger lock ΓÇö mark the entry as ambiguous instead.
+ * NOT release the RefundLedger lock — mark the entry as ambiguous instead.
  */
 export class HorizonTimeoutError extends Error {
   readonly isTimeout = true;
@@ -184,14 +184,14 @@ const TERMINAL_RESULT_CODES = new Set([
 // ---------------------------------------------------------------------------
 
 /**
- * Submit a refund payment on Stellar. Throws on any error ΓÇö callers
+ * Submit a refund payment on Stellar. Throws on any error — callers
  * decide whether to surface, retry, or just log it.
  *
  * Errors are typed:
- *  - `HorizonTimeoutError`  ΓåÆ mark ambiguous, do not retry immediately
- *  - `HorizonTerminalError` ΓåÆ do not retry at all
- *  - `HorizonTransientError` ΓåÆ was already retried internally; bubble up
- *  - Anything else          ΓåÆ treat as transient
+ *  - `HorizonTimeoutError`  → mark ambiguous, do not retry immediately
+ *  - `HorizonTerminalError` → do not retry at all
+ *  - `HorizonTransientError` → was already retried internally; bubble up
+ *  - Anything else          → treat as transient
  */
 export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmResult> {
   const {
@@ -206,7 +206,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
     maxRetries = 3,
   } = args;
 
-  // ΓöÇΓöÇ Idempotency fast-path ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ── Idempotency fast-path ──────────────────────────────────────────────
   if (ledger) {
     const existing = ledger.getEntry(orderId);
     if (existing?.state.phase === 'committed') {
@@ -220,7 +220,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
         fromCache: true,
       };
     }
-    // in_flight or ambiguous ΓÇö caller should not be calling us again, but
+    // in_flight or ambiguous — caller should not be calling us again, but
     // protect against it by refusing to double-submit.
     if (existing?.state.phase === 'in_flight' || existing?.state.phase === 'ambiguous') {
       refundDuplicatesSuppressed.inc({ network_mode: networkMode });
@@ -232,7 +232,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
     }
   }
 
-  // ΓöÇΓöÇ SDK imports (dynamic to avoid loading Stellar at startup) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ── SDK imports (dynamic to avoid loading Stellar at startup) ────────
   const {
     Horizon,
     Keypair,
@@ -247,7 +247,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
   const server = new Horizon.Server(horizonUrl);
   const keypair = Keypair.fromSecret(refundSecret);
 
-  // ΓöÇΓöÇ Determine refund amount in stroops ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ── Determine refund amount in stroops ───────────────────────────────
   let refundStroops = await resolveRefundStroops({
     server,
     keypair,
@@ -269,8 +269,8 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
   // Memo: "Refund:" + first 20 chars of orderId fits within 28 bytes.
   const memoText = `Refund:${(orderId || 'unknown').substring(0, 20)}`;
 
-  // ΓöÇΓöÇ Build and sign (outside retry loop ΓÇö sequence number is refreshed
-  //    on each attempt inside the loop) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ── Build and sign (outside retry loop — sequence number is refreshed
+  //    on each attempt inside the loop) ──────────────────────────────────
   const submitOnce = async (): Promise<RefundXlmResult> => {
     // Always load a fresh account to get the current sequence number.
     // This prevents tx_bad_seq on retries caused by stale sequence state.
@@ -296,7 +296,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
     return await submitWithClassification(server, tx, networkMode);
   };
 
-  // ΓöÇΓöÇ Retry loop wrapping submitOnce ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ── Retry loop wrapping submitOnce ────────────────────────────────────
   let attempt = 0;
   let lastErr: unknown;
 
@@ -316,7 +316,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
       lastErr = err;
 
       if (err instanceof HorizonTimeoutError) {
-        // Ambiguous ΓÇö do not retry; surface immediately so the caller can
+        // Ambiguous — do not retry; surface immediately so the caller can
         // mark the ledger entry ambiguous.
         refundHorizonTimeouts.inc({ network_mode: networkMode });
         throw err;
@@ -327,7 +327,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
         throw err;
       }
 
-      // Transient error ΓÇö retry with back-off.
+      // Transient error — retry with back-off.
       if (attempt < maxRetries) {
         const delayMs = Math.min(30_000, 1_000 * Math.pow(2, attempt));
         refundHorizonRetries.inc({ network_mode: networkMode });
@@ -398,7 +398,7 @@ async function resolveRefundStroops(opts: {
     if (parsed > 0n) return parsed;
   }
 
-  // Conservative stub ΓÇö visible to the operator in logs but keeps the
+  // Conservative stub — visible to the operator in logs but keeps the
   // order bookkeeping moving.
   console.warn(`[xlm-refund] orderId=${orderId} using minimum stub refund (1_000_000 stroops = 0.1 XLM)`);
   return 1_000_000n;
@@ -478,25 +478,22 @@ function classifyHorizonError(err: unknown): Error {
   if (response) {
     const status: number = response?.status ?? 0;
 
-    // 504 Gateway Timeout or ECONNABORTED ΓÇö transaction may have landed.
+    // 504 Gateway Timeout or ECONNABORTED — transaction may have landed.
     if (status === 504 || (err as any)?.code === 'ECONNABORTED') {
       return new HorizonTimeoutError(
-        `Horizon returned ${status} ΓÇö transaction may have landed. ` +
+        `Horizon returned ${status} — transaction may have landed. ` +
         `Do not retry immediately. (${(err as Error)?.message ?? String(err)})`
       );
     }
 
-    // 400 with result_codes ΓÇö inspect for terminal vs transient codes.
+    // 400 with result_codes — inspect for terminal vs transient codes.
     if (status === 400) {
       const resultCodes: Record<string, string> =
         response?.data?.extras?.result_codes ?? {};
       const txCode: string = resultCodes?.transaction ?? '';
-      const opCodesRaw: unknown = resultCodes?.operations;
-      const opCodes: string[] = Array.isArray(opCodesRaw)
-        ? (opCodesRaw as string[]).filter((c): c is string => typeof c === 'string')
-        : typeof opCodesRaw === 'string' && opCodesRaw
-          ? [opCodesRaw]
-          : [];
+      const opCodes: string[] = Array.isArray(resultCodes?.operations)
+        ? (resultCodes.operations as string[])
+        : [];
       const allCodes = [txCode, ...opCodes].filter(Boolean);
 
       const terminalCode = allCodes.find((c) => TERMINAL_RESULT_CODES.has(c));
@@ -508,24 +505,24 @@ function classifyHorizonError(err: unknown): Error {
         );
       }
 
-      // Unknown 400 ΓÇö treat as transient (maybe sequence race)
+      // Unknown 400 — treat as transient (maybe sequence race)
       return new HorizonTransientError(
-        `Horizon 400 with unknown result codes: ${allCodes.join(', ')} ΓÇö ` +
+        `Horizon 400 with unknown result codes: ${allCodes.join(', ')} — ` +
         `may be retryable. (${(err as Error)?.message ?? String(err)})`
       );
     }
 
-    // 5xx other than 504 ΓÇö transient
+    // 5xx other than 504 — transient
     if (status >= 500) {
       return new HorizonTransientError(
-        `Horizon ${status} error ΓÇö transient. (${(err as Error)?.message ?? String(err)})`
+        `Horizon ${status} error — transient. (${(err as Error)?.message ?? String(err)})`
       );
     }
 
     // 408 Request Timeout
     if (status === 408) {
       return new HorizonTimeoutError(
-        `Horizon 408 timeout ΓÇö transaction may have landed. ` +
+        `Horizon 408 timeout — transaction may have landed. ` +
         `(${(err as Error)?.message ?? String(err)})`
       );
     }
@@ -542,7 +539,7 @@ function classifyHorizonError(err: unknown): Error {
     return new HorizonTimeoutError(`Network timeout during Horizon submit: ${msg}`);
   }
 
-  // Unknown ΓÇö treat as transient
+  // Unknown — treat as transient
   return new HorizonTransientError(
     `Unknown Horizon error: ${msg}`
   );
@@ -556,9 +553,9 @@ function classifyHorizonError(err: unknown): Error {
  * Convert a 7-decimal XLM string (as returned by Horizon) to an exact
  * bigint stroop count. Uses only integer arithmetic.
  *
- * "12.3456789" ΓåÆ 123456789n
- * "12"         ΓåÆ 120000000n
- * "0.0000001"  ΓåÆ 1n
+ * "12.3456789" → 123456789n
+ * "12"         → 120000000n
+ * "0.0000001"  → 1n
  */
 export function xlmStringToStroops(xlm: string): bigint {
   if (!xlm || typeof xlm !== 'string') return 0n;
@@ -583,9 +580,9 @@ export function xlmStringToStroops(xlm: string): bigint {
  * Convert a bigint stroop count to a 7-decimal XLM string.
  * Suitable for passing to Stellar SDK `Operation.payment`.
  *
- * 123456789n ΓåÆ "12.3456789"
- * 1n         ΓåÆ "0.0000001"
- * 0n         ΓåÆ "0.0000000"
+ * 123456789n → "12.3456789"
+ * 1n         → "0.0000001"
+ * 0n         → "0.0000000"
  */
 export function stroopsToXlmString(stroops: bigint): string {
   if (stroops < 0n) stroops = 0n;
@@ -597,7 +594,7 @@ export function stroopsToXlmString(stroops: bigint): string {
 /**
  * Parse a fallback amount that may be expressed as:
  *  - A stroop integer string ("1234567")
- *  - A decimal XLM string ("12.34")   ΓåÉ converted via xlmStringToStroops
+ *  - A decimal XLM string ("12.34")   ← converted via xlmStringToStroops
  *  - A number (treated as stroops if >= 1e7, as XLM float otherwise)
  */
 export function parseFallbackStroops(value: string | number): bigint {
@@ -616,7 +613,7 @@ export function parseFallbackStroops(value: string | number): bigint {
     return xlmStringToStroops(str);
   }
 
-  // Pure integer string ΓÇö assume stroops
+  // Pure integer string — assume stroops
   try {
     const n = BigInt(str);
     return n > 0n ? n : 0n;

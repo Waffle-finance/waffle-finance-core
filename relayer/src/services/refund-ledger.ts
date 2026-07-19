@@ -1,16 +1,16 @@
 /**
- * RefundLedger ΓÇö in-process idempotency store for XLM refunds.
+ * RefundLedger — in-process idempotency store for XLM refunds.
  *
  * Problem it solves
  * -----------------
  * Three code paths can trigger a refund for the same order:
- *  1. Inline handler in /api/orders/xlm-to-eth (ETH send failed ΓåÆ immediate refund)
+ *  1. Inline handler in /api/orders/xlm-to-eth (ETH send failed → immediate refund)
  *  2. /api/orders/manual-refund (user-initiated retry)
  *  3. Background refund watchdog (rescues orders the user never retried)
  *
  * Without a shared gate, a race between any two of these paths could
  * submit two Stellar payments to the same destination for the same
- * original XLM payment ΓÇö i.e. the relayer pays out twice.
+ * original XLM payment — i.e. the relayer pays out twice.
  *
  * How it works
  * ------------
@@ -19,24 +19,24 @@
  * receives a token; every subsequent caller receives `null` (already
  * claimed). When the Stellar submit returns:
  *
- *   - SUCCESS:  call `commit(orderId, result)` ΓÇö persists the winning
+ *   - SUCCESS:  call `commit(orderId, result)` — persists the winning
  *               txHash so future callers can inspect it.
- *   - FAILURE:  call `release(orderId)` ΓÇö removes the in-flight marker
+ *   - FAILURE:  call `release(orderId)` — removes the in-flight marker
  *               so the next retry can attempt again. This handles the
  *               case where Horizon returned a definitive error (tx was
  *               never broadcast). Horizon 504 / timeout is NOT released
- *               because the tx may still land ΓÇö the caller should treat
+ *               because the tx may still land — the caller should treat
  *               it as ambiguous and let the watchdog handle the retry
  *               after the back-off window expires.
  *
- * All mutations are synchronous so the claim ΓåÆ submit ΓåÆ commit/release
+ * All mutations are synchronous so the claim → submit → commit/release
  * sequence is safe within a single-threaded Node.js event loop iteration
  * (no two callers can interleave between `claim` and `commit`).
  *
  * Persistence
  * -----------
  * This is deliberately in-memory. In production a durable store (Redis,
- * Postgres) should replace this, but the interface is identical ΓÇö swap
+ * Postgres) should replace this, but the interface is identical — swap
  * the backing store without touching callers.
  */
 
@@ -58,7 +58,7 @@ export class RefundLedger {
    *
    * Returns `true` if the claim was granted (this caller may proceed).
    * Returns `false` if the order is already in-flight, committed, or
-   * ambiguous ΓÇö caller MUST NOT submit a Stellar transaction.
+   * ambiguous — caller MUST NOT submit a Stellar transaction.
    *
    * When `false` is returned, call `getEntry(orderId)` to inspect the
    * existing state (e.g. to return the committed txHash to the user).
@@ -70,12 +70,12 @@ export class RefundLedger {
   }
 
   /**
-   * Finalise a successful refund. Idempotent ΓÇö safe to call more than
+   * Finalise a successful refund. Idempotent — safe to call more than
    * once with the same arguments (subsequent calls are no-ops).
    */
   commit(orderId: string, result: { txHash: string; amount: string; ledger?: number }): void {
     const existing = this.entries.get(orderId);
-    // Already committed (e.g. concurrent path beat us here) ΓÇö keep first result.
+    // Already committed (e.g. concurrent path beat us here) — keep first result.
     if (existing?.state.phase === 'committed') return;
     this.entries.set(orderId, {
       orderId,
@@ -102,7 +102,7 @@ export class RefundLedger {
   }
 
   /**
-   * Mark an entry as ambiguous ΓÇö the submit call timed out or received a
+   * Mark an entry as ambiguous — the submit call timed out or received a
    * 504, so the transaction may or may not have landed on Stellar.
    * The watchdog will retry after the back-off window; the RefundLedger
    * will block concurrent callers in the meantime.
@@ -154,12 +154,12 @@ export class RefundLedger {
     return phase === 'in_flight' || phase === 'ambiguous';
   }
 
-  /** Snapshot of all entries ΓÇö useful for health endpoints and tests. */
+  /** Snapshot of all entries — useful for health endpoints and tests. */
   snapshot(): RefundEntry[] {
     return Array.from(this.entries.values());
   }
 
-  /** Number of entries in each phase ΓÇö for metrics / debugging. */
+  /** Number of entries in each phase — for metrics / debugging. */
   stats(): Record<RefundState['phase'], number> {
     const counts: Record<RefundState['phase'], number> = {
       in_flight: 0,

@@ -639,6 +639,18 @@
                         "val": {
                           "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "UnbondingPeriod"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 86400
+                        }
                       }
                     ]
                   }

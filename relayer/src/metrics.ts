@@ -184,7 +184,7 @@ export const refundDuplicatesSuppressed = new Counter({
 
 /**
  * Total Horizon submit calls that returned a 504, 408, or network-level
- * timeout. These are *ambiguous* ΓÇö the tx may have landed. Callers should
+ * timeout. These are *ambiguous* — the tx may have landed. Callers should
  * mark the order ambiguous in the RefundLedger and not retry immediately.
  */
 export const refundHorizonTimeouts = new Counter({
@@ -223,7 +223,7 @@ export const watchdogMetrics = {
   tickDuration: watchdogTickDurationSeconds,
 } as const;
 
-/** All XLM refund service metrics in one object ΓÇö useful for test assertions. */
+/** All XLM refund service metrics in one object — useful for test assertions. */
 export const refundMetrics = {
   duplicatesSuppressed: refundDuplicatesSuppressed,
   horizonTimeouts: refundHorizonTimeouts,
