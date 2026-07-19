@@ -1,5 +1,5 @@
 /**
- * Permissionless XLM refund helper for failed XLM→ETH swaps.
+ * Permissionless XLM refund helper for failed XLMΓåÆETH swaps.
  *
  * Lives outside index.ts so it can be reused by:
  *  - the inline `/api/orders/xlm-to-eth` error handler (immediate refund),

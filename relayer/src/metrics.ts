@@ -43,7 +43,7 @@ collectDefaultMetrics({ register: registry });
 
 /**
  * Total number of watchdog tick executions that completed without an
- * unhandled error — i.e. the scan loop ran to completion regardless of
+ * unhandled error ΓÇö i.e. the scan loop ran to completion regardless of
  * whether any individual order refund inside the tick succeeded or failed.
  */
 export const watchdogRunsTotal = new Counter({
@@ -69,8 +69,8 @@ export const watchdogRefundSuccessTotal = new Counter({
  * message) to keep the cardinality of label combinations bounded.
  *
  * Defined reason values:
- *   missing_address  — order has no stellarAddress
- *   refund_error     — refundXlmToUser threw
+ *   missing_address  ΓÇö order has no stellarAddress
+ *   refund_error     ΓÇö refundXlmToUser threw
  */
 export const watchdogRefundFailureTotal = new Counter({
   name: 'relayer_refund_watchdog_failure_total',
@@ -210,7 +210,7 @@ export const refundHorizonRetries = new Counter({
 // Convenience re-export
 // ---------------------------------------------------------------------------
 
-/** All watchdog metrics in one object — useful for test assertions. */
+/** All watchdog metrics in one object ΓÇö useful for test assertions. */
 export const watchdogMetrics = {
   runsTotal: watchdogRunsTotal,
   successTotal: watchdogRefundSuccessTotal,

@@ -16,7 +16,7 @@ export interface RetryOptions {
   maxDelayMs?: number;
   /** Max retries before throwing. Defaults to 5. */
   maxRetries?: number;
-  /** Jitter as fraction of the current delay (0 = no jitter, 0.2 = ±20%). */
+  /** Jitter as fraction of the current delay (0 = no jitter, 0.2 = ┬▒20%). */
   jitterFactor?: number;
   /** Called before each retry attempt. Useful for logging. */
   onRetry?: (attempt: number, delayMs: number, error: Error) => void;
@@ -32,7 +32,7 @@ const DEFAULTS: Required<RetryOptions> = {
 
 /**
  * Calculate the delay for a given retry attempt.
- * Exported for testing — callers should normally use `withRetry`.
+ * Exported for testing ΓÇö callers should normally use `withRetry`.
  */
 export function calculateDelay(
   attempt: number,

@@ -1,5 +1,5 @@
 /**
- * Background watchdog that rescues XLM→ETH orders the relayer failed to
+ * Background watchdog that rescues XLMΓåÆETH orders the relayer failed to
  * complete (typically because the user closed the page after sending
  * XLM, or the ETH RPC hiccupped past the in-request retry budget).
  *
@@ -117,7 +117,7 @@ function toMillis(
 
 function isXlmToEthAwaitingEth(order: WatchdogOrder): boolean {
   if (order.direction !== 'xlm_to_eth') return false;
-  if (!order.stellarTxHash) return false; // XLM never received → nothing to refund
+  if (!order.stellarTxHash) return false; // XLM never received ΓåÆ nothing to refund
   if (order.refundTxHash || order.refundedAt) return false; // already refunded
   if (order.status === 'eth_tx_sent' || order.status === 'completed') return false;
   if (order.status === 'refunded') return false;
@@ -130,9 +130,9 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
   const ledger = config.refundLedger ?? globalRefundLedger;
 
   console.log(
-    `[refund-watchdog] starting · scan every ${Math.round(intervalMs / 1000)}s` +
-    ` · refund after ${Math.round(staleAfterMs / 1000)}s` +
-    ` · network=${config.networkMode}`
+    `[refund-watchdog] starting ┬╖ scan every ${Math.round(intervalMs / 1000)}s` +
+    ` ┬╖ refund after ${Math.round(staleAfterMs / 1000)}s` +
+    ` ┬╖ network=${config.networkMode}`
   );
 
   const tick = async (): Promise<void> => {
@@ -217,7 +217,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
 
           console.log(
             `[refund-watchdog] orderId=${orderId} refunding` +
-            ` — pending for ${Math.round(age / 1000)}s,` +
+            ` ΓÇö pending for ${Math.round(age / 1000)}s,` +
             ` stellarTx=${order.stellarTxHash}`
           );
 
@@ -300,7 +300,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
         }
       }
     } finally {
-      // Always record tick completion and gauges — even if an unexpected
+      // Always record tick completion and gauges ΓÇö even if an unexpected
       // error escapes the inner loop, we want visibility.
       tickEnd();
       watchdogRunsTotal.inc();
