@@ -15,6 +15,14 @@ import { ethers } from 'ethers';
 import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { refundXlmToUser, HorizonTimeoutError } from './services/xlm-refund.js';
 import { globalRefundLedger } from './services/refund-ledger.js';
+import { requireAdminAuth } from './middleware/admin-auth.js';
+import { globalStellarProofLedger } from './services/stellar-proof-ledger.js';
+import {
+  verifyIncomingStellarPayment,
+  StellarTxNotFoundError,
+  StellarTxFailedError,
+  StellarPaymentMismatch,
+} from './services/horizon-verifier.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './listeners/contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './utils/adaptive-poll.js';
 import { fetchIncomingEthPayments } from './listeners/eth-incoming-monitor.js';
@@ -632,8 +640,8 @@ async function initializeRelayer() {
     res.status(204).end();
   });
 
-  // Debug: verify lazy monitoring + stuck orders (safe to expose — no secrets).
-  app.get('/api/debug/chain-monitor', (_req, res) => {
+  // Debug: verify lazy monitoring + stuck orders (operator-only — requires auth).
+  app.get('/api/debug/chain-monitor', requireAdminAuth(), (_req, res) => {
     reconcileChainMonitoring();
     const statuses: Record<string, number> = {};
     for (const order of activeOrders.values()) {
@@ -1753,242 +1761,207 @@ async function initializeRelayer() {
   // POST /api/orders/xlm-to-eth - Dedicated XLM→ETH processing endpoint  
   app.post('/api/orders/xlm-to-eth', async (req, res) => {
     try {
-      console.log('🔍 DEBUG: XLM→ETH endpoint received request body:', JSON.stringify(req.body, null, 2));
-      console.log('🔍 DEBUG: Request headers:', JSON.stringify(req.headers, null, 2));
-      console.log('🔍 DEBUG: Environment check - ETHEREUM_RPC_URL:', process.env.ETHEREUM_RPC_URL ? 'SET' : 'NOT SET');
-      console.log('🔍 DEBUG: Environment check - RELAYER_PRIVATE_KEY:', process.env.RELAYER_PRIVATE_KEY ? 'SET' : 'NOT SET');
-      
       const { orderId, stellarTxHash, stellarAddress, ethAddress, networkMode } = req.body;
-      
-      // ✅ NETWORK DETECTION: Check request body first, then stored order, then default
-      const requestNetwork = networkMode || 
-                            (req.query.network as string) || 
-                            DEFAULT_NETWORK_MODE;
-      
-      console.log('🌐 XLM→ETH Endpoint Network Detection:', {
-        bodyNetworkMode: networkMode,
-        queryNetwork: req.query.network,
-        defaultMode: DEFAULT_NETWORK_MODE,
-        finalDecision: requestNetwork.toUpperCase()
-      });
-      
-      if (!orderId || !stellarTxHash || !ethAddress) {
-        console.log('❌ Missing required fields:', { orderId: !!orderId, stellarTxHash: !!stellarTxHash, ethAddress: !!ethAddress });
+
+      // ── 1. Input validation ────────────────────────────────────────────────
+      if (!orderId || !stellarTxHash || !ethAddress || !stellarAddress) {
         return res.status(400).json({
-          error: 'Missing required fields: orderId, stellarTxHash, ethAddress'
+          error: 'Missing required fields: orderId, stellarTxHash, ethAddress, stellarAddress',
         });
       }
 
-      // Normalize Ethereum address (fix checksum)
-      const normalizedEthAddress = ethers.getAddress(ethAddress.toLowerCase());
-
-      console.log('💰 XLM→ETH: Processing dedicated endpoint...', { orderId, stellarTxHash, stellarAddress, ethAddress: normalizedEthAddress });
-      
-      // Get stored order - BYPASSED FOR NOW (in-memory data lost on restart)
-      let storedOrder = activeOrders.get(orderId);
-      // if (!storedOrder) {
-      //   return res.status(404).json({
-      //     error: 'Order not found',
-      //     orderId
-      //   });
-      // }
-
-      // Use provided data or defaults if order not found in memory
-      const userEthAddress = storedOrder?.ethAddress || normalizedEthAddress;
-      const orderAmount = storedOrder?.amount || '10'; // Default for testing
-
-      // 🛡️ Refund watchdog bookkeeping. We need:
-      //   - `xlmReceivedAt`: when the user committed XLM (used to compute staleness)
-      //   - `stellarTxHash`: the original payment, so the watchdog can size the refund
-      //   - `stellarAddress`: where to send the refund
-      // If the in-memory order was lost (relayer restart, etc.) we
-      // synthesize a minimal entry so the watchdog can still rescue it.
-      if (!storedOrder) {
-        storedOrder = {
-          orderId,
-          direction: 'xlm_to_eth',
-          ethAddress: normalizedEthAddress,
-          stellarAddress,
-          status: 'awaiting_eth_release',
-          created: new Date().toISOString(),
-          networkMode: requestNetwork,
-        };
-        await storeActiveOrder(orderId, storedOrder);
+      // ── 2. Replay protection — reject already-consumed Stellar tx proofs ──
+      if (globalStellarProofLedger.isConsumed(stellarTxHash)) {
+        const existing = globalStellarProofLedger.getEntry(stellarTxHash);
+        return res.status(409).json({
+          error: 'Stellar transaction already consumed',
+          details: `stellarTxHash ${stellarTxHash} was already used to settle order ${existing?.orderId ?? '(unknown)'}. Replaying the same proof is not permitted.`,
+          stellarTxHash,
+        });
       }
+
+      // Normalize Ethereum address (checksum)
+      let normalizedEthAddress: string;
+      try {
+        normalizedEthAddress = ethers.getAddress(ethAddress.toLowerCase());
+      } catch {
+        return res.status(400).json({ error: 'Invalid Ethereum address', ethAddress });
+      }
+
+      // ── 3. Network detection ───────────────────────────────────────────────
+      const requestNetwork = networkMode || (req.query.network as string) || DEFAULT_NETWORK_MODE;
+      const orderNetworkMode: 'mainnet' | 'testnet' = requestNetwork === 'mainnet' ? 'mainnet' : 'testnet';
+
+      // ── 4. Order lookup — must be a known live order ───────────────────────
+      // We do NOT synthesize stub orders. Settling an unknown orderId
+      // would allow any caller to fabricate an orderId and claim ETH.
+      const storedOrder = activeOrders.get(orderId) as any;
+      if (!storedOrder) {
+        return res.status(404).json({
+          error: 'Order not found',
+          orderId,
+          details: 'The order must be created via /api/orders/create before settlement can proceed.',
+        });
+      }
+
+      if (storedOrder.direction && storedOrder.direction !== 'xlm_to_eth') {
+        return res.status(400).json({ error: 'Order direction mismatch', orderId, direction: storedOrder.direction });
+      }
+
+      // Idempotent re-submission: already settled → return cached result
+      if (storedOrder.status === 'eth_tx_sent' || storedOrder.status === 'completed') {
+        return res.status(200).json({
+          success: true,
+          orderId,
+          ethTxId: storedOrder.ethTxHash,
+          message: 'Order already settled — returning committed ETH tx hash.',
+          fromCache: true,
+        });
+      }
+
+      if (storedOrder.status === 'refunded' || storedOrder.status === 'stellar_transfer_failed') {
+        return res.status(409).json({
+          error: 'Order is in a terminal state and cannot be settled',
+          orderId,
+          status: storedOrder.status,
+        });
+      }
+
+      // ── 5. Horizon proof verification ─────────────────────────────────────
+      const horizonUrl = NETWORK_CONFIG[orderNetworkMode].stellar.horizonUrl;
+      const relayerSecretKey = orderNetworkMode === 'mainnet'
+        ? (process.env.RELAYER_STELLAR_SECRET_MAINNET || process.env.RELAYER_STELLAR_SECRET)
+        : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
+
+      if (!relayerSecretKey) {
+        return res.status(500).json({ error: 'Relayer Stellar secret not configured', network: orderNetworkMode });
+      }
+
+      const { Keypair } = await import('@stellar/stellar-sdk');
+      const relayerPublicKey = Keypair.fromSecret(relayerSecretKey).publicKey();
+
+      let verifiedPayment: Awaited<ReturnType<typeof verifyIncomingStellarPayment>>;
+      try {
+        verifiedPayment = await verifyIncomingStellarPayment(stellarTxHash, {
+          horizonUrl,
+          relayerPublicKey,
+          expectedSourceAccount: stellarAddress,
+        });
+      } catch (verifyErr: unknown) {
+        if (verifyErr instanceof StellarTxNotFoundError) {
+          return res.status(404).json({
+            error: 'Stellar transaction not found on Horizon',
+            details: (verifyErr as Error).message,
+            stellarTxHash,
+          });
+        }
+        if (verifyErr instanceof StellarTxFailedError) {
+          return res.status(400).json({
+            error: 'Stellar transaction failed on-chain',
+            details: (verifyErr as Error).message,
+            stellarTxHash,
+          });
+        }
+        if (verifyErr instanceof StellarPaymentMismatch) {
+          return res.status(400).json({
+            error: 'Stellar payment verification failed',
+            details: (verifyErr as Error).message,
+            stellarTxHash,
+          });
+        }
+        console.error('❌ Horizon verification error:', verifyErr);
+        return res.status(503).json({
+          error: 'Horizon verification temporarily unavailable',
+          details: verifyErr instanceof Error ? verifyErr.message : String(verifyErr),
+        });
+      }
+
+      console.log('✅ Horizon proof verified:', {
+        stellarTxHash,
+        amount: verifiedPayment.amount,
+        from: verifiedPayment.from,
+        ledger: verifiedPayment.ledgerSequence,
+      });
+
+      // ── 6. Consume the proof atomically (replay protection) ───────────────
+      const consumed = globalStellarProofLedger.consume(stellarTxHash, {
+        orderId,
+        verifiedAmount: verifiedPayment.amount,
+        ledgerSequence: verifiedPayment.ledgerSequence,
+      });
+      if (!consumed) {
+        return res.status(409).json({
+          error: 'Stellar transaction already consumed by a concurrent request',
+          stellarTxHash,
+        });
+      }
+
+      // Stamp the order with the confirmed XLM receipt
       storedOrder.xlmReceivedAt = storedOrder.xlmReceivedAt ?? Date.now();
       storedOrder.stellarTxHash = stellarTxHash;
-      if (stellarAddress) storedOrder.stellarAddress = stellarAddress;
-      storedOrder.networkMode = storedOrder.networkMode ?? requestNetwork;
-      
-      console.log('🎯 XLM→ETH: Sending ETH to user...', { userEthAddress, orderAmount });
-      
-      try {
-        // ✅ NETWORK-AWARE: Use request network first, fallback to stored order
-        const orderNetworkMode = requestNetwork || storedOrder?.networkMode || 'mainnet';
-        const rpcUrl = resolveEthereumRpcUrl(orderNetworkMode === 'testnet' ? 'testnet' : 'mainnet');
-        const privateKey = process.env.RELAYER_PRIVATE_KEY;
-        
-        console.log(`🌐 XLM→ETH Network Detection (2nd endpoint): ${orderNetworkMode.toUpperCase()}`);
-        
-        if (!privateKey) {
-          throw new Error('RELAYER_PRIVATE_KEY environment variable is required');
-        }
+      storedOrder.stellarAddress = stellarAddress;
+      storedOrder.networkMode = orderNetworkMode;
 
-        if (rpcUrl.includes('YOUR_') || rpcUrl.includes('api_key_here')) {
-          return res.status(500).json({
-            error: 'RPC URL not configured',
-            message: `Set SEPOLIA_RPC_URL / MAINNET_RPC_URL or INFURA_API_KEY in environment variables`
-          });
-        }
-        
-        console.log('💰 REAL MODE: Sending actual ETH transaction');
-        console.log('🔗 RPC URL:', rpcUrl);
-        console.log('🔑 Using real private key:', privateKey.substring(0, 10) + '...');
-        
+      // ── 7. Compute ETH amount from verified XLM, no hardcoded defaults ────
+      const privateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!privateKey) {
+        return res.status(500).json({ error: 'RELAYER_PRIVATE_KEY environment variable is required' });
+      }
+
+      const rpcUrl = resolveEthereumRpcUrl(orderNetworkMode);
+      if (rpcUrl.includes('YOUR_') || rpcUrl.includes('api_key_here')) {
+        return res.status(500).json({
+          error: 'RPC URL not configured',
+          message: 'Set SEPOLIA_RPC_URL / MAINNET_RPC_URL or INFURA_API_KEY in environment variables',
+        });
+      }
+
+      const userEthAddress = storedOrder.ethAddress || normalizedEthAddress;
+      const exchangeRate = storedOrder.exchangeRate;
+      if (!exchangeRate || isNaN(parseFloat(String(exchangeRate))) || parseFloat(String(exchangeRate)) <= 0) {
+        return res.status(400).json({
+          error: 'Order is missing a valid exchange rate — cannot compute ETH amount',
+          orderId,
+        });
+      }
+
+      const xlmAmount = parseFloat(verifiedPayment.amount);
+      const ethAmountDecimal = xlmAmount / parseFloat(String(exchangeRate));
+      const MAX_ETH = 10;
+      if (ethAmountDecimal > MAX_ETH) {
+        return res.status(400).json({
+          error: `Computed ETH amount (${ethAmountDecimal} ETH) exceeds safety cap of ${MAX_ETH} ETH`,
+          orderId,
+        });
+      }
+
+      const roundedEthAmount = Math.round(ethAmountDecimal * 1e6) / 1e6;
+      let ethAmountWei: bigint;
+      try {
+        ethAmountWei = ethers.parseEther(roundedEthAmount.toString());
+      } catch {
+        return res.status(400).json({ error: 'Could not convert ETH amount to wei', ethAmountDecimal });
+      }
+
+      // ── 8. Send ETH ────────────────────────────────────────────────────────
+      try {
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const relayerWallet = new ethers.Wallet(privateKey, provider);
-        
-        console.log('🔑 Relayer ETH address:', relayerWallet.address);
-        
-        // Get relayer balance with retry logic for Alchemy rate limiting
-        console.log('🔍 Getting relayer balance...');
-        let balance;
-        let balanceRetryCount2 = 0;
-        const maxBalanceRetries2 = 5;
-        
-        while (balanceRetryCount2 <= maxBalanceRetries2) {
-          try {
-            balance = await withTimeout(
-              provider.getBalance(relayerWallet.address),
-              RELAYER_CONFIG.rpcTimeoutMs,
-              'RPC getBalance timeout'
-            );
-            console.log('💰 Relayer ETH balance:', ethers.formatEther(balance), 'ETH');
-            break; // Success, exit retry loop
-          } catch (error: any) {
-            balanceRetryCount2++;
-            
-            // Check if it's Alchemy rate limiting (code 429)
-            if (error?.code === 429 || error?.message?.includes('exceeded') || error?.message?.includes('rate limit')) {
-              const delayMs = Math.pow(2, balanceRetryCount2) * 1000; // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-              console.log(`⏳ Alchemy rate limit hit (attempt ${balanceRetryCount2}/${maxBalanceRetries2}). Waiting ${delayMs}ms...`);
-              
-              if (balanceRetryCount2 <= maxBalanceRetries2) {
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-                continue;
-              }
-            }
-            
-            // If it's not rate limiting or we've exhausted retries, throw
-            console.error('❌ Failed to get relayer balance:', error.message);
-            throw error;
-          }
-        }
-        
-        // Calculate ETH amount to send using real-time rate from frontend  
-        const exchangeRate = storedOrder?.exchangeRate || ETH_TO_XLM_RATE; // Use real rate if available
-        let ethAmount;
-        if (storedOrder?.targetAmount) {
-          console.log('🔍 DEBUG - Raw targetAmount (2nd endpoint):', storedOrder.targetAmount);
-          
-          // MORE AGGRESSIVE CLEANING - handle very large numbers
-          let cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
-          let targetAmountNum = parseFloat(cleanTargetAmount);
-          
-          console.log('🔍 DEBUG - Parsed targetAmount (2nd endpoint):', targetAmountNum);
-          
-          if (isNaN(targetAmountNum) || targetAmountNum <= 0) {
-            console.log('⚠️ Invalid targetAmount, using fallback calculation (2nd endpoint)');
-            // Fallback: use amount and exchange rate
-            // Convert wei to ETH first, then calculate target amount
-            const ethAmountFromWei = parseFloat(ethers.formatEther(orderAmount || '100000000000000000')); // 0.1 ETH default
-            targetAmountNum = ethAmountFromWei / exchangeRate;
-          }
-          
-          // EXTREME SAFETY: Max 1 ETH, min 0.000001 ETH
-          const safeTargetAmount = Math.min(Math.max(targetAmountNum, 0.000001), 1.0);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedTargetAmount = Math.round(safeTargetAmount * 1e6) / 1e6;
-          
-          console.log('🔢 SAFE CONVERSION - targetAmount (2nd endpoint):', targetAmountNum, '→', roundedTargetAmount, 'ETH');
-          
-          // Convert to wei safely
-          ethAmount = ethers.parseEther(roundedTargetAmount.toString()).toString();
-        } else {
-          // Convert XLM to ETH using exchange rate - SAFE CONVERSION
-          // For XLM→ETH: orderAmount should be XLM amount, not ETH wei
-          console.log('🔍 DEBUG - orderAmount for XLM→ETH conversion:', orderAmount);
-          
-          // ✅ CORRECT: Get XLM amount from stored order data
-          let xlmAmount = 1600; // Default fallback
-          
-          console.log('🔍 DEBUG - storedOrder data structure (dedicated endpoint):', {
-            stellarAmount: storedOrder?.stellarAmount,
-            stellar: storedOrder?.stellar,
-            orderAmount
-          });
-          
-          // Priority 1: Use stored stellar.amount (readable XLM format)
-          if (storedOrder?.stellar?.amount) {
-            xlmAmount = parseFloat(storedOrder.stellar.amount);
-            console.log('✅ Using storedOrder.stellar.amount (dedicated endpoint):', xlmAmount, 'XLM');
-          }
-          // Priority 2: Use stellarAmount (stroops) and convert to XLM
-          else if (storedOrder?.stellarAmount) {
-            const stellarAmountStroops = parseFloat(storedOrder.stellarAmount);
-            xlmAmount = stellarAmountStroops / 1e7; // Convert stroops to XLM
-            console.log('✅ Using storedOrder.stellarAmount converted (dedicated endpoint):', stellarAmountStroops, 'stroops →', xlmAmount, 'XLM');
-          }
-          // Priority 3: Try orderAmount if it looks reasonable
-          else if (orderAmount && typeof orderAmount === 'string') {
-            const numericOrderAmount = parseFloat(orderAmount);
-            console.log('🔍 DEBUG - Numeric orderAmount (dedicated endpoint):', numericOrderAmount);
-            
-            // If it's a reasonable number (< 1M), it's likely XLM
-            if (numericOrderAmount > 0 && numericOrderAmount < 1000000) {
-              xlmAmount = numericOrderAmount;
-              console.log('✅ Using orderAmount as XLM amount (dedicated endpoint):', xlmAmount);
-            } else {
-              console.log('⚠️ orderAmount seems wrong, using default XLM (dedicated endpoint)');
-            }
-          }
-          
-          console.log('🪙 XLM amount for conversion:', xlmAmount);
-          console.log('💱 Exchange rate:', exchangeRate, 'XLM per ETH');
-          
-          // ✅ CORRECT FORMULA: XLM amount / exchange rate = ETH amount
-          const ethAmountDecimal = xlmAmount / exchangeRate;
-          console.log('🔢 Calculation:', xlmAmount, '÷', exchangeRate, '=', ethAmountDecimal, 'ETH');
-          
-          // Limit to reasonable ETH amounts (max 10 ETH per transaction)
-          const safeEthAmount = Math.min(ethAmountDecimal, 10);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedEthAmount = Math.round(safeEthAmount * 1e6) / 1e6;
-          
-          // Convert to wei safely with parseEther protection
-          try {
-            ethAmount = ethers.parseEther(roundedEthAmount.toString()).toString();
-          } catch (parseError: any) {
-            console.warn('⚠️ parseEther failed, using minimum amount:', parseError.message);
-            ethAmount = "1000000000000000"; // 0.001 ETH minimum
-          }
-        }
-        console.log('💱 Using exchange rate:', exchangeRate, 'XLM per ETH (dedicated endpoint)');
-        console.log('🎯 ETH amount to send:', ethers.formatEther(ethAmount), 'ETH');
-        console.log('🏠 Sending to user address:', userEthAddress);
-        
-        // Create ETH transfer transaction
+
+        const balance = await withTimeout(
+          provider.getBalance(relayerWallet.address),
+          RELAYER_CONFIG.rpcTimeoutMs,
+          'RPC getBalance timeout'
+        );
+
         const tx = {
           to: userEthAddress,
-          value: ethAmount,
+          value: ethAmountWei,
           gasLimit: 21000,
-          gasPrice: ethers.parseUnits('20', 'gwei')
+          gasPrice: ethers.parseUnits('20', 'gwei'),
         };
-
         const gasCost = BigInt(tx.gasLimit) * BigInt(tx.gasPrice);
-        const totalRequired = BigInt(ethAmount) + gasCost;
+        const totalRequired = ethAmountWei + gasCost;
 
         if (balance < totalRequired) {
           return res.status(400).json({
@@ -1996,15 +1969,12 @@ async function initializeRelayer() {
             relayerAddress: relayerWallet.address,
             balance: ethers.formatEther(balance),
             required: ethers.formatEther(totalRequired),
-            message: `Fund relayer wallet on ${orderNetworkMode} before releasing ETH`
           });
         }
-        
-        // Send transaction with retry for rate limiting
-        let ethTxResponse;
+
+        let ethTxResponse: any;
         let txRetryCount = 0;
         const maxTxRetries = 3;
-        
         while (txRetryCount <= maxTxRetries) {
           try {
             ethTxResponse = await withTimeout(
@@ -2012,102 +1982,64 @@ async function initializeRelayer() {
               RELAYER_CONFIG.rpcTimeoutMs,
               'RPC sendTransaction timeout'
             );
-            break; // Success, exit retry loop
+            break;
           } catch (txError: any) {
             txRetryCount++;
-            
-            // Enhanced Alchemy rate limiting detection
-            const isRateLimit = txError.code === 'UNKNOWN_ERROR' && txError.error?.code === 429 ||
-                              txError.code === 429 ||
-                              txError.message?.includes('exceeded') ||
-                              txError.message?.includes('compute units') ||
-                              txError.message?.includes('rate limit') ||
-                              txError.error?.message?.includes('exceeded');
-            
+            const isRateLimit =
+              (txError.code === 'UNKNOWN_ERROR' && txError.error?.code === 429) ||
+              txError.code === 429 ||
+              txError.message?.includes('exceeded') ||
+              txError.message?.includes('compute units') ||
+              txError.message?.includes('rate limit') ||
+              txError.error?.message?.includes('exceeded');
             if (isRateLimit && txRetryCount <= maxTxRetries) {
-              const delayMs = Math.pow(2, txRetryCount) * 1000; // Exponential backoff: 2s, 4s, 8s
-              console.log(`⏳ Alchemy rate limit detected (attempt ${txRetryCount}/${maxTxRetries}). Error:`, txError.message || txError.error?.message);
-              console.log(`⏳ Waiting ${delayMs}ms before retry...`);
+              const delayMs = Math.pow(2, txRetryCount) * 1000;
+              console.log(`⏳ Rate limit (attempt ${txRetryCount}/${maxTxRetries}). Waiting ${delayMs}ms...`);
               await new Promise(resolve => setTimeout(resolve, delayMs));
               continue;
             }
-            
-            // If not rate limiting or exhausted retries, throw
-            console.error('❌ Transaction failed after retries:', txError);
             throw txError;
           }
         }
+
         console.log('📤 ETH transaction sent:', ethTxResponse.hash);
-        console.log('🌐 View on Etherscan: https://sepolia.etherscan.io/tx/' + ethTxResponse.hash);
-        
-        if (storedOrder) {
-          storedOrder.status = 'eth_tx_sent';
-          storedOrder.ethTxHash = ethTxResponse.hash;
-        }
-        
-        res.json({
+        storedOrder.status = 'eth_tx_sent';
+        storedOrder.ethTxHash = ethTxResponse.hash;
+
+        return res.json({
           success: true,
           orderId,
           ethTxId: ethTxResponse.hash,
           message: 'XLM→ETH transfer broadcasted',
           details: {
-            stellar: {
-              txHash: stellarTxHash,
-              status: 'confirmed'
-            },
+            stellar: { txHash: stellarTxHash, verifiedAmount: verifiedPayment.amount, status: 'confirmed' },
             ethereum: {
               txId: ethTxResponse.hash,
-              amount: `${ethers.formatEther(ethAmount)} ETH`,
+              amount: `${ethers.formatEther(ethAmountWei)} ETH`,
               destination: userEthAddress,
-              status: 'pending'
-            }
-          }
-        });
-        
-        console.log('🎉 XLM→ETH broadcasted successfully');
-        
-      } catch (ethError: any) {
-        console.error('❌ ETH transaction failed:', ethError);
-        console.error('❌ Full ETH error details:', {
-          name: ethError.name,
-          message: ethError.message,
-          code: ethError.code,
-          stack: ethError.stack,
-          data: ethError.data
+              status: 'pending',
+            },
+          },
         });
 
-        // 🆘 AUTOMATIC XLM REFUND: User sent XLM but we couldn't send ETH.
-        // Refund the XLM back to the user to prevent fund loss.
-        // Uses refundXlmToUser + RefundLedger for exactly-once semantics.
+      } catch (ethError: any) {
+        console.error('❌ ETH transaction failed:', ethError);
+
+        // ── Automatic XLM refund on ETH failure ──────────────────────────
         let refundResult: any = null;
         let refundError: any = null;
         let refundIsAmbiguous = false;
 
-        const networkModeForRefund = requestNetwork || storedOrder?.networkMode || DEFAULT_NETWORK_MODE;
-        const refundHorizonUrl = NETWORK_CONFIG[networkModeForRefund === 'mainnet' ? 'mainnet' : 'testnet'].stellar.horizonUrl;
-        const refundSecretKey = networkModeForRefund === 'mainnet'
-          ? (process.env.RELAYER_STELLAR_SECRET_MAINNET || process.env.RELAYER_STELLAR_SECRET)
-          : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
-
-        if (refundSecretKey && stellarAddress) {
-          console.log('🔄 Attempting automatic XLM refund to user...');
-          console.log('🎯 Refunding to stellar address:', stellarAddress);
-
-          // Claim the idempotency lock — if another path already committed
-          // a refund for this order, skip the Horizon submission entirely.
+        if (relayerSecretKey && stellarAddress) {
           const claimed = globalRefundLedger.claim(orderId);
           if (!claimed) {
-            const existing = globalRefundLedger.getEntry(orderId);
-            if (existing?.state.phase === 'committed') {
-              refundResult = { hash: existing.state.txHash };
-              if (storedOrder) {
-                storedOrder.status = 'refunded';
-                storedOrder.refundTxHash = existing.state.txHash;
-              }
-              console.log(`✅ Refund already committed by another path (tx=${existing.state.txHash}); skipping`);
+            const existingRefund = globalRefundLedger.getEntry(orderId);
+            if (existingRefund?.state.phase === 'committed') {
+              refundResult = { hash: existingRefund.state.txHash };
+              storedOrder.status = 'refunded';
+              storedOrder.refundTxHash = existingRefund.state.txHash;
             } else {
               refundError = `Refund already in-flight or ambiguous for orderId=${orderId}`;
-              console.warn(`⚠️ ${refundError}`);
             }
           } else {
             try {
@@ -2115,33 +2047,25 @@ async function initializeRelayer() {
                 orderId,
                 stellarAddress,
                 stellarTxHash,
-                networkMode: networkModeForRefund === 'mainnet' ? 'mainnet' : 'testnet',
-                horizonUrl: refundHorizonUrl,
-                refundSecret: refundSecretKey,
-                fallbackStroops: storedOrder?.amount ? String(storedOrder.amount) : undefined,
+                networkMode: orderNetworkMode,
+                horizonUrl,
+                refundSecret: relayerSecretKey,
+                fallbackStroops: verifiedPayment.amount,
                 ledger: globalRefundLedger,
                 maxRetries: 2,
               });
-
               refundResult = { hash: refund.hash };
-              if (storedOrder) {
-                storedOrder.status = 'refunded';
-                storedOrder.refundTxHash = refund.hash;
-              }
-              console.log(`✅ Automatic XLM refund successful: ${refund.hash} (${refund.amount} XLM)`);
+              storedOrder.status = 'refunded';
+              storedOrder.refundTxHash = refund.hash;
+              console.log(`✅ Automatic XLM refund: ${refund.hash} (${refund.amount} XLM)`);
             } catch (refundErr: any) {
               if (refundErr instanceof HorizonTimeoutError) {
-                // Ambiguous — tx may have landed; ledger already marked ambiguous
-                // inside refundXlmToUser. Do not release the lock.
                 refundIsAmbiguous = true;
-                refundError = `Horizon timeout — refund status ambiguous: ${refundErr.message}`;
-                if (storedOrder) {
-                  storedOrder.watchdogFailedAt = Date.now();
-                  storedOrder.watchdogFailureReason = `horizon_timeout: ${refundErr.message}`;
-                }
+                refundError = `Horizon timeout: ${refundErr.message}`;
+                storedOrder.watchdogFailedAt = Date.now();
+                storedOrder.watchdogFailureReason = `horizon_timeout: ${refundErr.message}`;
                 globalRefundLedger.markAmbiguous(orderId, refundErr.message);
               } else {
-                // Definitive failure — release lock so watchdog can retry
                 globalRefundLedger.release(orderId);
                 refundError = refundErr.message || 'Refund failed';
               }
@@ -2149,45 +2073,33 @@ async function initializeRelayer() {
             }
           }
         } else {
-          refundError = refundSecretKey
-            ? 'Missing stellarAddress for refund'
-            : `Relayer Stellar secret not configured for ${networkModeForRefund}`;
+          refundError = relayerSecretKey ? 'Missing stellarAddress for refund' : `Relayer Stellar secret not configured for ${orderNetworkMode}`;
           console.error('❌ Cannot refund:', refundError);
         }
 
-        res.status(500).json({
+        return res.status(500).json({
           error: 'ETH release failed',
           details: ethError.message,
           errorCode: ethError.code,
-          errorName: ethError.name,
-          refund: refundResult ? {
-            status: 'completed',
-            stellarTxHash: refundResult.hash,
-            message: 'Your XLM has been automatically refunded to your wallet.'
-          } : {
-            status: refundIsAmbiguous ? 'ambiguous' : 'failed',
-            error: refundError,
-            message: refundIsAmbiguous
-              ? 'Refund status is ambiguous — the watchdog will confirm and complete it shortly.'
-              : 'Automatic refund failed. Please contact support with this order ID.',
-            orderId,
-            originalStellarTxHash: stellarTxHash
-          }
+          refund: refundResult
+            ? { status: 'completed', stellarTxHash: refundResult.hash, message: 'Your XLM has been automatically refunded.' }
+            : {
+                status: refundIsAmbiguous ? 'ambiguous' : 'failed',
+                error: refundError,
+                message: refundIsAmbiguous
+                  ? 'Refund status is ambiguous — the watchdog will confirm shortly.'
+                  : 'Automatic refund failed. Please contact support with this order ID.',
+                orderId,
+                originalStellarTxHash: stellarTxHash,
+              },
         });
       }
 
     } catch (error: any) {
       console.error('❌ XLM→ETH processing failed:', error);
-      console.error('❌ Error stack trace:', error.stack);
-      console.error('❌ Error details:', {
-        message: error.message,
-        name: error.name,
-        code: error.code
-      });
-      
-      res.status(500).json({
+      return res.status(500).json({
         error: 'XLM→ETH processing failed',
-        details: error instanceof Error ? error.message : 'Unknown error'
+        details: error instanceof Error ? error.message : 'Unknown error',
       });
     }
   });
@@ -2851,15 +2763,18 @@ async function initializeRelayer() {
   // Admin endpoints - must be inside initializeRelayer function
   
   // Admin endpoint to authorize relayer
-  app.post('/api/admin/authorize-relayer', async (req, res) => {
+  app.post('/api/admin/authorize-relayer', requireAdminAuth(), async (req, res) => {
     try {
       console.log('🔐 Authorizing relayer as resolver...');
       
-      const { adminPrivateKey } = req.body;
+      // Admin private key MUST come from the server environment, never from
+      // the request body. Accepting secrets over the wire would expose them
+      // in logs, proxies, and CDN caches.
+      const adminPrivateKey = process.env.RELAYER_ADMIN_PRIVATE_KEY;
       if (!adminPrivateKey) {
-        return res.status(400).json({
+        return res.status(500).json({
           success: false,
-          error: 'Admin private key required'
+          error: 'RELAYER_ADMIN_PRIVATE_KEY is not configured on this server',
         });
       }
       
@@ -2898,7 +2813,7 @@ async function initializeRelayer() {
   });
 
   // Check relayer authorization status
-  app.get('/api/admin/relayer-status', async (req, res) => {
+  app.get('/api/admin/relayer-status', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2930,7 +2845,7 @@ async function initializeRelayer() {
   });
 
   // Check configured resolver allowlist authorization status
-  app.get('/api/admin/resolvers', async (req, res) => {
+  app.get('/api/admin/resolvers', requireAdminAuth(), async (req, res) => {
     try {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
@@ -2967,20 +2882,6 @@ async function initializeRelayer() {
   });
 
   console.log('✅ Admin endpoints registered');
-
-  // ═══════════════════════════════════════════════════════════════════════════════════════
-  // DEBUG ENDPOINT
-  // ═══════════════════════════════════════════════════════════════════════════════════════
-  
-  app.post('/api/debug/body', (req, res) => {
-    console.log('DEBUG: Request body:', req.body);
-    console.log('DEBUG: Request headers:', req.headers);
-    res.json({
-      success: true,
-      body: req.body,
-      headers: req.headers
-    });
-  });
 
   // ═══════════════════════════════════════════════════════════════════════════════════════
             // 1INCH ESCROW FACTORY ENDPOINTS - Using createDstEscrow approach

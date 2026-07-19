@@ -373,7 +373,7 @@ async function checkAmbiguousRefund(
       ledger.resolveAmbiguous(orderId, {
         txHash: landed.hash,
         amount,
-        ledger: landed.ledger,
+        ledger: typeof landed.ledger === 'number' ? landed.ledger : undefined,
       });
 
       order.status = 'refunded';

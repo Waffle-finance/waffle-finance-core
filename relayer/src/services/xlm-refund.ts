@@ -491,7 +491,9 @@ function classifyHorizonError(err: unknown): Error {
       const resultCodes: Record<string, string> =
         response?.data?.extras?.result_codes ?? {};
       const txCode: string = resultCodes?.transaction ?? '';
-      const opCodes: string[] = resultCodes?.operations ?? [];
+      const opCodes: string[] = Array.isArray(resultCodes?.operations)
+        ? (resultCodes.operations as string[])
+        : [];
       const allCodes = [txCode, ...opCodes].filter(Boolean);
 
       const terminalCode = allCodes.find((c) => TERMINAL_RESULT_CODES.has(c));
