@@ -122,7 +122,9 @@ function decodeHtlcEvent(
   if (topicScVals.length === 0) return null;
 
   // Topics[0] is always the short symbol identifying the event type.
-  const eventKind = scValToNative(topicScVals[0]) as unknown;
+  const topic0 = topicScVals[0];
+  if (!topic0) return null;
+  const eventKind = scValToNative(topic0) as unknown;
   if (typeof eventKind !== "string") return null;
 
   // data is a Soroban Vec (tuple); scValToNative converts it to an Array.
@@ -133,9 +135,13 @@ function decodeHtlcEvent(
   if (eventKind === "created") {
     // topics: [symbol("created"), sender: Address, beneficiary: Address, hashlock: BytesN<32>]
     if (topicScVals.length < 4) return null;
-    const sender = scValToNative(topicScVals[1]) as unknown;
-    const beneficiary = scValToNative(topicScVals[2]) as unknown;
-    const hashlockRaw = scValToNative(topicScVals[3]) as unknown;
+    const t1 = topicScVals[1];
+    const t2 = topicScVals[2];
+    const t3 = topicScVals[3];
+    if (!t1 || !t2 || !t3) return null;
+    const sender = scValToNative(t1) as unknown;
+    const beneficiary = scValToNative(t2) as unknown;
+    const hashlockRaw = scValToNative(t3) as unknown;
 
     if (
       typeof sender !== "string" ||
@@ -180,8 +186,11 @@ function decodeHtlcEvent(
   if (eventKind === "claimed") {
     // topics: [symbol("claimed"), beneficiary: Address, hashlock: BytesN<32>]
     if (topicScVals.length < 3) return null;
-    const beneficiary = scValToNative(topicScVals[1]) as unknown;
-    const hashlockRaw = scValToNative(topicScVals[2]) as unknown;
+    const t1 = topicScVals[1];
+    const t2 = topicScVals[2];
+    if (!t1 || !t2) return null;
+    const beneficiary = scValToNative(t1) as unknown;
+    const hashlockRaw = scValToNative(t2) as unknown;
 
     if (
       typeof beneficiary !== "string" ||
@@ -214,8 +223,11 @@ function decodeHtlcEvent(
   if (eventKind === "refunded") {
     // topics: [symbol("refunded"), refund_address: Address, hashlock: BytesN<32>]
     if (topicScVals.length < 3) return null;
-    const refundAddress = scValToNative(topicScVals[1]) as unknown;
-    const hashlockRaw = scValToNative(topicScVals[2]) as unknown;
+    const t1 = topicScVals[1];
+    const t2 = topicScVals[2];
+    if (!t1 || !t2) return null;
+    const refundAddress = scValToNative(t1) as unknown;
+    const hashlockRaw = scValToNative(t2) as unknown;
 
     if (
       typeof refundAddress !== "string" ||
