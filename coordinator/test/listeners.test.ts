@@ -872,7 +872,7 @@ const SOLANA_CFG: CoordinatorConfig = {
   pollIntervalMs: 1,
   solana: {
     rpcUrl: "https://solana.test",
-    programId: "11111111111111111111111111111111", // System program — valid base58
+    programId: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", // realistic base58, not a placeholder
     commitment: "confirmed",
   },
 };

@@ -64,7 +64,60 @@ describe("createReadinessChecks", () => {
       "reconciliation"
     ]);
     expect(checks.every((check) => check.ok)).toBe(true);
-    expect(methods).toEqual(["eth_blockNumber", "getHealth", "getHealth"]);
+    // solana_rpc is skipped (placeholder) so getHealth is NOT called for it;
+    // only eth_blockNumber and getHealth (soroban) are issued.
+    expect(methods).toEqual(["eth_blockNumber", "getHealth"]);
+  });
+
+  it("marks solana_rpc as ok with detail=disabled_placeholder when programId is a placeholder", async () => {
+    const db = await freshDb();
+    const fetcher = async (_url: string, init: { body: string }) =>
+      ({ ok: true, status: 200, json: async () => ({ result: "ok" }) });
+
+    const checks = await createReadinessChecks({
+      cfg: baseConfig, // programId = "PLACEHOLDER"
+      db,
+      getReconciliationStatus: () => ({ lastRunAt: Date.now(), lastRunOk: true, eventsReplayed: 0 }),
+      fetcher,
+      timeoutMs: 10
+    })();
+
+    const solanaCheck = checks.find((c) => c.name === "solana_rpc");
+    expect(solanaCheck).toEqual(
+      expect.objectContaining({ name: "solana_rpc", ok: true, detail: "disabled_placeholder" })
+    );
+  });
+
+  it("probes solana_rpc when programId is a real address", async () => {
+    const db = await freshDb();
+    const probedUrls: string[] = [];
+    const fetcher = async (url: string, _init: { body: string }) => {
+      probedUrls.push(url);
+      return { ok: true, status: 200, json: async () => ({ result: "ok" }) };
+    };
+
+    const configuredCfg: CoordinatorConfig = {
+      ...baseConfig,
+      solana: {
+        ...baseConfig.solana,
+        programId: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      },
+    };
+
+    const checks = await createReadinessChecks({
+      cfg: configuredCfg,
+      db,
+      getReconciliationStatus: () => ({ lastRunAt: Date.now(), lastRunOk: true, eventsReplayed: 0 }),
+      fetcher,
+      timeoutMs: 10
+    })();
+
+    // solana_rpc should have been probed this time
+    expect(probedUrls).toContain("https://solana.example/rpc");
+
+    const solanaCheck = checks.find((c) => c.name === "solana_rpc");
+    expect(solanaCheck?.ok).toBe(true);
+    expect(solanaCheck?.detail).toBeUndefined();
   });
 
   it("marks failed RPC and reconciliation checks without exposing URLs", async () => {

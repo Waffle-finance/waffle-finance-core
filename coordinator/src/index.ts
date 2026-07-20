@@ -1,4 +1,4 @@
-import { loadConfig } from "./config.js";
+import { loadConfig, logSolanaStatus } from "./config.js";
 import { getLogger } from "./logger.js";
 import { openDatabase } from "./persistence/db.js";
 import { OrdersRepository } from "./persistence/orders-repo.js";
@@ -13,11 +13,25 @@ import { Reconciler } from "./reconciliation/reconciler.js";
 import { StaleCleanupService } from "./services/stale-cleanup.js";
 import { createReadinessChecks } from "./readiness.js";
 import { retryAsync } from "./retry.js";
+import { solanaPlaceholderMode } from "./metrics.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const log = getLogger(cfg.logLevel);
   log.info({ network: cfg.network, port: cfg.port }, "WaffleFinance coordinator starting");
+
+  // Emit a structured startup log and set the observable metric so operators
+  // can see at a glance whether Solana flows are active or in placeholder mode.
+  const solanaStatus = logSolanaStatus(cfg.solana.programId);
+  solanaPlaceholderMode.set(solanaStatus === "placeholder" ? 1 : 0);
+  if (solanaStatus === "placeholder") {
+    log.warn(
+      { programId: cfg.solana.programId },
+      "Solana HTLC program is a placeholder — Solana listener and settlement flows are DISABLED"
+    );
+  } else {
+    log.info({ programId: cfg.solana.programId }, "Solana HTLC program configured");
+  }
 
   const db = await retryAsync(() => openDatabase(cfg.databaseUrl), {
   maxAttempts: 5,

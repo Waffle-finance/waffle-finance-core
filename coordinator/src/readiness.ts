@@ -2,6 +2,7 @@ import type { CoordinatorConfig } from "./config.js";
 import type { Database } from "./persistence/db.js";
 import type { ReconciliationStatus } from "./reconciliation/reconciler.js";
 import type { ReadinessCheck } from "./server/routes/health.js";
+import { isSolanaPlaceholder } from "./config.js";
 
 type FetchLike = (
   url: string,
@@ -98,17 +99,29 @@ export function createReadinessChecks({
   fetcher = globalThis.fetch as FetchLike,
   timeoutMs = 750
 }: ReadinessDeps): () => Promise<ReadinessCheck[]> {
-  return async () => [
-    await timedCheck("database", () => probeDatabase(db)),
-    await timedCheck("ethereum_rpc", () =>
-      probeJsonRpc(fetcher, cfg.ethereum.rpcUrl, "eth_blockNumber", timeoutMs)
-    ),
-    await timedCheck("soroban_rpc", () =>
-      probeJsonRpc(fetcher, cfg.soroban.rpcUrl, "getHealth", timeoutMs)
-    ),
-    await timedCheck("solana_rpc", () =>
-      probeJsonRpc(fetcher, cfg.solana.rpcUrl, "getHealth", timeoutMs)
-    ),
-    reconciliationCheck(getReconciliationStatus())
-  ];
+  return async () => {
+    // The Solana RPC probe is skipped when the program ID is a placeholder.
+    // Probing a devnet/mainnet RPC endpoint that we never actually use would
+    // produce false-positive failures and make operators think something is
+    // broken when it's simply unconfigured.  The skipped check is returned
+    // as ok=true with detail="disabled_placeholder" so it is visible in
+    // health payloads without polluting the pass/fail count.
+    const solanaCheck: ReadinessCheck = isSolanaPlaceholder(cfg.solana.programId)
+      ? { name: "solana_rpc", ok: true, detail: "disabled_placeholder" }
+      : await timedCheck("solana_rpc", () =>
+          probeJsonRpc(fetcher, cfg.solana.rpcUrl, "getHealth", timeoutMs)
+        );
+
+    return [
+      await timedCheck("database", () => probeDatabase(db)),
+      await timedCheck("ethereum_rpc", () =>
+        probeJsonRpc(fetcher, cfg.ethereum.rpcUrl, "eth_blockNumber", timeoutMs)
+      ),
+      await timedCheck("soroban_rpc", () =>
+        probeJsonRpc(fetcher, cfg.soroban.rpcUrl, "getHealth", timeoutMs)
+      ),
+      solanaCheck,
+      reconciliationCheck(getReconciliationStatus()),
+    ];
+  };
 }

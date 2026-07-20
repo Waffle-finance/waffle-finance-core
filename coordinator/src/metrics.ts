@@ -208,3 +208,18 @@ export const sorobanDecodeErrors = new Counter({
   labelNames: ["reason"] as const,
   registers: [registry],
 });
+
+/**
+ * Set to 1 when SOLANA_HTLC_PROGRAM is a placeholder and the Solana
+ * listener is disabled; 0 when a real program address is configured.
+ *
+ * Mirrors the `relayer_solana_placeholder_mode` gauge in the relayer so
+ * both services expose the same observable signal.  An alert on this
+ * gauge lets operators know Solana flows are inactive before they start
+ * wondering why SOL→ETH swaps never complete.
+ */
+export const solanaPlaceholderMode = new Gauge({
+  name: "coordinator_solana_placeholder_mode",
+  help: "1 when SOLANA_HTLC_PROGRAM is a placeholder and Solana flows are disabled, 0 when configured",
+  registers: [registry],
+});

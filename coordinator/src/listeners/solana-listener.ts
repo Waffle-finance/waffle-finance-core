@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import { observeListenerEventProcessing, recordListenerProgress } from "../metrics.js";
+import { isSolanaPlaceholder } from "../config.js";
 
 /**
  * Confirmation level constants for Solana commitment model.
@@ -88,8 +89,11 @@ export class SolanaListener {
   }
 
   start(): void {
-    if (!this.cfg.solana.programId || this.cfg.solana.programId === "PLACEHOLDER") {
-      this.log.warn("SOLANA_HTLC_PROGRAM not configured - Solana listener disabled");
+    if (isSolanaPlaceholder(this.cfg.solana.programId)) {
+      this.log.warn(
+        { programId: this.cfg.solana.programId },
+        "SOLANA_HTLC_PROGRAM is a placeholder — Solana listener disabled"
+      );
       return;
     }
     this.log.info({ program: this.cfg.solana.programId }, "Solana listener starting");
