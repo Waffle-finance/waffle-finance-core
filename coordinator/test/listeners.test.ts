@@ -16,6 +16,7 @@ import {
   makeRefundedEvent,
   makeMalformedDataEvent,
   makeUnknownTopicEvent,
+  makeCorruptDataEvent,
   HASHLOCK,
   PREIMAGE,
   ORDER_ID,
@@ -519,6 +520,98 @@ describe("SorobanListener", () => {
     await new Promise((r) => setTimeout(r, 40));
     // No assertion needed beyond "no error thrown" — listener keeps running
     listener.stop();
+  });
+
+  // ── Failure branch: claimed — orderId miss, hashlock hit (fallback path) ──
+  it("falls back to hashlock lookup for `claimed` when srcOrderId is not in the DB", async () => {
+    // Seed an order with the fixture hashlock but WITHOUT recording a src lock,
+    // so findBySrcOrderId("stellar", "42") returns null and the listener falls
+    // back to findByHashlock.  We then manually put it into src_locked state
+    // using recordSrcLock with a DIFFERENT orderId so findBySrcOrderId misses.
+    const order = await seedStellarOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "999",           // different orderId — findBySrcOrderId("42") misses
+      txHash: "0xlock_fallback",
+      blockNumber: 10049,
+      timelock: TIMELOCK,
+    });
+    mockLatestLedger = 10100;
+
+    // claimed fixture: orderId=42 in data, hashlock=HASHLOCK in topics
+    mockSorobanEvents = [makeClaimedEvent(10051, "0xstellar_claimed_fallback")];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    // Fallback via hashlock must have recorded the preimage
+    expect(updated?.status).toBe("secret_revealed");
+    expect(updated?.preimage).toBe(PREIMAGE);
+    expect(updated?.secretRevealedTx).toBe("0xstellar_claimed_fallback");
+  });
+
+  // ── Failure branch: claimed — both lookups return null ───────────────────
+  it("silently skips a `claimed` event when neither orderId nor hashlock match", async () => {
+    // No order seeded at all — both findBySrcOrderId and findByHashlock return null
+    mockLatestLedger = 10100;
+    mockSorobanEvents = [makeClaimedEvent(10051)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+    // No crash, listener still running
+    listener.stop();
+  });
+
+  // ── Failure branch: refunded — orderId miss, hashlock hit (fallback path) ─
+  it("falls back to hashlock lookup for `refunded` when srcOrderId is not in the DB", async () => {
+    const order = await seedStellarOrder(orders);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "999",           // different orderId — findBySrcOrderId("42") misses
+      txHash: "0xlock_refund_fallback",
+      blockNumber: 10049,
+      timelock: TIMELOCK,
+    });
+    mockLatestLedger = 10100;
+
+    // refunded fixture: orderId=42 in data, hashlock=HASHLOCK in topics
+    mockSorobanEvents = [makeRefundedEvent(10052, "0xstellar_refunded_fallback")];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    // Fallback via hashlock must have marked the order refunded
+    expect(updated?.status).toBe("refunded");
+  });
+
+  // ── Failure branch: refunded — both lookups return null ──────────────────
+  it("silently skips a `refunded` event when neither orderId nor hashlock match", async () => {
+    mockLatestLedger = 10100;
+    mockSorobanEvents = [makeRefundedEvent(10052)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+    listener.stop();
+  });
+
+  // ── Failure branch: scValToNative throws (corrupt XDR) ───────────────────
+  it("counts and skips an event whose XDR value cannot be decoded", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+
+    // makeCorruptDataEvent injects a structurally invalid ScVal that causes
+    // scValToNative to throw inside decodeHtlcEvent. The listener must catch
+    // that, increment sorobanDecodeErrors{reason:"xdr_decode_error"}, and
+    // keep the poll loop running without touching the order.
+    mockSorobanEvents = [makeCorruptDataEvent(10050)];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
   });
 });
 
