@@ -128,6 +128,26 @@ export function makeUnknownTopicEvent(ledger = 10054, txHash = "0xstellar_unknow
   };
 }
 
+/**
+ * Deliberately broken value field — null — which causes `scValToNative` to
+ * throw a TypeError inside `decodeHtlcEvent`.
+ *
+ * Hand-written (not generated). Exercises the `catch (decodeErr)` branch in
+ * `processSorobanEvent` and the `sorobanDecodeErrors{ reason:"xdr_decode_error" }`
+ * counter path. Topics are a valid "created" array so the event passes the
+ * topic-length guard before the throw.
+ */
+export function makeCorruptDataEvent(ledger = 10055, txHash = "0xstellar_corrupt_tx") {
+  return {
+    ledger,
+    txHash,
+    topic: CREATED_TOPICS_B64.map(fromB64),
+    // null is not a valid xdr.ScVal — scValToNative throws TypeError on .switch()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    value: null as any as xdr.ScVal,
+  };
+}
+
 // ─── Import-time sanity assertions ────────────────────────────────────────────
 // Throw during test collection if any XDR blob is malformed.
 
