@@ -1,47 +1,47 @@
 /**
- * Background watchdog that rescues XLMΓåÆETH orders the relayer failed to
- * complete (typically because the user closed the page after sending
- * XLM, or the ETH RPC hiccupped past the in-request retry budget).
+ * Background watchdog that rescues XLM→ETH orders the relayer failed to
+ * complete (typically because the user closed the page after sending XLM,
+ * or the ETH RPC hiccupped past the in-request retry budget).
  *
  * Every `intervalMs` we walk `activeOrders`, find any `xlm_to_eth` order
- * that has been awaiting ETH for longer than `staleAfterMs`, and trigger
- * a refund using the same code path as the inline handler. Refunded
- * orders are stamped `refunded` (and `refundTxHash`) so subsequent ticks
- * don't double-pay.
+ * that has been awaiting ETH for longer than `staleAfterMs`, and trigger a
+ * refund using the same code path as the inline handler. Refunded orders are
+ * stamped `refunded` (and `refundTxHash`) so subsequent ticks don't double-pay.
  *
  * Idempotency
  * -----------
  * Before submitting to Horizon the watchdog claims the order in the
- * `RefundLedger`. A successful submit commits the entry; a Horizon
- * timeout marks it ambiguous so subsequent ticks can check on-chain
- * state before trying again. If another code path already committed a
- * refund, the watchdog detects the `committed` state, logs a
- * duplicate-suppression event, and skips the order.
+ * `RefundLedger`. A successful submit commits the entry; a Horizon timeout
+ * marks it ambiguous so subsequent ticks check on-chain state before trying
+ * again. If another code path already committed a refund, the watchdog detects
+ * the `committed` state, syncs the order, and skips it.
  *
- * The watchdog is best-effort: failures are logged but never thrown so
- * one bad order can't take down the entire timer.
+ * Amount unknown (deferral)
+ * -------------------------
+ * When `RefundAmountUnknownError` is thrown (no stellarTxHash and no valid
+ * fallback), the watchdog releases the lock and marks the order for retry on
+ * the next tick without counting it as a hard failure. This handles the window
+ * between a user sending XLM and Horizon indexing that transaction.
  *
  * ## Metrics
  *
- * All activity is recorded via the relayer's Prometheus metrics registry
- * (see `../metrics.ts`). Key metrics emitted per tick:
- *
- *   relayer_refund_watchdog_runs_total              — tick completed
- *   relayer_refund_watchdog_success_total           — per successful refund
- *   relayer_refund_watchdog_failure_total           — per failed refund
- *   relayer_refund_watchdog_stale_orders_detected_total — stale orders found
- *   relayer_refund_watchdog_backoff_skips_total     — orders skipped (back-off)
- *   relayer_refund_watchdog_last_run_timestamp_seconds — epoch of last tick
- *   relayer_refund_watchdog_max_stale_age_seconds   — oldest stale order age
- *   relayer_refund_watchdog_pending_refunds         — orders awaiting refund
- *   relayer_refund_watchdog_tick_duration_seconds   — tick latency histogram
- *   relayer_xlm_refund_duplicates_suppressed_total  — duplicates blocked by ledger
- *   relayer_xlm_refund_horizon_timeouts_total       — ambiguous 504/timeout events
+ *   relayer_refund_watchdog_runs_total
+ *   relayer_refund_watchdog_success_total
+ *   relayer_refund_watchdog_failure_total          { reason, network_mode }
+ *   relayer_refund_watchdog_stale_orders_detected_total
+ *   relayer_refund_watchdog_backoff_skips_total
+ *   relayer_refund_watchdog_last_run_timestamp_seconds
+ *   relayer_refund_watchdog_max_stale_age_seconds
+ *   relayer_refund_watchdog_pending_refunds
+ *   relayer_refund_watchdog_tick_duration_seconds
+ *   relayer_xlm_refund_duplicates_suppressed_total
+ *   relayer_xlm_refund_horizon_timeouts_total
  */
 
 import {
   refundXlmToUser,
   HorizonTimeoutError,
+  RefundAmountUnknownError,
   type RefundNetworkMode,
 } from './xlm-refund.js';
 import { globalRefundLedger, type RefundLedger } from './refund-ledger.js';
@@ -58,9 +58,13 @@ import {
 } from '../metrics.js';
 import { sanitizeForLog } from '../utils/sanitize-for-log.js';
 
-const DEFAULT_INTERVAL_MS = 60_000;      // 1 minute
+const DEFAULT_INTERVAL_MS = 60_000;       // 1 minute
 const DEFAULT_STALE_AFTER_MS = 5 * 60_000; // 5 minutes
-const BACKOFF_MS = 10 * 60_000;          // 10 minutes after a failure
+const BACKOFF_MS = 10 * 60_000;           // 10 minutes after a failure
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface WatchdogOrder {
   orderId?: string;
@@ -83,8 +87,8 @@ export interface WatchdogConfig {
   /** How often to scan, in ms. Defaults to 60s. */
   intervalMs?: number;
   /**
-   * How long an order can sit without ETH being sent before the
-   * watchdog refunds it. Defaults to 5 minutes.
+   * How long an order can sit without ETH being sent before the watchdog
+   * refunds it. Defaults to 5 minutes.
    */
   staleAfterMs?: number;
   /** Horizon URL for the active Stellar network (mainnet or testnet). */
@@ -106,7 +110,16 @@ export interface WatchdogConfig {
   refundLedger?: RefundLedger;
 }
 
-function toMillis(
+// ---------------------------------------------------------------------------
+// Exported helpers (used by tests and the inline route handler)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalise a timestamp value to milliseconds.
+ * Accepts: ms-range number, seconds-range number, ISO string.
+ * Returns null for missing or unparseable values.
+ */
+export function toMillis(
   value: WatchdogOrder['xlmReceivedAt'] | WatchdogOrder['created']
 ): number | null {
   if (value == null) return null;
@@ -115,24 +128,36 @@ function toMillis(
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isXlmToEthAwaitingEth(order: WatchdogOrder): boolean {
+/**
+ * True when an order is an XLM→ETH swap that has received XLM but has not
+ * yet been refunded or advanced to the ETH-sent / completed state.
+ */
+export function isXlmToEthAwaitingEth(order: WatchdogOrder): boolean {
   if (order.direction !== 'xlm_to_eth') return false;
-  if (!order.stellarTxHash) return false; // XLM never received ΓåÆ nothing to refund
+  if (!order.stellarTxHash) return false; // XLM never received → nothing to refund
   if (order.refundTxHash || order.refundedAt) return false; // already refunded
   if (order.status === 'eth_tx_sent' || order.status === 'completed') return false;
   if (order.status === 'refunded') return false;
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Watchdog
+// ---------------------------------------------------------------------------
+
 export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void } {
   const intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
   const staleAfterMs = config.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const ledger = config.refundLedger ?? globalRefundLedger;
 
-  console.log(
-    `[refund-watchdog] starting ┬╖ scan every ${Math.round(intervalMs / 1000)}s` +
-    ` ┬╖ refund after ${Math.round(staleAfterMs / 1000)}s` +
-    ` ┬╖ network=${config.networkMode}`
+  process.stdout.write(
+    JSON.stringify({
+      level: 'info',
+      msg: '[refund-watchdog] starting',
+      intervalSecs: Math.round(intervalMs / 1000),
+      staleAfterSecs: Math.round(staleAfterMs / 1000),
+      network: config.networkMode,
+    }) + '\n'
   );
 
   const tick = async (): Promise<void> => {
@@ -147,18 +172,20 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
         try {
           if (!isXlmToEthAwaitingEth(order)) continue;
 
-          // ── Idempotency: skip if another path already committed a refund ──
+          // ── Idempotency: another path already committed a refund ──────────
           const ledgerEntry = ledger.getEntry(orderId);
           if (ledgerEntry?.state.phase === 'committed') {
-            // Sync order state from ledger so isXlmToEthAwaitingEth returns
-            // false next tick without hitting this branch again.
             if (!order.refundTxHash) {
               order.status = 'refunded';
               order.refundTxHash = ledgerEntry.state.txHash;
               order.refundedAt = ledgerEntry.state.committedAt;
-              console.log(
-                `[refund-watchdog] orderId=${orderId} already committed by another path` +
-                ` (tx=${ledgerEntry.state.txHash}); syncing order state`
+              process.stdout.write(
+                JSON.stringify({
+                  level: 'info',
+                  msg: '[refund-watchdog] duplicate suppressed — syncing from ledger',
+                  orderId,
+                  txHash: ledgerEntry.state.txHash,
+                }) + '\n'
               );
             }
             continue;
@@ -168,33 +195,34 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           if (ledgerEntry?.state.phase === 'ambiguous') {
             const resolved = await checkAmbiguousRefund(orderId, ledger, order, config);
             if (resolved) continue;
-            // Not yet resolved — honour back-off before retrying
+            // Not yet resolved — fall through to back-off check.
           }
 
           pendingCount++;
 
-          // ── Back-off: skip for 10 min after a prior failure ──────────────
+          // ── Back-off: skip for 10 min after a prior hard failure ──────────
           if (order.watchdogFailedAt && now - order.watchdogFailedAt < BACKOFF_MS) {
             watchdogBackoffSkipsTotal.inc();
             continue;
           }
 
-          const startedAt =
-            toMillis(order.xlmReceivedAt) ?? toMillis(order.created);
+          const startedAt = toMillis(order.xlmReceivedAt) ?? toMillis(order.created);
           if (!startedAt) continue;
 
           const age = now - startedAt;
           if (age < staleAfterMs) continue;
 
-          // This order is stale and eligible for refund.
           maxStaleAgeMs = Math.max(maxStaleAgeMs, age);
           watchdogStaleOrdersDetected.inc();
 
           const stellarAddress = order.stellarAddress;
           if (!stellarAddress) {
-            console.warn(
-              `[refund-watchdog] orderId=${orderId} stuck but missing` +
-              ` stellarAddress; skipping`
+            process.stderr.write(
+              JSON.stringify({
+                level: 'warn',
+                msg: '[refund-watchdog] missing stellarAddress — skipping',
+                orderId,
+              }) + '\n'
             );
             watchdogRefundFailureTotal.inc({
               reason: 'missing_address',
@@ -206,19 +234,20 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
           // ── Claim the idempotency lock ────────────────────────────────────
           const claimed = ledger.claim(orderId);
           if (!claimed) {
-            // Another concurrent tick claimed it first (shouldn't happen with
-            // single-threaded Node, but be safe).
-            console.log(
-              `[refund-watchdog] orderId=${orderId} claim lost to concurrent path; skipping`
-            );
+            // Another concurrent tick claimed it first (rare in single-threaded
+            // Node, but be defensive).
             watchdogBackoffSkipsTotal.inc();
             continue;
           }
 
-          console.log(
-            `[refund-watchdog] orderId=${orderId} refunding` +
-            ` ΓÇö pending for ${Math.round(age / 1000)}s,` +
-            ` stellarTx=${order.stellarTxHash}`
+          process.stdout.write(
+            JSON.stringify({
+              level: 'info',
+              msg: '[refund-watchdog] attempting refund',
+              orderId,
+              ageSecs: Math.round(age / 1000),
+              stellarTxHash: order.stellarTxHash,
+            }) + '\n'
           );
 
           try {
@@ -234,21 +263,38 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
               maxRetries: 3,
             });
 
-            // refundXlmToUser already called ledger.commit on success.
+            // refundXlmToUser called ledger.commit on success.
             order.status = 'refunded';
             order.refundTxHash = refund.hash;
             order.refundedAt = Date.now();
 
             watchdogRefundSuccessTotal.inc({ network_mode: config.networkMode });
 
-            console.log(
-              `[refund-watchdog] ✅ orderId=${orderId} refunded ${refund.amount} XLM` +
-              ` (${refund.stroops} stroops) → ${stellarAddress} (tx=${refund.hash})`
+            process.stdout.write(
+              JSON.stringify({
+                level: 'info',
+                msg: '[refund-watchdog] refund succeeded',
+                orderId,
+                amount: refund.amount,
+                stroops: refund.stroops.toString(),
+                destination: stellarAddress,
+                txHash: refund.hash,
+              }) + '\n'
             );
           } catch (refundErr: unknown) {
-            if (refundErr instanceof HorizonTimeoutError) {
-              // Horizon timed out — tx may have landed. Mark ambiguous and
-              // let the next tick re-check instead of releasing the lock.
+            if (refundErr instanceof RefundAmountUnknownError) {
+              // Amount not yet available — release and defer; not a hard failure.
+              ledger.release(orderId);
+              process.stdout.write(
+                JSON.stringify({
+                  level: 'info',
+                  msg: '[refund-watchdog] amount unknown — deferring to next tick',
+                  orderId,
+                }) + '\n'
+              );
+              // Do NOT stamp watchdogFailedAt — we want to retry next tick.
+            } else if (refundErr instanceof HorizonTimeoutError) {
+              // Tx may have landed — mark ambiguous rather than releasing.
               ledger.markAmbiguous(orderId, refundErr.message);
               order.watchdogFailedAt = Date.now();
               order.watchdogFailureReason = `horizon_timeout: ${refundErr.message}`;
@@ -258,12 +304,15 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
                 network_mode: config.networkMode,
               });
 
-              console.warn(
-                `[refund-watchdog] ⚠️  orderId=${orderId} Horizon timeout — ` +
-                `marked ambiguous, will re-check next tick`
+              process.stderr.write(
+                JSON.stringify({
+                  level: 'warn',
+                  msg: '[refund-watchdog] Horizon timeout — marked ambiguous',
+                  orderId,
+                }) + '\n'
               );
             } else {
-              // Definitive failure — release the lock so a future tick can retry.
+              // Definitive failure — release lock so a future tick can retry.
               ledger.release(orderId);
               order.watchdogFailedAt = Date.now();
               const safeErr = sanitizeForLog(refundErr);
@@ -275,14 +324,18 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
                 network_mode: config.networkMode,
               });
 
-              console.error(
-                `[refund-watchdog] ❌ orderId=${orderId} failed to refund:`,
-                safeErr instanceof Error ? safeErr.message : safeErr
+              process.stderr.write(
+                JSON.stringify({
+                  level: 'error',
+                  msg: '[refund-watchdog] refund failed',
+                  orderId,
+                  error: order.watchdogFailureReason,
+                }) + '\n'
               );
             }
           }
         } catch (err: unknown) {
-          // Unexpected error escaping the inner block (e.g. ledger bug).
+          // Unexpected error escaping the inner block.
           const safeErr = sanitizeForLog(err);
           order.watchdogFailedAt = Date.now();
           order.watchdogFailureReason =
@@ -293,15 +346,17 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
             network_mode: config.networkMode,
           });
 
-          console.error(
-            `[refund-watchdog] ❌ orderId=${orderId} unexpected error:`,
-            safeErr instanceof Error ? safeErr.message : safeErr
+          process.stderr.write(
+            JSON.stringify({
+              level: 'error',
+              msg: '[refund-watchdog] unexpected error',
+              orderId,
+              error: order.watchdogFailureReason,
+            }) + '\n'
           );
         }
       }
     } finally {
-      // Always record tick completion and gauges ΓÇö even if an unexpected
-      // error escapes the inner loop, we want visibility.
       tickEnd();
       watchdogRunsTotal.inc();
       watchdogLastRunTimestamp.set(Math.floor(Date.now() / 1000));
@@ -310,15 +365,9 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
     }
   };
 
-  // Fire-and-forget first scan after a short warm-up so the watchdog
-  // doesn't race with relayer startup logic.
-  const warmup = setTimeout(() => {
-    void tick();
-  }, 15_000);
-
-  const handle = setInterval(() => {
-    void tick();
-  }, intervalMs);
+  // Warm-up delay so the watchdog doesn't race with relayer startup.
+  const warmup = setTimeout(() => { void tick(); }, 15_000);
+  const handle = setInterval(() => { void tick(); }, intervalMs);
 
   return {
     stop() {
@@ -328,16 +377,18 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ambiguous-refund resolution
+// ---------------------------------------------------------------------------
+
 /**
- * Re-check whether an ambiguous refund actually landed on Stellar by
- * querying the relayer's recent transactions for the refund memo.
+ * Re-check whether an ambiguous refund actually landed on Stellar by scanning
+ * recent transactions from the relayer account for the refund memo.
  *
- * If confirmed → resolves the ledger entry and syncs order state; returns true.
- * If not found → releases the ambiguous entry so the next eligible tick
- *   can try again; returns false.
- *
- * This is a best-effort helper — if Horizon itself is down, we leave the
- * entry ambiguous and try again next tick.
+ * Confirmed  → resolves the ledger entry, syncs order state; returns true.
+ * Not found  → releases the ambiguous entry so the next eligible tick can
+ *              retry; returns false.
+ * Horizon down → leaves entry ambiguous, tries again next tick; returns false.
  */
 async function checkAmbiguousRefund(
   orderId: string,
@@ -363,7 +414,6 @@ async function checkAmbiguousRefund(
     const landed = txs.records.find((tx: any) => tx.memo === memoTarget);
 
     if (landed) {
-      // Fetch the payment operation to get the exact amount
       const ops = await server.operations().forTransaction(landed.hash).call();
       const paymentOp: any = ops.records.find(
         (op: any) => op.type === 'payment' && op.asset_type === 'native'
@@ -380,29 +430,38 @@ async function checkAmbiguousRefund(
       order.refundTxHash = landed.hash;
       order.refundedAt = Date.now();
 
-      console.log(
-        `[refund-watchdog] ✅ orderId=${orderId} ambiguous refund confirmed on-chain` +
-        ` (tx=${landed.hash}, amount=${amount} XLM)`
+      process.stdout.write(
+        JSON.stringify({
+          level: 'info',
+          msg: '[refund-watchdog] ambiguous refund confirmed on-chain',
+          orderId,
+          txHash: landed.hash,
+          amount,
+        }) + '\n'
       );
       return true;
     }
 
-    // Not found in last 50 txs — safe to release and retry
+    // Not found in last 50 txs — safe to release and allow a new submission.
     ledger.releaseAmbiguous(orderId);
-    console.log(
-      `[refund-watchdog] orderId=${orderId} ambiguous refund not found on-chain; ` +
-      `releasing for retry`
+    process.stdout.write(
+      JSON.stringify({
+        level: 'info',
+        msg: '[refund-watchdog] ambiguous refund not found on-chain — releasing for retry',
+        orderId,
+      }) + '\n'
     );
     return false;
   } catch (checkErr: unknown) {
-    // Horizon unavailable — leave ambiguous, try again next tick
-    console.warn(
-      `[refund-watchdog] orderId=${orderId} could not check ambiguous refund:`,
-      checkErr instanceof Error ? checkErr.message : String(checkErr)
+    // Horizon unavailable — leave ambiguous, try again next tick.
+    process.stderr.write(
+      JSON.stringify({
+        level: 'warn',
+        msg: '[refund-watchdog] could not check ambiguous refund — leaving for next tick',
+        orderId,
+        error: checkErr instanceof Error ? checkErr.message : String(checkErr),
+      }) + '\n'
     );
     return false;
   }
 }
-
-// Re-export tick internals for testing without starting the interval.
-export { isXlmToEthAwaitingEth, toMillis };
