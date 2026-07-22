@@ -38,6 +38,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import supertest from 'supertest';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
 
 import {
   StellarProofLedger,
@@ -87,7 +90,7 @@ function validPaymentOps(overrides: Partial<HorizonOpRecord> = {}): HorizonOpRec
 describe('StellarProofLedger', () => {
   let ledger: StellarProofLedger;
 
-  beforeEach(() => { ledger = new StellarProofLedger(); });
+  beforeEach(() => { ledger = new StellarProofLedger({ storageDir: null }); });
 
   it('consume() returns true on first call', () => {
     expect(ledger.consume(STELLAR_TXHASH, { orderId: ORDER_ID, verifiedAmount: '10.0000000' })).toBe(true);
@@ -286,7 +289,7 @@ function buildSettlementApp(opts: {
     orders = new Map<string, MockOrder>([[ORDER_ID, { direction: 'xlm_to_eth', status: 'pending', ethAddress: ETH_ADDRESS, exchangeRate: 10000 }]]),
     horizonResult = 'ok',
     sendTxResult = 'ok',
-    proofLedger = new StellarProofLedger(),
+    proofLedger = new StellarProofLedger({ storageDir: null }),
   } = opts;
 
   // Build a mock verifyIncomingStellarPayment
@@ -482,7 +485,7 @@ describe('/api/orders/xlm-to-eth — successful settlement', () => {
   });
 
   it('marks the stellarTxHash as consumed after success', async () => {
-    const proofLedger = new StellarProofLedger();
+    const proofLedger = new StellarProofLedger({ storageDir: null });
     const app = buildSettlementApp({ proofLedger });
     await supertest(app).post('/api/orders/xlm-to-eth').send(VALID_BODY);
     expect(proofLedger.isConsumed(STELLAR_TXHASH)).toBe(true);
@@ -499,7 +502,7 @@ describe('/api/orders/xlm-to-eth — successful settlement', () => {
 
 describe('/api/orders/xlm-to-eth — replay protection', () => {
   it('rejects a second request with the same stellarTxHash (sequential replay)', async () => {
-    const proofLedger = new StellarProofLedger();
+    const proofLedger = new StellarProofLedger({ storageDir: null });
     const app = buildSettlementApp({ proofLedger });
 
     const first = await supertest(app).post('/api/orders/xlm-to-eth').send(VALID_BODY);
@@ -520,7 +523,7 @@ describe('/api/orders/xlm-to-eth — replay protection', () => {
   });
 
   it('rejects replay even if original order no longer exists in map', async () => {
-    const proofLedger = new StellarProofLedger();
+    const proofLedger = new StellarProofLedger({ storageDir: null });
     // Pre-consume the hash simulating a previous successful settlement
     proofLedger.consume(STELLAR_TXHASH, { orderId: ORDER_ID, verifiedAmount: '100.0000000' });
 
@@ -538,7 +541,7 @@ describe('/api/orders/xlm-to-eth — replay protection', () => {
     // Here we verify the proof IS consumed (the hash is marked used) so we
     // do NOT double-pay if ETH eventually broadcasts, and the 500 response
     // includes the original stellarTxHash for manual recovery.
-    const proofLedger = new StellarProofLedger();
+    const proofLedger = new StellarProofLedger({ storageDir: null });
     const app = buildSettlementApp({ sendTxResult: 'fail', proofLedger });
     const res = await supertest(app).post('/api/orders/xlm-to-eth').send(VALID_BODY);
     expect(res.status).toBe(500);
@@ -550,7 +553,7 @@ describe('/api/orders/xlm-to-eth — replay protection', () => {
 
 describe('/api/orders/xlm-to-eth — concurrent replay race', () => {
   it('only one of two concurrent identical requests succeeds', async () => {
-    const proofLedger = new StellarProofLedger();
+    const proofLedger = new StellarProofLedger({ storageDir: null });
     const app = buildSettlementApp({ proofLedger });
 
     // Fire both requests in parallel
@@ -564,5 +567,247 @@ describe('/api/orders/xlm-to-eth — concurrent replay race', () => {
     expect(statuses).toEqual([200, 409]);
     // The proof is consumed exactly once
     expect(proofLedger.size()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// StellarProofLedger — persistence (restart simulation)
+// ---------------------------------------------------------------------------
+
+describe('StellarProofLedger persistence — restart simulation', () => {
+  it('consumed entry survives restart: second instance blocks replay', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-ledger-test-'));
+    try {
+      // First "process": consume a hash.
+      const ledger1 = new StellarProofLedger({ storageDir: dir });
+      expect(ledger1.consume(STELLAR_TXHASH, { orderId: ORDER_ID, verifiedAmount: '100.0000000', ledgerSequence: 12345 })).toBe(true);
+      expect(ledger1.size()).toBe(1);
+
+      // Simulate restart: second instance reads from disk.
+      const ledger2 = new StellarProofLedger({ storageDir: dir });
+      expect(ledger2.isConsumed(STELLAR_TXHASH)).toBe(true);
+      // consume() must return false — hash already on disk.
+      expect(ledger2.consume(STELLAR_TXHASH, { orderId: 'order-replay', verifiedAmount: '100.0000000' })).toBe(false);
+
+      const entry = ledger2.getEntry(STELLAR_TXHASH);
+      expect(entry?.orderId).toBe(ORDER_ID);
+      expect(entry?.verifiedAmount).toBe('100.0000000');
+      expect(entry?.ledgerSequence).toBe(12345);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('multiple hashes all persisted and reloaded correctly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-ledger-test-'));
+    try {
+      const ledger1 = new StellarProofLedger({ storageDir: dir });
+      ledger1.consume('hash-aaa', { orderId: 'order-1', verifiedAmount: '10.0000000' });
+      ledger1.consume('hash-bbb', { orderId: 'order-2', verifiedAmount: '20.0000000' });
+      ledger1.consume('hash-ccc', { orderId: 'order-3', verifiedAmount: '30.0000000' });
+
+      const ledger2 = new StellarProofLedger({ storageDir: dir });
+      expect(ledger2.size()).toBe(3);
+      expect(ledger2.isConsumed('hash-aaa')).toBe(true);
+      expect(ledger2.isConsumed('hash-bbb')).toBe(true);
+      expect(ledger2.isConsumed('hash-ccc')).toBe(true);
+      expect(ledger2.isConsumed('hash-ddd')).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('corrupted file on disk is skipped without crashing', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-ledger-test-'));
+    try {
+      // Write a corrupted JSON file that looks like a ledger entry.
+      fs.writeFileSync(path.join(dir, 'badhash.json'), '{ this is not valid JSON }', 'utf-8');
+
+      // Constructor must not throw — corrupted file is silently skipped.
+      const ledger = new StellarProofLedger({ storageDir: dir });
+      expect(ledger.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('storageDir:null disables disk I/O — no files written', () => {
+    // Use a real temp dir to prove nothing gets written.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-ledger-test-'));
+    try {
+      const ledger = new StellarProofLedger({ storageDir: null });
+      ledger.consume(STELLAR_TXHASH, { orderId: ORDER_ID, verifiedAmount: '5.0000000' });
+      // Nothing written to dir (it was never passed to the ledger).
+      const files = fs.readdirSync(dir);
+      expect(files).toHaveLength(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replay is blocked across simulated restart via route handler', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-ledger-test-'));
+    try {
+      // First process: settle the order.
+      const ledger1 = new StellarProofLedger({ storageDir: dir });
+      const app1 = buildSettlementApp({ proofLedger: ledger1 });
+      const first = await supertest(app1).post('/api/orders/xlm-to-eth').send(VALID_BODY);
+      expect(first.status).toBe(200);
+
+      // Simulate restart: new ledger loads persisted state.
+      const ledger2 = new StellarProofLedger({ storageDir: dir });
+      const orders2 = new Map([[ORDER_ID, { direction: 'xlm_to_eth', status: 'pending', ethAddress: ETH_ADDRESS, exchangeRate: 10000 }]]);
+      const app2 = buildSettlementApp({ orders: orders2, proofLedger: ledger2 });
+
+      // Replay attempt after restart must be blocked.
+      const replay = await supertest(app2).post('/api/orders/xlm-to-eth').send(VALID_BODY);
+      expect(replay.status).toBe(409);
+      expect(replay.body.error).toMatch(/already consumed/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bigint amount math — stroop/wei conversion
+// ---------------------------------------------------------------------------
+
+describe('settlement amount arithmetic (bigint, no parseFloat)', () => {
+  // These tests drive the route handler with specific verifiedAmounts and
+  // confirmed exchange rates, then assert the ETH amount in the response
+  // is derived correctly from integer math — no float approximation.
+
+  function buildAppWithVerifiedAmount(verifiedAmount: string, exchangeRate: number) {
+    const orders = new Map([[ORDER_ID, {
+      direction: 'xlm_to_eth', status: 'pending',
+      ethAddress: ETH_ADDRESS, exchangeRate,
+    }]]);
+
+    // Override mockVerify to return the specific amount.
+    async function mockVerifyCustom(_hash: string, _opts: any) {
+      return { amount: verifiedAmount, from: USER_STELLAR, to: RELAYER_PUBKEY, ledgerSequence: 1, memo: undefined };
+    }
+
+    const proofLedger = new StellarProofLedger({ storageDir: null });
+    const app = express();
+    app.use(express.json());
+
+    app.post('/api/orders/xlm-to-eth', async (req, res) => {
+      const { orderId, stellarTxHash, stellarAddress, ethAddress } = req.body;
+      if (!orderId || !stellarTxHash || !ethAddress || !stellarAddress) {
+        return res.status(400).json({ error: 'Missing required fields: orderId, stellarTxHash, ethAddress, stellarAddress' });
+      }
+      if (proofLedger.isConsumed(stellarTxHash)) {
+        return res.status(409).json({ error: 'Stellar transaction already consumed', stellarTxHash });
+      }
+      const storedOrder = orders.get(orderId);
+      if (!storedOrder) return res.status(404).json({ error: 'Order not found', orderId });
+
+      let verifiedPayment: any;
+      try { verifiedPayment = await mockVerifyCustom(stellarTxHash, {}); }
+      catch { return res.status(503).json({ error: 'Horizon unavailable' }); }
+
+      const consumed = proofLedger.consume(stellarTxHash, { orderId, verifiedAmount: verifiedPayment.amount });
+      if (!consumed) return res.status(409).json({ error: 'Stellar transaction already consumed by a concurrent request', stellarTxHash });
+
+      const rate = storedOrder.exchangeRate as number;
+      if (!rate || rate <= 0) return res.status(400).json({ error: 'Order is missing a valid exchange rate', orderId });
+
+      // Bigint math (mirrors exact production code).
+      const parts = verifiedPayment.amount.split('.');
+      const intPart = BigInt(parts[0] ?? '0');
+      const fracPart = BigInt((parts[1] ?? '').padEnd(7, '0').substring(0, 7));
+      const xlmStroops = intPart * 10_000_000n + fracPart;
+      const rateBn = BigInt(Math.round(rate));
+      const ethWei = (xlmStroops * 1_000_000_000_000_000_000n) / (rateBn * 10_000_000n);
+      if (ethWei === 0n) return res.status(400).json({ error: 'Verified XLM amount is too small to release any ETH', orderId });
+
+      storedOrder.status = 'eth_tx_sent';
+      storedOrder.ethTxHash = '0xmockhash';
+      return res.json({
+        success: true, orderId,
+        ethTxId: '0xmockhash',
+        ethAmountWei: ethWei.toString(),
+        verifiedXlmAmount: verifiedPayment.amount,
+      });
+    });
+    return app;
+  }
+
+  it('100 XLM at 10000 XLM/ETH → exactly 0.01 ETH in wei', async () => {
+    const app = buildAppWithVerifiedAmount('100.0000000', 10000);
+    const res = await supertest(app).post('/api/orders/xlm-to-eth').send(VALID_BODY);
+    expect(res.status).toBe(200);
+    // 100 XLM / 10000 XLM-per-ETH = 0.01 ETH = 10_000_000_000_000_000 wei
+    expect(res.body.ethAmountWei).toBe('10000000000000000');
+  });
+
+  it('1 XLM at 8000 XLM/ETH → 125_000_000_000_000 wei (0.000125 ETH)', async () => {
+    const hash2 = STELLAR_TXHASH.replace('abc', 'xyz');
+    const app = buildAppWithVerifiedAmount('1.0000000', 8000);
+    const res = await supertest(app).post('/api/orders/xlm-to-eth').send({ ...VALID_BODY, stellarTxHash: hash2 });
+    expect(res.status).toBe(200);
+    // 1 XLM / 8000 = 0.000125 ETH = 125_000_000_000_000 wei
+    expect(res.body.ethAmountWei).toBe('125000000000000');
+  });
+
+  it('0.0000001 XLM (1 stroop) at any rate → 400 (too small to release ETH)', async () => {
+    const hash3 = STELLAR_TXHASH.replace('abc', 'zzz');
+    // 1 stroop at 10000 rate = 1e-7 XLM → ethWei = 1e11 / (10000 * 1e7) = 0 → rejected
+    const app = buildAppWithVerifiedAmount('0.0000001', 10000);
+    const res = await supertest(app).post('/api/orders/xlm-to-eth').send({ ...VALID_BODY, stellarTxHash: hash3 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/too small/);
+  });
+
+  it('result is always a bigint string — no decimal point in ethAmountWei', async () => {
+    const app = buildAppWithVerifiedAmount('50.5000000', 5000);
+    const res = await supertest(app).post('/api/orders/xlm-to-eth').send(VALID_BODY);
+    expect(res.status).toBe(200);
+    // Must be an integer string with no decimal point.
+    expect(res.body.ethAmountWei).toMatch(/^\d+$/);
+    // 50.5 XLM / 5000 XLM-per-ETH = 0.0101 ETH = 10_100_000_000_000_000 wei
+    expect(res.body.ethAmountWei).toBe('10100000000000000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prometheus metrics
+// ---------------------------------------------------------------------------
+
+describe('settlement Prometheus metrics', () => {
+  it('settlementMetrics export contains both counter instances', async () => {
+    const { settlementMetrics } = await import('../src/metrics.js');
+    expect(settlementMetrics).toHaveProperty('verificationTotal');
+    expect(settlementMetrics).toHaveProperty('proofReplaysTotal');
+  });
+
+  it('verification counter names appear in Prometheus registry output', async () => {
+    const { registry } = await import('../src/metrics.js');
+    const output = await registry.metrics();
+    expect(output).toContain('relayer_xlm_to_eth_verification_total');
+    expect(output).toContain('relayer_xlm_to_eth_proof_replays_total');
+  });
+
+  it('verification counter has correct label names', async () => {
+    const { settlementMetrics } = await import('../src/metrics.js');
+    const meta = await settlementMetrics.verificationTotal.get();
+    // prom-client returns labelNames on the metric object, not on get() result.
+    // Verify via a labelled increment and retrieval instead.
+    settlementMetrics.verificationTotal.inc({ result: 'success', network_mode: 'testnet' });
+    const json = await settlementMetrics.verificationTotal.get();
+    const found = json.values.find(
+      (v) => v.labels.result === 'success' && v.labels.network_mode === 'testnet'
+    );
+    expect(found?.value).toBeGreaterThanOrEqual(1);
+  });
+
+  it('replay counter has correct label names', async () => {
+    const { settlementMetrics } = await import('../src/metrics.js');
+    settlementMetrics.proofReplaysTotal.inc({ network_mode: 'testnet' });
+    const json = await settlementMetrics.proofReplaysTotal.get();
+    const found = json.values.find((v) => v.labels.network_mode === 'testnet');
+    expect(found?.value).toBeGreaterThanOrEqual(1);
   });
 });

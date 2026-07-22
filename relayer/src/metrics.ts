@@ -229,3 +229,42 @@ export const refundMetrics = {
   horizonTimeouts: refundHorizonTimeouts,
   horizonRetries: refundHorizonRetries,
 } as const;
+
+// ---------------------------------------------------------------------------
+// XLM→ETH settlement path counters
+// ---------------------------------------------------------------------------
+
+/**
+ * Total Horizon verification attempts on the XLM→ETH settlement path.
+ *
+ * `result` label values:
+ *   success          — payment verified; ETH release proceeded
+ *   tx_not_found     — stellarTxHash unknown to Horizon (StellarTxNotFoundError)
+ *   tx_failed        — tx was submitted but failed on-chain (StellarTxFailedError)
+ *   payment_mismatch — tx exists but payment shape is wrong (StellarPaymentMismatch)
+ *   horizon_error    — unexpected Horizon / network error
+ */
+export const settlementVerificationTotal = new Counter({
+  name: 'relayer_xlm_to_eth_verification_total',
+  help: 'Total Horizon verification attempts on the XLM→ETH settlement path',
+  labelNames: ['result', 'network_mode'] as const,
+  registers: [registry],
+});
+
+/**
+ * Total requests rejected because the stellarTxHash was already consumed.
+ * Each increment represents one replayed (or retried) proof that was blocked
+ * before any ETH was sent.
+ */
+export const settlementProofReplaysTotal = new Counter({
+  name: 'relayer_xlm_to_eth_proof_replays_total',
+  help: 'Total XLM→ETH settlement requests rejected due to a replayed stellarTxHash',
+  labelNames: ['network_mode'] as const,
+  registers: [registry],
+});
+
+/** All XLM→ETH settlement metrics in one object — useful for test assertions. */
+export const settlementMetrics = {
+  verificationTotal: settlementVerificationTotal,
+  proofReplaysTotal: settlementProofReplaysTotal,
+} as const;
