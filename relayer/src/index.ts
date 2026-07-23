@@ -185,7 +185,11 @@ import { gasPriceTracker } from './services/gas-tracker.js';
 // Phase 8: Monitoring System imports
 import { getMonitor } from './services/monitoring.js';
 import { logSolanaStatus } from './utils/solana-config.js';
-import { solanaPlaceholderMode } from './metrics.js';
+import {
+  solanaPlaceholderMode,
+  settlementVerificationTotal,
+  settlementProofReplaysTotal,
+} from './metrics.js';
 
 // Contract addresses
 const ETH_TO_XLM_RATE = 10000; // 1 ETH = 10,000 XLM (LEGACY - now using real-time prices)
@@ -1356,166 +1360,147 @@ async function initializeRelayer() {
 
       // XLMΓåÆETH: Send ETH to user
       if (isXlmToEth) {
-        console.log('≡ƒÆ░ XLMΓåÆETH: Sending ETH to user...');
-        
         try {
-          // Γ£à NETWORK-AWARE: Detect if this order was created for testnet
-          const orderNetworkMode = storedOrder.networkMode || 'mainnet'; // Check stored network
+          // ── Network resolution ─────────────────────────────────────────────
+          const orderNetworkMode = (storedOrder.networkMode as string) || 'mainnet';
           const rpcUrl = resolveEthereumRpcUrl(orderNetworkMode === 'testnet' ? 'testnet' : 'mainnet');
           const privateKey = process.env.RELAYER_PRIVATE_KEY;
-          
-          console.log(`≡ƒîÉ XLMΓåÆETH Network Detection: ${orderNetworkMode.toUpperCase()}`);
-          
+
           if (!privateKey) {
             throw new Error('RELAYER_PRIVATE_KEY environment variable is required');
           }
-          
-          console.log('≡ƒÆ░ REAL MODE: Sending actual ETH transaction (process endpoint)');
-          console.log('≡ƒöù RPC URL:', rpcUrl);
-          console.log('≡ƒöæ Using real private key:', privateKey.substring(0, 10) + '...');
-          
+
+          // ── Replay protection fast-path ───────────────────────────────────
+          if (globalStellarProofLedger.isConsumed(stellarTxHash)) {
+            const existing = globalStellarProofLedger.getEntry(stellarTxHash);
+            settlementProofReplaysTotal.inc({ network_mode: orderNetworkMode });
+            return res.status(409).json({
+              error: 'Stellar transaction already consumed',
+              details: `stellarTxHash ${stellarTxHash} was already used to settle order ${existing?.orderId ?? '(unknown)'}.`,
+              stellarTxHash,
+            });
+          }
+
+          // ── Horizon proof verification ────────────────────────────────────
+          // No ETH is released without a confirmed Stellar payment to the
+          // relayer's own address on the correct network.
+          const processHorizonUrl = NETWORK_CONFIG[orderNetworkMode as 'mainnet' | 'testnet']?.stellar?.horizonUrl;
+          const processRelayerSecret = orderNetworkMode === 'mainnet'
+            ? (process.env.RELAYER_STELLAR_SECRET_MAINNET || process.env.RELAYER_STELLAR_SECRET)
+            : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
+
+          if (!processRelayerSecret || !processHorizonUrl) {
+            return res.status(500).json({ error: 'Relayer Stellar config not available', network: orderNetworkMode });
+          }
+
+          const { Keypair: ProcessKeypair } = await import('@stellar/stellar-sdk');
+          const processRelayerPubkey = ProcessKeypair.fromSecret(processRelayerSecret).publicKey();
+
+          let processVerifiedPayment: Awaited<ReturnType<typeof verifyIncomingStellarPayment>>;
+          try {
+            processVerifiedPayment = await verifyIncomingStellarPayment(stellarTxHash, {
+              horizonUrl: processHorizonUrl,
+              relayerPublicKey: processRelayerPubkey,
+              expectedSourceAccount: userStellarAddress || undefined,
+            });
+            settlementVerificationTotal.inc({ result: 'success', network_mode: orderNetworkMode });
+          } catch (verifyErr: unknown) {
+            if (verifyErr instanceof StellarTxNotFoundError) {
+              settlementVerificationTotal.inc({ result: 'tx_not_found', network_mode: orderNetworkMode });
+              return res.status(404).json({ error: 'Stellar transaction not found on Horizon', stellarTxHash });
+            }
+            if (verifyErr instanceof StellarTxFailedError) {
+              settlementVerificationTotal.inc({ result: 'tx_failed', network_mode: orderNetworkMode });
+              return res.status(400).json({ error: 'Stellar transaction failed on-chain', stellarTxHash });
+            }
+            if (verifyErr instanceof StellarPaymentMismatch) {
+              settlementVerificationTotal.inc({ result: 'payment_mismatch', network_mode: orderNetworkMode });
+              return res.status(400).json({ error: 'Stellar payment verification failed', details: (verifyErr as Error).message, stellarTxHash });
+            }
+            settlementVerificationTotal.inc({ result: 'horizon_error', network_mode: orderNetworkMode });
+            return res.status(503).json({ error: 'Horizon verification temporarily unavailable' });
+          }
+
+          // ── Consume the proof atomically ──────────────────────────────────
+          const processConsumed = globalStellarProofLedger.consume(stellarTxHash, {
+            orderId,
+            verifiedAmount: processVerifiedPayment.amount,
+            ledgerSequence: processVerifiedPayment.ledgerSequence,
+          });
+          if (!processConsumed) {
+            settlementProofReplaysTotal.inc({ network_mode: orderNetworkMode });
+            const existing = globalStellarProofLedger.getEntry(stellarTxHash);
+            return res.status(409).json({
+              error: 'Stellar transaction already consumed by a concurrent request',
+              stellarTxHash,
+              existingOrder: existing?.orderId,
+            });
+          }
+
+          // ── Bigint amount derivation from verified XLM ────────────────────
+          // No parseFloat, no toFixed, no fallback constants.
+          const processExchangeRate = storedOrder?.exchangeRate;
+          if (!processExchangeRate || isNaN(Number(processExchangeRate)) || Number(processExchangeRate) <= 0) {
+            return res.status(400).json({ error: 'Order is missing a valid exchange rate', orderId });
+          }
+
+          const procParts = processVerifiedPayment.amount.split('.');
+          const procInt = BigInt(procParts[0] ?? '0');
+          const procFrac = BigInt((procParts[1] ?? '').padEnd(7, '0').substring(0, 7));
+          const procXlmStroops = procInt * 10_000_000n + procFrac;
+          const procRateBigInt = BigInt(Math.round(Number(processExchangeRate)));
+          if (procRateBigInt === 0n) {
+            return res.status(400).json({ error: 'Exchange rate rounds to zero', orderId });
+          }
+          const ethAmountWei = (procXlmStroops * 1_000_000_000_000_000_000n) / (procRateBigInt * 10_000_000n);
+          if (ethAmountWei === 0n) {
+            return res.status(400).json({ error: 'Verified XLM amount is too small to release any ETH', orderId });
+          }
+
+          process.stdout.write(JSON.stringify({
+            level: 'info', msg: '[process/xlm-to-eth] amount calculation',
+            orderId, verifiedXlmAmount: processVerifiedPayment.amount,
+            xlmStroops: procXlmStroops.toString(), exchangeRate: processExchangeRate,
+            ethAmountWei: ethAmountWei.toString(), ethFormatted: ethers.formatEther(ethAmountWei),
+          }) + '\n');
+
+          // ── ETH provider + wallet ─────────────────────────────────────────
           const provider = new ethers.JsonRpcProvider(rpcUrl);
           const relayerWallet = new ethers.Wallet(privateKey, provider);
-          
-          console.log('≡ƒöæ Relayer ETH address:', relayerWallet.address);
-          
-          // Get relayer balance with retry logic for Alchemy rate limiting
-          console.log('≡ƒöì Getting relayer balance...');
-          let balance;
+
+          // Get relayer balance with retry for rate limiting
+          let balance: bigint | undefined;
           let balanceRetryCount = 0;
           const maxBalanceRetries = 5;
-          
           while (balanceRetryCount <= maxBalanceRetries) {
             try {
               balance = await provider.getBalance(relayerWallet.address);
-              console.log('≡ƒÆ░ Relayer ETH balance:', ethers.formatEther(balance), 'ETH');
-              break; // Success, exit retry loop
+              break;
             } catch (error: any) {
               balanceRetryCount++;
-              
-              // Check if it's Alchemy rate limiting (code 429)
-              if (error?.code === 429 || error?.message?.includes('exceeded') || error?.message?.includes('rate limit')) {
-                const delayMs = Math.pow(2, balanceRetryCount) * 1000; // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-                console.log(`ΓÅ│ Alchemy rate limit hit (process endpoint, attempt ${balanceRetryCount}/${maxBalanceRetries}). Waiting ${delayMs}ms...`);
-                
-                if (balanceRetryCount <= maxBalanceRetries) {
-                  await new Promise(resolve => setTimeout(resolve, delayMs));
-                  continue;
-                }
+              if ((error?.code === 429 || error?.message?.includes('rate limit')) && balanceRetryCount <= maxBalanceRetries) {
+                await new Promise(r => setTimeout(r, Math.pow(2, balanceRetryCount) * 1000));
+                continue;
               }
-              
-              // If it's not rate limiting or we've exhausted retries, throw
-              console.error('Γ¥î Failed to get relayer balance (process endpoint):', error.message);
               throw error;
             }
           }
-          
-                  // Calculate ETH amount to send using real-time rate from frontend
-        const exchangeRate = storedOrder?.exchangeRate || ETH_TO_XLM_RATE; // Use real rate if available
-        let ethAmount;
-        if (storedOrder?.targetAmount) {
-          console.log('≡ƒöì DEBUG - Raw targetAmount:', storedOrder.targetAmount);
-          
-          // MORE AGGRESSIVE CLEANING - handle very large numbers
-          let cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
-          let targetAmountNum = parseFloat(cleanTargetAmount);
-          
-          console.log('≡ƒöì DEBUG - Parsed targetAmount:', targetAmountNum);
-          
-          if (isNaN(targetAmountNum) || targetAmountNum <= 0) {
-            console.log('ΓÜá∩╕Å Invalid targetAmount, using fallback calculation');
-            // Fallback: use amount and exchange rate
-            // Convert wei to ETH first, then calculate target amount
-        const ethAmountFromWei = parseFloat(ethers.formatEther(orderAmount || '100000000000000000')); // 0.1 ETH default
-        targetAmountNum = ethAmountFromWei / exchangeRate;
+
+          const gasCost = 21000n * ethers.parseUnits('20', 'gwei');
+          if (balance !== undefined && balance < ethAmountWei + gasCost) {
+            return res.status(400).json({
+              error: 'Insufficient relayer balance',
+              balance: ethers.formatEther(balance),
+              required: ethers.formatEther(ethAmountWei + gasCost),
+            });
           }
-          
-          // EXTREME SAFETY: Max 1 ETH, min 0.000001 ETH
-          const safeTargetAmount = Math.min(Math.max(targetAmountNum, 0.000001), 1.0);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedTargetAmount = Math.round(safeTargetAmount * 1e6) / 1e6;
-          
-          console.log('≡ƒöó SAFE CONVERSION - targetAmount:', targetAmountNum, 'ΓåÆ', roundedTargetAmount, 'ETH');
-          
-          // Convert to wei safely with parseEther protection
-          try {
-            ethAmount = ethers.parseEther(roundedTargetAmount.toString()).toString();
-          } catch (parseError: any) {
-            console.warn('ΓÜá∩╕Å parseEther failed, using minimum amount:', parseError.message);
-            ethAmount = "1000000000000000"; // 0.001 ETH minimum
-          }
-        } else {
-          // Convert XLM to ETH using exchange rate - SAFE CONVERSION
-          // For XLMΓåÆETH: orderAmount should be XLM amount, not ETH wei
-          console.log('≡ƒöì DEBUG - orderAmount for XLMΓåÆETH conversion (process endpoint):', orderAmount);
-          
-          // Γ£à CORRECT: Get XLM amount from stored order data
-          let xlmAmount = 1600; // Default fallback
-          
-          console.log('≡ƒöì DEBUG - storedOrder data structure:', {
-            stellarAmount: storedOrder?.stellarAmount,
-            stellar: storedOrder?.stellar,
-            orderAmount
-          });
-          
-          // Priority 1: Use stored stellar.amount (readable XLM format)
-          if (storedOrder?.stellar?.amount) {
-            xlmAmount = parseFloat(storedOrder.stellar.amount);
-            console.log('Γ£à Using storedOrder.stellar.amount (process endpoint):', xlmAmount, 'XLM');
-          }
-          // Priority 2: Use stellarAmount (stroops) and convert to XLM
-          else if (storedOrder?.stellarAmount) {
-            const stellarAmountStroops = parseFloat(storedOrder.stellarAmount);
-            xlmAmount = stellarAmountStroops / 1e7; // Convert stroops to XLM
-            console.log('Γ£à Using storedOrder.stellarAmount converted (process endpoint):', stellarAmountStroops, 'stroops ΓåÆ', xlmAmount, 'XLM');
-          }
-          // Priority 3: Try orderAmount if it looks reasonable
-          else if (orderAmount && typeof orderAmount === 'string') {
-            const numericOrderAmount = parseFloat(orderAmount);
-            console.log('≡ƒöì DEBUG - Numeric orderAmount (process endpoint):', numericOrderAmount);
-            
-            // If it's a reasonable number (< 1M), it's likely XLM
-            if (numericOrderAmount > 0 && numericOrderAmount < 1000000) {
-              xlmAmount = numericOrderAmount;
-              console.log('Γ£à Using orderAmount as XLM amount (process endpoint):', xlmAmount);
-            } else {
-              console.log('ΓÜá∩╕Å orderAmount seems wrong, using default XLM (process endpoint)');
-            }
-          }
-          
-          console.log('≡ƒ¬Ö XLM amount for conversion (process endpoint):', xlmAmount);
-          console.log('≡ƒÆ▒ Exchange rate (process endpoint):', exchangeRate, 'XLM per ETH');
-          
-          // Γ£à CORRECT FORMULA: XLM amount / exchange rate = ETH amount
-          const ethAmountDecimal = xlmAmount / exchangeRate;
-          console.log('≡ƒöó Calculation (process endpoint):', xlmAmount, '├╖', exchangeRate, '=', ethAmountDecimal, 'ETH');
-          
-          // Limit to reasonable ETH amounts (max 10 ETH per transaction)
-          const safeEthAmount = Math.min(ethAmountDecimal, 10);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedEthAmount = Math.round(safeEthAmount * 1e6) / 1e6;
-          
-          // Convert to wei safely with parseEther protection
-          try {
-            ethAmount = ethers.parseEther(roundedEthAmount.toString()).toString();
-          } catch (parseError: any) {
-            console.warn('ΓÜá∩╕Å parseEther failed, using minimum amount:', parseError.message);
-            ethAmount = "1000000000000000"; // 0.001 ETH minimum
-          }
-          console.log('≡ƒöó SAFE CONVERSION - calculated:', ethAmountDecimal, 'ΓåÆ', roundedEthAmount, 'ETH');
-        }
-        console.log('≡ƒÆ▒ Using exchange rate:', exchangeRate, 'XLM per ETH (XLMΓåÆETH)');
-          console.log('≡ƒÄ» ETH amount to send:', ethers.formatEther(ethAmount), 'ETH');
-          console.log('≡ƒÅá Sending to user address:', userEthAddress);
-          
+
           // Create ETH transfer transaction
           const tx = {
             to: userEthAddress,
-            value: ethAmount,
+            value: ethAmountWei,
             gasLimit: 21000,
-            gasPrice: ethers.parseUnits('20', 'gwei')
+            gasPrice: ethers.parseUnits('20', 'gwei'),
           };
           
           // Send transaction with retry for rate limiting
@@ -1599,11 +1584,12 @@ async function initializeRelayer() {
             details: {
               stellar: {
                 txHash: stellarTxHash,
+                verifiedAmount: processVerifiedPayment.amount,
                 status: 'confirmed'
               },
               ethereum: {
                 txId: ethTxReceipt?.hash,
-                amount: `${ethers.formatEther(ethAmount)} ETH`,
+                amount: `${ethers.formatEther(ethAmountWei)} ETH`,
                 destination: userEthAddress,
                 status: 'completed'
               }
@@ -1787,9 +1773,11 @@ async function initializeRelayer() {
         });
       }
 
-      // ── 2. Replay protection — reject already-consumed Stellar tx proofs ──
+      // ── 2. Replay protection fast-path — reject already-consumed proofs ──
       if (globalStellarProofLedger.isConsumed(stellarTxHash)) {
         const existing = globalStellarProofLedger.getEntry(stellarTxHash);
+        const networkForMetric = (networkMode === 'mainnet' ? 'mainnet' : 'testnet') as string;
+        settlementProofReplaysTotal.inc({ network_mode: networkForMetric });
         return res.status(409).json({
           error: 'Stellar transaction already consumed',
           details: `stellarTxHash ${stellarTxHash} was already used to settle order ${existing?.orderId ?? '(unknown)'}. Replaying the same proof is not permitted.`,
@@ -1887,14 +1875,56 @@ async function initializeRelayer() {
           relayerPublicKey,
           expectedSourceAccount: stellarAddress,
         });
+        settlementVerificationTotal.inc({ result: 'success', network_mode: orderNetworkMode });
       } catch (verifyErr: unknown) {
         if (verifyErr instanceof StellarTxNotFoundError) {
+          settlementVerificationTotal.inc({ result: 'tx_not_found', network_mode: orderNetworkMode });
           return res.status(404).json({
             error: 'Stellar transaction not found on Horizon',
             details: (verifyErr as Error).message,
             stellarTxHash,
           });
         }
+        if (verifyErr instanceof StellarTxFailedError) {
+          settlementVerificationTotal.inc({ result: 'tx_failed', network_mode: orderNetworkMode });
+          return res.status(400).json({
+            error: 'Stellar transaction failed on-chain',
+            details: (verifyErr as Error).message,
+            stellarTxHash,
+          });
+        }
+        if (verifyErr instanceof StellarPaymentMismatch) {
+          settlementVerificationTotal.inc({ result: 'payment_mismatch', network_mode: orderNetworkMode });
+          return res.status(400).json({
+            error: 'Stellar payment verification failed',
+            details: (verifyErr as Error).message,
+            stellarTxHash,
+          });
+        }
+        settlementVerificationTotal.inc({ result: 'horizon_error', network_mode: orderNetworkMode });
+        return res.status(503).json({
+          error: 'Horizon verification temporarily unavailable',
+          details: verifyErr instanceof Error ? verifyErr.message : String(verifyErr),
+        });
+      }
+
+      // ── Consume the proof atomically (before any ETH work) ────────────────
+      // This is the replay-protection gate. If two concurrent requests arrive
+      // with the same stellarTxHash the second one lands here after the first
+      // has already set the entry, and is rejected with 409.
+      const consumed = globalStellarProofLedger.consume(stellarTxHash, {
+        orderId,
+        verifiedAmount: verifiedPayment.amount,
+        ledgerSequence: verifiedPayment.ledgerSequence,
+      });
+      if (!consumed) {
+        settlementProofReplaysTotal.inc({ network_mode: orderNetworkMode });
+        const existing = globalStellarProofLedger.getEntry(stellarTxHash);
+        return res.status(409).json({
+          error: 'Stellar transaction already consumed',
+          details: `stellarTxHash ${stellarTxHash} was already used to settle order ${existing?.orderId ?? '(unknown)'}. Replaying the same proof is not permitted.`,
+          stellarTxHash,
+        });
       }
 
       try {
@@ -1942,102 +1972,61 @@ async function initializeRelayer() {
           }
         }
         
-        // Calculate ETH amount to send using real-time rate from frontend  
-        const exchangeRate = storedOrder?.exchangeRate || ETH_TO_XLM_RATE; // Use real rate if available
-        let ethAmount;
-        if (storedOrder?.targetAmount) {
-          console.log('≡ƒöì DEBUG - Raw targetAmount (2nd endpoint):', storedOrder.targetAmount);
-          
-          // MORE AGGRESSIVE CLEANING - handle very large numbers
-          let cleanTargetAmount = storedOrder.targetAmount.toString().replace(/[^0-9.]/g, '');
-          let targetAmountNum = parseFloat(cleanTargetAmount);
-          
-          console.log('≡ƒöì DEBUG - Parsed targetAmount (2nd endpoint):', targetAmountNum);
-          
-          if (isNaN(targetAmountNum) || targetAmountNum <= 0) {
-            console.log('ΓÜá∩╕Å Invalid targetAmount, using fallback calculation (2nd endpoint)');
-            // Fallback: use amount and exchange rate
-            // Convert wei to ETH first, then calculate target amount
-            const ethAmountFromWei = parseFloat(ethers.formatEther(orderAmount || '100000000000000000')); // 0.1 ETH default
-            targetAmountNum = ethAmountFromWei / exchangeRate;
-          }
-          
-          // EXTREME SAFETY: Max 1 ETH, min 0.000001 ETH
-          const safeTargetAmount = Math.min(Math.max(targetAmountNum, 0.000001), 1.0);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedTargetAmount = Math.round(safeTargetAmount * 1e6) / 1e6;
-          
-          console.log('≡ƒöó SAFE CONVERSION - targetAmount (2nd endpoint):', targetAmountNum, 'ΓåÆ', roundedTargetAmount, 'ETH');
-          
-          // Convert to wei safely
-          ethAmount = ethers.parseEther(roundedTargetAmount.toString()).toString();
-        } else {
-          // Convert XLM to ETH using exchange rate - SAFE CONVERSION
-          // For XLMΓåÆETH: orderAmount should be XLM amount, not ETH wei
-          console.log('≡ƒöì DEBUG - orderAmount for XLMΓåÆETH conversion:', orderAmount);
-          
-          // Γ£à CORRECT: Get XLM amount from stored order data
-          let xlmAmount = 1600; // Default fallback
-          
-          console.log('≡ƒöì DEBUG - storedOrder data structure (dedicated endpoint):', {
-            stellarAmount: storedOrder?.stellarAmount,
-            stellar: storedOrder?.stellar,
-            orderAmount
+        // ── Derive ETH amount from the Horizon-verified XLM amount ────────────
+        // All arithmetic is integer-based (bigint stroops → bigint wei).
+        // No parseFloat, no toFixed, no fallback constants.
+        //
+        // Formula (bigint throughout):
+        //   xlmStroops = verifiedPayment.amount parsed as 7-decimal fixed-point
+        //   ethWei     = xlmStroops * 1e11 / exchangeRateStroopsPerEth
+        //
+        // exchangeRate is stored as XLM-per-ETH (e.g. 8000 means 8000 XLM = 1 ETH).
+        // We need stroops-per-wei for integer division:
+        //   exchangeRateSPE = exchangeRate(XLM/ETH) * 10_000_000 (stroops/XLM)
+        //                                            / 1_000_000_000_000_000_000 (wei/ETH)
+        // Rearranging to avoid losing precision:
+        //   ethWei = xlmStroops * 1e18 / (exchangeRate * 1e7)
+        const exchangeRate = storedOrder?.exchangeRate;
+        if (!exchangeRate || isNaN(Number(exchangeRate)) || Number(exchangeRate) <= 0) {
+          return res.status(400).json({
+            error: 'Order is missing a valid exchange rate — cannot derive ETH payout',
+            orderId,
           });
-          
-          // Priority 1: Use stored stellar.amount (readable XLM format)
-          if (storedOrder?.stellar?.amount) {
-            xlmAmount = parseFloat(storedOrder.stellar.amount);
-            console.log('Γ£à Using storedOrder.stellar.amount (dedicated endpoint):', xlmAmount, 'XLM');
-          }
-          // Priority 2: Use stellarAmount (stroops) and convert to XLM
-          else if (storedOrder?.stellarAmount) {
-            const stellarAmountStroops = parseFloat(storedOrder.stellarAmount);
-            xlmAmount = stellarAmountStroops / 1e7; // Convert stroops to XLM
-            console.log('Γ£à Using storedOrder.stellarAmount converted (dedicated endpoint):', stellarAmountStroops, 'stroops ΓåÆ', xlmAmount, 'XLM');
-          }
-          // Priority 3: Try orderAmount if it looks reasonable
-          else if (orderAmount && typeof orderAmount === 'string') {
-            const numericOrderAmount = parseFloat(orderAmount);
-            console.log('≡ƒöì DEBUG - Numeric orderAmount (dedicated endpoint):', numericOrderAmount);
-            
-            // If it's a reasonable number (< 1M), it's likely XLM
-            if (numericOrderAmount > 0 && numericOrderAmount < 1000000) {
-              xlmAmount = numericOrderAmount;
-              console.log('Γ£à Using orderAmount as XLM amount (dedicated endpoint):', xlmAmount);
-            } else {
-              console.log('ΓÜá∩╕Å orderAmount seems wrong, using default XLM (dedicated endpoint)');
-            }
-          }
-          
-          console.log('≡ƒ¬Ö XLM amount for conversion:', xlmAmount);
-          console.log('≡ƒÆ▒ Exchange rate:', exchangeRate, 'XLM per ETH');
-          
-          // Γ£à CORRECT FORMULA: XLM amount / exchange rate = ETH amount
-          const ethAmountDecimal = xlmAmount / exchangeRate;
-          console.log('≡ƒöó Calculation:', xlmAmount, '├╖', exchangeRate, '=', ethAmountDecimal, 'ETH');
-          
-          // Limit to reasonable ETH amounts (max 10 ETH per transaction)
-          const safeEthAmount = Math.min(ethAmountDecimal, 10);
-          
-          // Round to 6 decimal places to avoid precision issues
-          const roundedEthAmount = Math.round(safeEthAmount * 1e6) / 1e6;
-          
-          // Convert to wei safely with parseEther protection
-          try {
-            ethAmount = ethers.parseEther(roundedEthAmount.toString()).toString();
-          } catch (parseError: any) {
-            console.warn('ΓÜá∩╕Å parseEther failed, using minimum amount:', parseError.message);
-            ethAmount = "1000000000000000"; // 0.001 ETH minimum
-          }
         }
-        console.log('≡ƒÆ▒ Using exchange rate:', exchangeRate, 'XLM per ETH (dedicated endpoint)');
-        console.log('≡ƒÄ» ETH amount to send:', ethers.formatEther(ethAmount), 'ETH');
-        console.log('≡ƒÅá Sending to user address:', userEthAddress);
-        
-        // Create ETH transfer transaction
-        const ethAmountWei = BigInt(ethAmount);
+
+        // xlmStringToStroops: integer parse of "12.3456789" → 123456789n
+        const xlmParts = verifiedPayment.amount.split('.');
+        const xlmInt = BigInt(xlmParts[0] ?? '0');
+        const xlmFrac = BigInt((xlmParts[1] ?? '').padEnd(7, '0').substring(0, 7));
+        const xlmStroops = xlmInt * 10_000_000n + xlmFrac;
+
+        // exchangeRate is XLM-per-ETH as a number; round to nearest integer.
+        const exchangeRateBigInt = BigInt(Math.round(Number(exchangeRate)));
+        if (exchangeRateBigInt === 0n) {
+          return res.status(400).json({ error: 'Exchange rate rounds to zero', orderId });
+        }
+
+        // ethWei = xlmStroops * 1e18 / (exchangeRate * 1e7)
+        const ethAmountWei = (xlmStroops * 1_000_000_000_000_000_000n) / (exchangeRateBigInt * 10_000_000n);
+
+        if (ethAmountWei === 0n) {
+          return res.status(400).json({
+            error: 'Verified XLM amount is too small to release any ETH',
+            verifiedXlmAmount: verifiedPayment.amount,
+            orderId,
+          });
+        }
+
+        process.stdout.write(JSON.stringify({
+          level: 'info',
+          msg: '[xlm-to-eth] amount calculation',
+          orderId,
+          verifiedXlmAmount: verifiedPayment.amount,
+          xlmStroops: xlmStroops.toString(),
+          exchangeRate,
+          ethAmountWei: ethAmountWei.toString(),
+          ethAmountFormatted: ethers.formatEther(ethAmountWei),
+        }) + '\n');
         const tx = {
           to: userEthAddress,
           value: ethAmountWei,
