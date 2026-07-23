@@ -57,7 +57,12 @@ async function main(): Promise<void> {
       cfg,
       db,
       getReconciliationStatus: () => reconciler.getStatus()
-    })
+    }),
+    runReconcile: async () => {
+      await reconciler.run();
+      return reconciler.getStatus();
+    },
+    runStaleCleanup: () => staleCleanup.run()
   });
 
   const server = app.listen(cfg.port, () => {
@@ -82,6 +87,20 @@ async function main(): Promise<void> {
   void runExpiry();
   const expiryInterval = setInterval(runExpiry, cfg.pollIntervalMs * 4);
 
+  // Stale-order cleanup: archive 'announced' orders older than the retention
+  // window that never received a matching source lock.  Runs once at startup
+  // (to clean up any backlog), then on a slower daily-ish cadence — there is
+  // no urgency in archiving orphaned records, and running it less frequently
+  // avoids unnecessary DB write amplification.
+  //
+  // Interval: pollIntervalMs * 240 ≈ 60 min at the default 15s poll.
+  // The first run is intentionally delayed by one full interval so it does not
+  // compete with the startup reconciliation run.
+  const runStaleCleanup = (): void => {
+    staleCleanup.run().catch((err) => log.warn({ err }, "stale order cleanup failed"));
+  };
+  const staleCleanupInterval = setInterval(runStaleCleanup, cfg.pollIntervalMs * 240);
+
   const ethListener = new EthereumListener(cfg, orders, log);
   const sorobanListener = new SorobanListener(cfg, orders, log);
   const solanaListener = new SolanaListener(cfg, orders, log);
@@ -93,6 +112,7 @@ async function main(): Promise<void> {
     log.info({ signal }, "shutting down");
     clearInterval(reconcileInterval);
     clearInterval(expiryInterval);
+    clearInterval(staleCleanupInterval);
     ethListener.stop();
     sorobanListener.stop();
     solanaListener.stop();

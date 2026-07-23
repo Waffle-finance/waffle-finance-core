@@ -9,10 +9,12 @@ import { httpRequestDuration } from "../metrics.js";
 import { ordersRoutes } from "./routes/orders.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { quotesRoutes } from "./routes/quotes.js";
+import { adminRoutes } from "./routes/admin.js";
 import type { OrderService } from "../services/order-service.js";
 import type { SecretService } from "../services/secret-service.js";
 import type { QuoteService } from "../services/quote-service.js";
 import type { ReconciliationStatus } from "../reconciliation/reconciler.js";
+import type { StaleCleanupResult } from "../services/stale-cleanup.js";
 import { requestIdMiddleware, REQUEST_ID_HEADER } from "./middleware/request-id.js";
 import { AbuseDetector } from "./middleware/abuse-detection.js";
 import { sanitizeForLog } from "../utils/sanitize-for-log.js";
@@ -26,6 +28,18 @@ export interface AppDeps {
   quotes: QuoteService;
   getReconciliationStatus?: () => ReconciliationStatus;
   getReadinessChecks?: ReadinessCheckProvider;
+  /**
+   * When provided, `POST /admin/reconcile` will trigger an immediate
+   * reconciliation run and return the resulting `ReconciliationStatus`.
+   * Omitting this disables the endpoint (the route is not mounted).
+   */
+  runReconcile?: () => Promise<ReconciliationStatus>;
+  /**
+   * When provided, `POST /admin/stale-cleanup` will trigger an immediate
+   * stale-order cleanup run and return the resulting `StaleCleanupResult`.
+   * Omitting this disables the endpoint (the route is not mounted).
+   */
+  runStaleCleanup?: () => Promise<StaleCleanupResult>;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -86,6 +100,19 @@ export function createApp(deps: AppDeps): Express {
   // quotes routes expose /api/quotes/eth-xlm, /api/quotes/eth-sol, and
   // /api/prices (the aggregated endpoint consumed by the BridgeForm).
   app.use("/api", quotesRoutes(deps.quotes));
+
+  // Admin maintenance endpoints — only mounted when the dependency callbacks
+  // are injected (i.e. in production wiring via index.ts).  Omitting them in
+  // tests keeps the app surface minimal without sacrificing isolation.
+  if (deps.runReconcile && deps.runStaleCleanup) {
+    app.use(
+      adminRoutes({
+        log: deps.log,
+        runReconcile: deps.runReconcile,
+        runStaleCleanup: deps.runStaleCleanup
+      })
+    );
+  }
 
   // Final error handler - never leak a stack trace to clients.
   app.use(
