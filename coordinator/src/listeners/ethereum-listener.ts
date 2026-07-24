@@ -562,7 +562,7 @@ export class EthereumListener {
               recordListenerProgress("ethereum", Number(log.blockNumber));
             }
             this.log.info(
-              { orderId: log.args.orderId!.toString(), preimage: log.args.preimage },
+              { orderId: log.args.orderId!.toString() },
               "ETH order claimed"
             );
           }

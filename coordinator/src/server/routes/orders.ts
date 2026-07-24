@@ -9,7 +9,7 @@ import { historyAddressSchema, orderIdSchema } from "../../validation/address.js
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
-import { validationError, orderValidationError, notFoundError } from "../errors.js";
+import { validationError, orderValidationError, notFoundError, invalidCursorError } from "../errors.js";
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -128,10 +128,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     } catch (err) {
       // Handle invalid cursor gracefully
       if (err instanceof Error && err.message.includes('Invalid cursor')) {
-        res.status(400).json({
-          error: "invalid_cursor",
-          message: "The provided cursor is invalid or expired"
-        });
+        res.status(400).json(invalidCursorError());
         return;
       }
       next(err);
