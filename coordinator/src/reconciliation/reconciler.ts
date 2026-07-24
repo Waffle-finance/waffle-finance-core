@@ -18,6 +18,10 @@ import {
   reconciliationEventsReplayed
 } from "../metrics.js";
 import { validatePreimage } from "./secret-reconciler.js";
+import {
+  decodeHtlcEvent,
+  isMalformedEvent,
+} from "../soroban-events.js";
 
 const ORDER_CREATED = parseAbiItem(
   "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
@@ -270,66 +274,101 @@ export class Reconciler {
   }
 
   private async replaySorobanEvent(ev: any): Promise<number> {
-    // Topics are ScVal arrays; topic[0] is the event name symbol
-    const topicName: string = ev.topic?.[0]?.value ?? ev.topic?.[0]?.str ?? "";
+    // Decode via the shared canonical decoder — same logic as the live listener.
+    const result = decodeHtlcEvent(ev.topic ?? [], ev.value);
 
-    if (topicName === "OrderCreated") {
-      const hashlock = ev.value?.map?.hashlock ?? ev.value?.hashlock;
-      const orderId = ev.value?.map?.orderId ?? ev.value?.orderId;
-      const timelock = Number(ev.value?.map?.timelock ?? ev.value?.timelock ?? 0);
-      if (!hashlock || !orderId) return 0;
+    // Malformed payload: log as operational failure, never mutate order state.
+    if (isMalformedEvent(result)) {
+      this.log.warn(
+        {
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          kind: result.kind,
+          reason: result.reason,
+          detail: result.detail,
+        },
+        "reconciler: Soroban event payload malformed — skipping"
+      );
+      return 0;
+    }
+
+    // Unknown / governance topic — not an error, nothing to replay.
+    if (result === null) return 0;
+
+    // ── created ──────────────────────────────────────────────────────────────
+    if (result.kind === "created") {
       try {
-        const order = await this.orders.findByHashlock(hashlock);
+        const order = await this.orders.findByHashlock(result.hashlock);
         if (!order || order.srcOrderId) return 0;
         await this.orders.recordSrcLock({
           publicId: order.publicId,
-          orderId: String(orderId),
+          orderId: result.orderId.toString(),
           txHash: ev.txHash,
           blockNumber: ev.ledger,
-          timelock
+          timelock: result.timelock,
         });
+        this.log.info(
+          { hashlock: result.hashlock, orderId: result.orderId.toString() },
+          "reconciler: replayed Soroban created"
+        );
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot record")) return 0;
-        this.log.warn({ err, hashlock }, "reconciler: Soroban OrderCreated replay error");
+        this.log.warn(
+          { err, hashlock: result.hashlock },
+          "reconciler: Soroban created replay error"
+        );
         return 0;
       }
     }
 
-    if (topicName === "OrderClaimed") {
-      const preimage = ev.value?.map?.preimage ?? ev.value?.preimage;
-      const orderId = ev.value?.map?.orderId ?? ev.value?.orderId;
-      if (!preimage || !orderId) return 0;
+    // ── claimed ──────────────────────────────────────────────────────────────
+    if (result.kind === "claimed") {
       try {
-        const order = await this.orders.findBySrcOrderId("stellar", String(orderId));
+        const order = await this.orders.findBySrcOrderId(
+          "stellar",
+          result.orderId.toString()
+        );
         if (!order || order.preimage) return 0;
-        if (!validatePreimage(preimage, order.hashlock)) {
+        if (!validatePreimage(result.preimage, order.hashlock)) {
           this.log.warn(
-            { orderId: String(orderId), hashlock: order.hashlock },
-            "reconciler: Soroban OrderClaimed preimage/hashlock mismatch — rejected"
+            { orderId: result.orderId.toString(), hashlock: order.hashlock },
+            "reconciler: Soroban claimed preimage/hashlock mismatch — rejected"
           );
           return 0;
         }
-        await this.orders.recordSecret(order.publicId, preimage, ev.txHash);
+        await this.orders.recordSecret(order.publicId, result.preimage, ev.txHash);
+        this.log.info(
+          { orderId: result.orderId.toString() },
+          "reconciler: replayed Soroban claimed"
+        );
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot record")) return 0;
-        this.log.warn({ err }, "reconciler: Soroban OrderClaimed replay error");
+        this.log.warn({ err }, "reconciler: Soroban claimed replay error");
         return 0;
       }
     }
 
-    if (topicName === "OrderRefunded") {
-      const orderId = ev.value?.map?.orderId ?? ev.value?.orderId;
-      if (!orderId) return 0;
+    // ── refunded ─────────────────────────────────────────────────────────────
+    if (result.kind === "refunded") {
       try {
-        const order = await this.orders.findBySrcOrderId("stellar", String(orderId));
-        if (!order || order.status === "refunded" || order.status === "completed") return 0;
+        const order = await this.orders.findBySrcOrderId(
+          "stellar",
+          result.orderId.toString()
+        );
+        if (!order || order.status === "refunded" || order.status === "completed") {
+          return 0;
+        }
         await this.orders.markStatus(order.publicId, "refunded");
+        this.log.info(
+          { orderId: result.orderId.toString() },
+          "reconciler: replayed Soroban refunded"
+        );
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot transition")) return 0;
-        this.log.warn({ err }, "reconciler: Soroban OrderRefunded replay error");
+        this.log.warn({ err }, "reconciler: Soroban refunded replay error");
         return 0;
       }
     }

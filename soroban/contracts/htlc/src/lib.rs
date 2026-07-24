@@ -70,6 +70,9 @@ use soroban_sdk::{
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod harness;
+
 /// Maximum allowed timelock duration in seconds (24 hours).
 /// Mirrors the EVM contract bound and protects users from accidentally
 /// locking funds for unreasonably long periods.
