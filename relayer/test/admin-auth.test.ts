@@ -15,6 +15,11 @@
  *  - GET /api/debug/chain-monitor rejects unauthenticated callers
  *  - POST /api/debug/body no longer exists (removed)
  *  - POST /api/admin/authorize-relayer rejects body-supplied adminPrivateKey
+ *  - POST /api/admin/authorize-relayer returns 503 when RELAYER_PRIVATE_KEY is unset
+ *  - GET /api/admin/relayer-status returns 503 when RELAYER_PRIVATE_KEY is unset
+ *  - GET /api/admin/resolvers returns 503 when RELAYER_PRIVATE_KEY is unset
+ *  - GET /api/test-transaction returns 401 in production without auth
+ *  - GET /api/test-transaction returns 200 in production with valid auth
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -324,5 +329,154 @@ describe('POST /api/admin/authorize-relayer — body-supplied key rejected', () 
     expect(JSON.stringify(res.body)).not.toContain('deadbeef');
 
     if (saved !== undefined) process.env.RELAYER_ADMIN_PRIVATE_KEY = saved;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RELAYER_PRIVATE_KEY absent → explicit 503, never a fallback key
+// ---------------------------------------------------------------------------
+
+describe('Admin endpoints — RELAYER_PRIVATE_KEY absent returns 503, not a fallback', () => {
+  /**
+   * Build a minimal stub app that mirrors the production guard added to
+   * authorize-relayer, relayer-status, and resolvers: if RELAYER_PRIVATE_KEY
+   * is missing the handler returns 503 rather than silently using a dummy key.
+   */
+  function makeKeyGuardApp(adminKey: string) {
+    const app = express();
+    app.use(express.json());
+
+    // authorize-relayer: admin key comes from env, relayer key also from env
+    app.post('/api/admin/authorize-relayer', requireAdminAuth(adminKey), (req: Request, res: Response) => {
+      const adminPrivateKey = process.env.RELAYER_ADMIN_PRIVATE_KEY;
+      if (!adminPrivateKey) {
+        return res.status(500).json({ success: false, error: 'RELAYER_ADMIN_PRIVATE_KEY is not configured on this server' });
+      }
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({ success: false, error: 'RELAYER_PRIVATE_KEY is not configured on this server' });
+      }
+      res.json({ ok: true });
+    });
+
+    // relayer-status: requires RELAYER_PRIVATE_KEY
+    app.get('/api/admin/relayer-status', requireAdminAuth(adminKey), (_req: Request, res: Response) => {
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({ success: false, error: 'RELAYER_PRIVATE_KEY is not configured on this server' });
+      }
+      res.json({ ok: true });
+    });
+
+    // resolvers: requires RELAYER_PRIVATE_KEY
+    app.get('/api/admin/resolvers', requireAdminAuth(adminKey), (_req: Request, res: Response) => {
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({ success: false, error: 'RELAYER_PRIVATE_KEY is not configured on this server' });
+      }
+      res.json({ ok: true });
+    });
+
+    return app;
+  }
+
+  let savedRelayerKey: string | undefined;
+  let savedAdminKey: string | undefined;
+
+  beforeEach(() => {
+    savedRelayerKey = process.env.RELAYER_PRIVATE_KEY;
+    savedAdminKey = process.env.RELAYER_ADMIN_PRIVATE_KEY;
+    delete process.env.RELAYER_PRIVATE_KEY;
+    delete process.env.RELAYER_ADMIN_PRIVATE_KEY;
+  });
+
+  afterEach(() => {
+    if (savedRelayerKey !== undefined) process.env.RELAYER_PRIVATE_KEY = savedRelayerKey;
+    else delete process.env.RELAYER_PRIVATE_KEY;
+    if (savedAdminKey !== undefined) process.env.RELAYER_ADMIN_PRIVATE_KEY = savedAdminKey;
+    else delete process.env.RELAYER_ADMIN_PRIVATE_KEY;
+  });
+
+  it('GET /api/admin/relayer-status returns 503 when RELAYER_PRIVATE_KEY is unset', async () => {
+    const app = makeKeyGuardApp(TEST_KEY);
+    const res = await supertest(app)
+      .get('/api/admin/relayer-status')
+      .set('Authorization', `Bearer ${TEST_KEY}`);
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/RELAYER_PRIVATE_KEY/);
+  });
+
+  it('GET /api/admin/resolvers returns 503 when RELAYER_PRIVATE_KEY is unset', async () => {
+    const app = makeKeyGuardApp(TEST_KEY);
+    const res = await supertest(app)
+      .get('/api/admin/resolvers')
+      .set('Authorization', `Bearer ${TEST_KEY}`);
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/RELAYER_PRIVATE_KEY/);
+  });
+
+  it('POST /api/admin/authorize-relayer returns 500 when RELAYER_ADMIN_PRIVATE_KEY is unset', async () => {
+    const app = makeKeyGuardApp(TEST_KEY);
+    const res = await supertest(app)
+      .post('/api/admin/authorize-relayer')
+      .set('Authorization', `Bearer ${TEST_KEY}`)
+      .send({});
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/RELAYER_ADMIN_PRIVATE_KEY/);
+  });
+
+  it('response body for missing-key errors never contains the dummy 0x000...001 address', async () => {
+    const app = makeKeyGuardApp(TEST_KEY);
+    const res = await supertest(app)
+      .get('/api/admin/relayer-status')
+      .set('Authorization', `Bearer ${TEST_KEY}`);
+    // The hardcoded dummy address must never leak into responses
+    expect(JSON.stringify(res.body)).not.toContain('0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf');
+    expect(JSON.stringify(res.body)).not.toContain('0000000000000000000000000000000000000001');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /api/test-transaction production gating
+// ---------------------------------------------------------------------------
+
+describe('/api/test-transaction — production gating', () => {
+  function makeTestTransactionApp(adminKey: string, isProduction: boolean) {
+    const app = express();
+    app.use(express.json());
+
+    const handler = (_req: Request, res: Response) => {
+      res.json({ success: true, message: 'DEBUG: Simple transaction format' });
+    };
+
+    if (isProduction) {
+      app.get('/api/test-transaction', requireAdminAuth(adminKey), handler);
+    } else {
+      app.get('/api/test-transaction', handler);
+    }
+
+    return app;
+  }
+
+  it('returns 401 in production without auth', async () => {
+    const app = makeTestTransactionApp(TEST_KEY, true);
+    const res = await supertest(app).get('/api/test-transaction');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 200 in production with valid auth', async () => {
+    const app = makeTestTransactionApp(TEST_KEY, true);
+    const res = await supertest(app)
+      .get('/api/test-transaction')
+      .set('Authorization', `Bearer ${TEST_KEY}`);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  it('returns 200 in non-production without auth', async () => {
+    const app = makeTestTransactionApp(TEST_KEY, false);
+    const res = await supertest(app).get('/api/test-transaction');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 });

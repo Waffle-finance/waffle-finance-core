@@ -595,7 +595,10 @@ async function initializeRelayer() {
   }
 
   // DEBUG: Simple transaction test
-  app.get('/api/test-transaction', (req, res) => {
+  // In production (NODE_ENV=production) this endpoint is gated behind admin
+  // auth to prevent information leakage. In all other environments it remains
+  // accessible without auth for developer convenience.
+  const testTransactionHandler = (_req: any, res: any) => {
     res.json({
       success: true,
       approvalTransaction: {
@@ -607,7 +610,12 @@ async function initializeRelayer() {
       },
       message: 'DEBUG: Simple transaction format'
     });
-  });
+  };
+  if (process.env.NODE_ENV === 'production') {
+    app.get('/api/test-transaction', requireAdminAuth(), testTransactionHandler);
+  } else {
+    app.get('/api/test-transaction', testTransactionHandler);
+  }
 
   // POST /api/orders/create - Create bridge order (Frontend Integration)
   console.log("≡ƒôì DEBUG: About to register orders endpoint");
@@ -625,13 +633,19 @@ async function initializeRelayer() {
     res.json({ message: 'WaffleFinance Relayer API', status: 'running' });
   });
   
-  // Simple test endpoints
+  // Simple test endpoints — gated behind admin auth in production.
   app.get('/test', (req, res) => {
     res.json({ message: 'ROOT test working!', timestamp: new Date().toISOString() });
   });
-  app.get('/api/test', (req, res) => {
-    res.json({ message: 'API endpoints are working!', timestamp: new Date().toISOString() });
-  });
+  if (process.env.NODE_ENV === 'production') {
+    app.get('/api/test', requireAdminAuth(), (_req, res) => {
+      res.json({ message: 'API endpoints are working!', timestamp: new Date().toISOString() });
+    });
+  } else {
+    app.get('/api/test', (_req, res) => {
+      res.json({ message: 'API endpoints are working!', timestamp: new Date().toISOString() });
+    });
+  }
 
   // Frontend calls this on page load ΓÇö marks a browser session only.
   // Infura RPC starts on the first swap order, not on wake.
@@ -2388,7 +2402,13 @@ async function initializeRelayer() {
     const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
     
     // Get relayer wallet for proxy operations
-    const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000001';
+    const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+    if (!relayerPrivateKey) {
+      throw new Error(
+        'RELAYER_PRIVATE_KEY is not set. Cannot start chain monitoring. ' +
+        'Set RELAYER_PRIVATE_KEY in .env before starting.'
+      );
+    }
     const relayerWallet = new ethers.Wallet(relayerPrivateKey, provider);
     const relayerAddress = relayerWallet.address;
     
@@ -2881,8 +2901,14 @@ async function initializeRelayer() {
       const adminWallet = new ethers.Wallet(adminPrivateKey, provider);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), adminWallet);
       
-      // Get relayer address
-      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000001';
+      // Get relayer address — key must come from env, never a fallback.
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({
+          success: false,
+          error: 'RELAYER_PRIVATE_KEY is not configured on this server',
+        });
+      }
       const relayerWallet = new ethers.Wallet(relayerPrivateKey);
       const relayerAddress = relayerWallet.address;
       
@@ -2917,7 +2943,13 @@ async function initializeRelayer() {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
       
-      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000001';
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({
+          success: false,
+          error: 'RELAYER_PRIVATE_KEY is not configured on this server',
+        });
+      }
       const relayerWallet = new ethers.Wallet(relayerPrivateKey);
       const relayerAddress = relayerWallet.address;
       
@@ -2949,7 +2981,13 @@ async function initializeRelayer() {
       const provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
       const escrowFactoryContract = new ethers.Contract(getEscrowFactoryAddress(), getEscrowFactoryABI(DEFAULT_NETWORK_MODE === 'mainnet'), provider);
 
-      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000001';
+      const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY;
+      if (!relayerPrivateKey) {
+        return res.status(503).json({
+          success: false,
+          error: 'RELAYER_PRIVATE_KEY is not configured on this server',
+        });
+      }
       const relayerWallet = new ethers.Wallet(relayerPrivateKey);
       const relayerAddress = relayerWallet.address;
 
