@@ -73,6 +73,9 @@ mod test;
 #[cfg(test)]
 mod harness;
 
+#[cfg(test)]
+mod governance;
+
 /// Maximum allowed timelock duration in seconds (24 hours).
 /// Mirrors the EVM contract bound and protects users from accidentally
 /// locking funds for unreasonably long periods.
@@ -120,6 +123,43 @@ const ORDER_TTL_MARGIN_LEDGERS: u32 = 14 * LEDGERS_PER_DAY;
 /// and off-chain reconciliation.
 const FINALISED_ORDER_TTL_LEDGERS: u32 = 30 * LEDGERS_PER_DAY;
 
+/// Contract-wide operational mode.
+///
+/// The mode governs which settlement operations are permitted at any
+/// given time. Only the admin may change the mode and every transition
+/// emits an auditable `mode` event carrying the old and new states.
+///
+/// # Permitted transitions
+///
+/// ```text
+///  Live ──────────────► Paused ──────────────► Live
+///    │                     │
+///    └────────────────► Maintenance ──────────► Live
+/// ```
+///
+/// In words:
+/// - `Live` → `Paused` (admin-initiated emergency stop)
+/// - `Paused` → `Live` (resume normal operations)
+/// - `Live` → `Maintenance` (scheduled maintenance; refunds still work)
+/// - `Maintenance` → `Live` (end maintenance window)
+///
+/// `Paused` → `Maintenance` and `Maintenance` → `Paused` are **not**
+/// allowed — the admin must return to `Live` first. This prevents
+/// cascading state transitions that could confuse the coordinator.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ContractMode {
+    /// Normal operation. All settlement operations are permitted.
+    Live = 0,
+    /// Emergency stop. `create_order`, `claim_order`, and
+    /// `refund_order` are all blocked. Read-only access is preserved.
+    Paused = 1,
+    /// Scheduled maintenance. `create_order` and `claim_order` are
+    /// blocked, but `refund_order` **remains open** so users with
+    /// expiring orders are never locked out of their funds.
+    Maintenance = 2,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -156,6 +196,15 @@ pub enum Error {
     Overflow = 14,
     /// No admin transfer is pending.
     NoPendingTransfer = 15,
+    /// The requested operation is blocked because the contract is
+    /// paused. Read-only queries are still available.
+    ContractPaused = 16,
+    /// The requested mode transition is not in the permitted table.
+    /// See [`ContractMode`] for the allowed transition diagram.
+    InvalidModeTransition = 17,
+    /// The requested operation is blocked because the contract is in
+    /// maintenance mode.
+    ContractInMaintenance = 18,
 }
 
 /// Lifecycle state for a single HTLC order.
@@ -224,6 +273,8 @@ enum DataKey {
     ResolverRegistry,
     /// Minimum safety deposit (in stroops, i.e. 1e-7 XLM).
     MinSafetyDeposit,
+    /// Current operational mode. Absent means Live (backward compat).
+    ContractMode,
 }
 
 /// Events emitted by the contract. Topics are short symbols so they fit
@@ -237,6 +288,10 @@ fn topic_admin_transfer() -> Symbol { symbol_short!("adm_xfer") }
 /// Config mutations: paired with a per-setting symbol and (old, new)
 /// value data.
 fn topic_config() -> Symbol { symbol_short!("cfg") }
+/// Contract lifecycle mode changes: data = (old_mode, new_mode).
+/// Emitted by `set_mode` so the coordinator and audit trail can track
+/// every operational state transition.
+fn topic_mode() -> Symbol { symbol_short!("mode") }
 
 #[contract]
 pub struct HtlcContract;
@@ -265,6 +320,9 @@ impl HtlcContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextOrderId, &1u64);
         env.storage().instance().set(&DataKey::MinSafetyDeposit, &min_safety_deposit);
+        // Explicitly store Live so the mode is always present in storage and
+        // the coordinator can read it without any "absent = Live" inference.
+        env.storage().instance().set(&DataKey::ContractMode, &ContractMode::Live);
         Self::extend_instance_ttl(&env);
     }
 
@@ -364,6 +422,71 @@ impl HtlcContract {
     }
 
     // ---------------------------------------------------------------------
+    // Contract lifecycle governance
+    // ---------------------------------------------------------------------
+
+    /// Transition the contract to a new operational mode.
+    ///
+    /// Only the admin may call this. The full permitted transition table is:
+    ///
+    /// - `Live` → `Paused`        (emergency stop)
+    /// - `Live` → `Maintenance`   (scheduled maintenance)
+    /// - `Paused` → `Live`        (resume from emergency stop)
+    /// - `Maintenance` → `Live`   (end maintenance window)
+    ///
+    /// Any other transition (e.g. `Paused` → `Maintenance`) panics with
+    /// [`Error::InvalidModeTransition`]. This forces the admin to return
+    /// to `Live` first, keeping the audit trail unambiguous.
+    ///
+    /// Emits `(symbol "mode") → (old_mode, new_mode)` so the coordinator
+    /// and any monitoring system can build a complete timeline of
+    /// governance actions.
+    pub fn set_mode(env: Env, new_mode: ContractMode) {
+        Self::require_admin(&env);
+        Self::require_initialised(&env);
+
+        let old_mode: ContractMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractMode)
+            .unwrap_or(ContractMode::Live);
+
+        // No-op if already in the requested mode — avoids spurious events.
+        if old_mode == new_mode {
+            return;
+        }
+
+        // Validate the transition.
+        let allowed = matches!(
+            (old_mode, new_mode),
+            (ContractMode::Live, ContractMode::Paused)
+                | (ContractMode::Live, ContractMode::Maintenance)
+                | (ContractMode::Paused, ContractMode::Live)
+                | (ContractMode::Maintenance, ContractMode::Live)
+        );
+        if !allowed {
+            panic_with_error!(&env, Error::InvalidModeTransition);
+        }
+
+        env.storage().instance().set(&DataKey::ContractMode, &new_mode);
+        Self::extend_instance_ttl(&env);
+
+        // Emit an auditable lifecycle event every time mode changes so
+        // the coordinator, indexers, and monitoring systems get a
+        // complete, on-chain record of governance actions.
+        env.events().publish((topic_mode(),), (old_mode, new_mode));
+    }
+
+    /// Return the current operational mode. Defaults to `Live` if the
+    /// key is absent (legacy deployments that pre-date this feature).
+    pub fn contract_mode(env: Env) -> ContractMode {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractMode)
+            .unwrap_or(ContractMode::Live)
+    }
+
+    // ---------------------------------------------------------------------
     // Core HTLC operations
     // ---------------------------------------------------------------------
 
@@ -386,6 +509,7 @@ impl HtlcContract {
     ) -> u64 {
         Self::require_initialised(&env);
         sender.require_auth();
+        Self::require_create_claim_allowed(&env);
 
         if amount <= 0 {
             panic_with_error!(&env, Error::InvalidAmount);
@@ -491,6 +615,7 @@ impl HtlcContract {
     pub fn claim_order(env: Env, order_id: u64, preimage: Bytes, caller: Address) {
         Self::require_initialised(&env);
         caller.require_auth();
+        Self::require_create_claim_allowed(&env);
 
         let mut order: Order = env
             .storage()
@@ -551,6 +676,7 @@ impl HtlcContract {
     pub fn refund_order(env: Env, order_id: u64, caller: Address) {
         Self::require_initialised(&env);
         caller.require_auth();
+        Self::require_refund_allowed(&env);
 
         let mut order: Order = env
             .storage()
@@ -703,6 +829,41 @@ impl HtlcContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialised));
         admin.require_auth();
+    }
+
+    /// Block `create_order` and `claim_order` when the contract is not Live.
+    ///
+    /// Both operations move new value into or through the contract, so they
+    /// must be gated identically.  `refund_order` uses the more permissive
+    /// [`require_refund_allowed`] because returning locked funds to users
+    /// must remain possible even during a maintenance window.
+    fn require_create_claim_allowed(env: &Env) {
+        let mode: ContractMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractMode)
+            .unwrap_or(ContractMode::Live);
+        match mode {
+            ContractMode::Live => {}
+            ContractMode::Paused => panic_with_error!(env, Error::ContractPaused),
+            ContractMode::Maintenance => panic_with_error!(env, Error::ContractInMaintenance),
+        }
+    }
+
+    /// Block `refund_order` only when the contract is fully Paused.
+    ///
+    /// Refunds are permitted during Maintenance so users with expiring
+    /// orders can always recover their locked funds regardless of any
+    /// scheduled downtime.
+    fn require_refund_allowed(env: &Env) {
+        let mode: ContractMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractMode)
+            .unwrap_or(ContractMode::Live);
+        if mode == ContractMode::Paused {
+            panic_with_error!(env, Error::ContractPaused);
+        }
     }
 }
 
