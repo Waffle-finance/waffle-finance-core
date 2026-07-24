@@ -19,6 +19,14 @@ import {
   validateDestinationChain,
   validateRouteWallets,
 } from '../../utils/validation';
+import {
+  callApi,
+  classifyProviderError,
+  classifyReceiptTimeout,
+  classifyRevertedTx,
+  buildFallbackRecord,
+  type OrderSubmissionFailure,
+} from '../../lib/orderSubmissionFallback';
 
 export interface BridgeFormProps {
   ethAddress: string;
@@ -147,6 +155,53 @@ const saveTransactionToHistory = (transaction: {
     console.log('💾 Transaction saved to history:', historyTransaction);
   } catch (error) {
     console.error('❌ Failed to save transaction to history:', error);
+  }
+};
+
+// Helper function to save a fallback (failed) transaction record to localStorage
+// so TransactionHistory always shows an explicit entry even for orders that
+// never made it on-chain. The `status` field is kept as 'failed' to slot into
+// the existing filter, with the error detail preserved in the record for display.
+const saveFallbackToHistory = (record: import('../../lib/orderSubmissionFallback').FallbackTransactionRecord) => {
+  try {
+    const isTestnetMode = isTestnet();
+    const historyEntry = {
+      id: record.id,
+      txHash: record.id,              // no on-chain tx — use the record id as placeholder
+      fromNetwork: record.direction.startsWith('eth') && !record.direction.endsWith('sol')
+        ? (isTestnetMode ? 'ETH Sepolia' : 'ETH Mainnet')
+        : record.direction.startsWith('xlm')
+          ? (isTestnetMode ? 'Stellar Testnet' : 'Stellar Mainnet')
+          : (isTestnetMode ? 'Solana Devnet' : 'Solana Mainnet'),
+      toNetwork: record.direction.endsWith('xlm')
+        ? (isTestnetMode ? 'Stellar Testnet' : 'Stellar Mainnet')
+        : record.direction.endsWith('sol')
+          ? (isTestnetMode ? 'Solana Devnet' : 'Solana Mainnet')
+          : (isTestnetMode ? 'ETH Sepolia' : 'ETH Mainnet'),
+      fromToken: record.direction.startsWith('eth') ? 'ETH' : record.direction.startsWith('xlm') ? 'XLM' : 'SOL',
+      toToken: record.direction.endsWith('xlm') ? 'XLM' : record.direction.endsWith('sol') ? 'SOL' : 'ETH',
+      amount: record.amount,
+      estimatedAmount: record.estimatedAmount,
+      ethAddress: record.srcAddress,
+      stellarAddress: record.dstAddress,
+      status: 'failed' as const,
+      timestamp: record.timestamp,
+      direction: record.direction,
+      // Store the structured error so the UI can surface "Why did this fail?"
+      errorCode: record.errorCode,
+      errorMessage: record.errorMessage,
+      networkMode: (isTestnetMode ? 'testnet' : 'mainnet') as 'testnet' | 'mainnet',
+    };
+
+    const existing = localStorage.getItem('wafflefinance_transactions_v2');
+    const transactions = existing ? JSON.parse(existing) : [];
+    transactions.unshift(historyEntry);
+    if (transactions.length > 50) transactions.splice(50);
+    localStorage.setItem('wafflefinance_transactions_v2', JSON.stringify(transactions));
+
+    console.log('💾 Fallback record saved to history:', historyEntry);
+  } catch (err) {
+    console.error('❌ Failed to save fallback record to history:', err);
   }
 };
 
@@ -822,9 +877,24 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 console.log('✅ Transaction confirmed via alternative method!');
                 receipt = { status: '0x1' }; // Assume success if confirmed
               } else {
-                throw new Error('Transaction confirmation timeout');
+                // Receipt polling exhausted — classify via the typed fallback.
+                const timeout = classifyReceiptTimeout(txHash);
+                const fallbackRecord = buildFallbackRecord(timeout, {
+                  id: result.orderId || `receipt-timeout-${Date.now()}`,
+                  direction: 'eth-to-xlm',
+                  amount,
+                  estimatedAmount,
+                  srcAddress: ethAddress,
+                  dstAddress: stellarAddress,
+                });
+                saveFallbackToHistory(fallbackRecord);
+                throw new Error(timeout.message);
               }
             } catch (altError) {
+              if ((altError as Error).message?.includes('confirmation timed out') ||
+                  (altError as Error).message?.includes('timed out')) {
+                throw altError;
+              }
               console.error('❌ Alternative confirmation also failed:', altError);
               throw new Error('Transaction confirmation timeout');
             }
@@ -875,9 +945,27 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           });
 
           if (!isSuccess) {
+            const reverted = classifyRevertedTx(txHash);
+            saveTransactionToHistory({
+              orderId: result.orderId,
+              txHash: txHash,
+              direction: 'eth-to-xlm',
+              amount: amount,
+              estimatedAmount: estimatedAmount,
+              ethAddress: ethAddress,
+              stellarAddress: stellarAddress,
+              ethTxHash: txHash,
+              status: 'failed',
+              onChainOrderId: refundMeta?.orderId,
+              htlcContractAddress: refundMeta?.contractAddress,
+              htlcContractMode: refundMeta?.contractMode,
+              timelockUnixSeconds: refundMeta?.timelockUnixSeconds,
+              amountWei: refundMeta?.amountWei,
+            });
             setStatusMessage('Failed ❌');
             setIsSubmitting(false);
-            throw new Error('Transaction failed on blockchain');
+            alert(reverted.message);
+            throw new Error(reverted.message);
           }
           
           console.log('✅ Transaction confirmed successfully!');
@@ -986,30 +1074,23 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
         } catch (txError: any) {
           console.error('❌ Approval transaction failed:', txError);
           
+          // Route through the typed fallback contract.
+          const submissionFailure = classifyProviderError(txError);
+          const fallbackRecord = buildFallbackRecord(submissionFailure, {
+            id: result.orderId || `eth-err-${Date.now()}`,
+            direction: 'eth-to-xlm',
+            amount,
+            estimatedAmount,
+            srcAddress: ethAddress,
+            dstAddress: stellarAddress,
+          });
+          saveFallbackToHistory(fallbackRecord);
+          
           // Update status to failed
           setStatusMessage('Failed ❌');
           setIsSubmitting(false);
           
-          console.error('🔍 Full error details:', {
-            code: txError.code,
-            message: txError.message,
-            data: txError.data,
-            stack: txError.stack
-          });
-          
-          // Handle MetaMask errors with more specific messages
-          if (txError.code === 4001) {
-            alert('Transaction was rejected by user');
-          } else if (txError.code === -32603) {
-            alert('Transaction failed. Please check your balance and try again.');
-          } else if (txError.code === -32000) {
-            alert('Insufficient funds for gas * price + value');
-          } else if (txError.code === -32602) {
-            alert('Invalid transaction parameters');
-          } else {
-            const errorMsg = txError.message || txError.reason || 'Unknown error occurred';
-            alert(`Transaction error: ${errorMsg}`);
-          }
+          alert(submissionFailure.message);
           return; // Don't show success if transaction failed
         }
       } else if (direction === 'xlm_to_eth') {
@@ -1246,18 +1327,31 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               dstAsset: 'native', dstAmount: ethAmountWei,
             };
 
-        const announceRes = await fetch(`${API_BASE_URL}/api/orders/announce`, {
+        const announceResult = await callApi(`${API_BASE_URL}/api/orders/announce`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(announceBody),
         });
 
-        if (!announceRes.ok) {
-          const err = await announceRes.json().catch(() => ({}));
-          throw new Error(err.error || `Coordinator error: ${announceRes.status}`);
+        if (!announceResult.ok) {
+          // Typed fallback: write a record to history so the user sees an
+          // explicit entry rather than a silent no-op, then surface the error.
+          const fallbackRecord = buildFallbackRecord(announceResult, {
+            id: `sol-err-${Date.now()}`,
+            direction: direction === 'eth_to_sol' ? 'eth-to-sol' : 'sol-to-eth',
+            amount,
+            estimatedAmount,
+            srcAddress: direction === 'eth_to_sol' ? ethAddress : (solanaAddress ?? ''),
+            dstAddress: direction === 'eth_to_sol' ? (solanaAddress ?? '') : ethAddress,
+          });
+          saveFallbackToHistory(fallbackRecord);
+          alert(announceResult.message);
+          setIsSubmitting(false);
+          setStatusMessage('');
+          return;
         }
 
-        const announced = await announceRes.json();
+        const announced = announceResult.body ?? {};
         console.log('✅ Solana order announced:', announced);
 
         saveTransactionToHistory({
@@ -1293,8 +1387,29 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     } catch (error: any) {
       console.error('❌ Error creating order:', error);
       
-      // Show error message
-      alert(`Error: ${error.message || 'Unknown error occurred'}`);
+      // Route through the typed fallback contract so the failure is
+      // always structured — never a silent no-op.
+      const submissionFailure: OrderSubmissionFailure = classifyProviderError(error);
+      
+      // Write a fallback record to history so TransactionHistory shows an
+      // explicit entry for this failed attempt.
+      const fallbackRecord = buildFallbackRecord(submissionFailure, {
+        id: `err-${Date.now()}`,
+        direction: (
+          direction === 'eth_to_xlm' ? 'eth-to-xlm' :
+          direction === 'xlm_to_eth' ? 'xlm-to-eth' :
+          direction === 'eth_to_sol' ? 'eth-to-sol' :
+          'sol-to-eth'
+        ),
+        amount,
+        estimatedAmount,
+        srcAddress: direction.startsWith('eth') ? ethAddress : (stellarAddress || solanaAddress || ''),
+        dstAddress: direction.endsWith('eth') ? ethAddress : (stellarAddress || solanaAddress || ''),
+      });
+      saveFallbackToHistory(fallbackRecord);
+      
+      // Show a clear, user-readable message.
+      alert(submissionFailure.message);
     } finally {
       setIsSubmitting(false);
     }
