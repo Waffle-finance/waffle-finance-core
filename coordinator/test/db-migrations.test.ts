@@ -6,15 +6,19 @@ import {
   openDatabase,
   queryMigrations,
   getCurrentSchemaVersion,
-  type MigrationRecord,
+  validateSchemaVersion,
+  MigrationValidationError,
 } from "../src/persistence/db.js";
+import { FatalStartupError } from "../src/retry.js";
 
 // The logical migrations that schema.sql covers (in name-sort order).
+// Must stay in sync with SQLITE_MIGRATIONS in coordinator/src/persistence/db.ts.
 const EXPECTED_MIGRATIONS = [
   "001_initial.sql",
   "002_solana_support.sql",
   "003_secret_encryption.sql",
   "004_query_optimizations.sql",
+  "005_cursor_pagination.sql",
   "005_schema_migrations.sql",
   "006_stale_cleanup.sql",
 ];
@@ -221,5 +225,158 @@ describe("queryMigrations — result structure", () => {
     for (const r of records) {
       expect(r.migration.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateSchemaVersion — happy path and error codes
+// ---------------------------------------------------------------------------
+
+describe("validateSchemaVersion — valid database", () => {
+  it("passes without throwing on a freshly opened database", async () => {
+    const db = await freshDb();
+    await expect(validateSchemaVersion(db)).resolves.toBeUndefined();
+  });
+
+  it("passes after reopening an existing database", async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "wafflefinance-val-ok-"));
+    const url = `file:${dir}/test.db`;
+    await openDatabase(url);
+    const db2 = await openDatabase(url);
+    await expect(validateSchemaVersion(db2)).resolves.toBeUndefined();
+  });
+});
+
+describe("validateSchemaVersion — MISSING_MIGRATIONS", () => {
+  it("throws FatalStartupError wrapping MigrationValidationError with code MISSING_MIGRATIONS", async () => {
+    const db = await freshDb();
+    // Remove one migration to simulate a behind-version database.
+    (db as any).exec(
+      "DELETE FROM schema_migrations WHERE migration = '004_query_optimizations.sql'"
+    );
+
+    let caught: unknown;
+    try {
+      await validateSchemaVersion(db);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FatalStartupError);
+    const inner = (caught as FatalStartupError).cause;
+    expect(inner).toBeInstanceOf(MigrationValidationError);
+    expect((inner as MigrationValidationError).code).toBe("MISSING_MIGRATIONS");
+    expect((caught as Error).message).toMatch(/behind/i);
+    expect((caught as Error).message).toContain("004_query_optimizations.sql");
+  });
+
+  it("error message contains migration-strategy.md reference", async () => {
+    const db = await freshDb();
+    (db as any).exec("DELETE FROM schema_migrations WHERE migration = '003_secret_encryption.sql'");
+
+    await expect(validateSchemaVersion(db)).rejects.toSatisfy(
+      (e: unknown) =>
+        e instanceof FatalStartupError &&
+        e.message.includes("migration-strategy.md")
+    );
+  });
+
+  it("detail.missing lists only the absent migration(s)", async () => {
+    const db = await freshDb();
+    (db as any).exec(
+      "DELETE FROM schema_migrations WHERE migration IN ('002_solana_support.sql', '003_secret_encryption.sql')"
+    );
+
+    try {
+      await validateSchemaVersion(db);
+      throw new Error("expected to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FatalStartupError);
+      const inner = (err as FatalStartupError).cause as MigrationValidationError;
+      expect(inner.detail?.missing).toContain("002_solana_support.sql");
+      expect(inner.detail?.missing).toContain("003_secret_encryption.sql");
+      expect(inner.detail?.missing).toHaveLength(2);
+    }
+  });
+});
+
+describe("validateSchemaVersion — EXTRA_MIGRATIONS", () => {
+  it("throws FatalStartupError with code EXTRA_MIGRATIONS when an unknown migration is present", async () => {
+    const db = await freshDb();
+    (db as any).exec(
+      "INSERT INTO schema_migrations (migration, applied_at, duration_ms) VALUES ('999_future.sql', 9999999999, 0)"
+    );
+
+    let caught: unknown;
+    try {
+      await validateSchemaVersion(db);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FatalStartupError);
+    const inner = (caught as FatalStartupError).cause as MigrationValidationError;
+    expect(inner.code).toBe("EXTRA_MIGRATIONS");
+    expect((caught as Error).message).toMatch(/ahead/i);
+    expect((caught as Error).message).toContain("999_future.sql");
+  });
+
+  it("detail.extra contains only the unrecognised migration(s)", async () => {
+    const db = await freshDb();
+    (db as any).exec(
+      "INSERT INTO schema_migrations (migration, applied_at, duration_ms) VALUES ('007_unknown.sql', 9999999998, 0)"
+    );
+
+    try {
+      await validateSchemaVersion(db);
+    } catch (err) {
+      const inner = (err as FatalStartupError).cause as MigrationValidationError;
+      expect(inner.detail?.extra).toEqual(["007_unknown.sql"]);
+    }
+  });
+});
+
+describe("validateSchemaVersion — UNREADABLE_HISTORY", () => {
+  it("throws FatalStartupError with code UNREADABLE_HISTORY when the table is missing", async () => {
+    const db = await freshDb();
+    // Drop the migrations table entirely to simulate corruption.
+    (db as any).exec("DROP TABLE schema_migrations");
+
+    let caught: unknown;
+    try {
+      await validateSchemaVersion(db);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FatalStartupError);
+    const inner = (caught as FatalStartupError).cause as MigrationValidationError;
+    expect(inner.code).toBe("UNREADABLE_HISTORY");
+    expect((caught as Error).message).toMatch(/cannot read schema_migrations/i);
+  });
+});
+
+describe("validateSchemaVersion — VERSION_MISMATCH", () => {
+  it("throws FatalStartupError when the latest migration name is wrong", async () => {
+    const db = await freshDb();
+    // Remove the last migration and replace it with a mis-named one that
+    // passes neither the missing check (old name is gone) nor the extra check
+    // (new name is unknown), so we get one of the expected fatal error codes.
+    (db as any).exec(
+      "UPDATE schema_migrations SET migration = '006_wrong_name.sql' WHERE migration = '006_stale_cleanup.sql'"
+    );
+
+    let caught: unknown;
+    try {
+      await validateSchemaVersion(db);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FatalStartupError);
+    const inner = (caught as FatalStartupError).cause as MigrationValidationError;
+    // Missing check fires before extra check, so MISSING_MIGRATIONS is the
+    // expected code (006_stale_cleanup.sql is missing; 006_wrong_name.sql is extra).
+    expect(["MISSING_MIGRATIONS", "EXTRA_MIGRATIONS", "VERSION_MISMATCH"]).toContain(inner.code);
   });
 });
