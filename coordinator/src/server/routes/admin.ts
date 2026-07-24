@@ -5,6 +5,10 @@ import type { ReconciliationStatus } from "../../reconciliation/reconciler.js";
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import { loadTrustedProxies } from "../middleware/ratelimit.js";
 
+export interface ExpiryResult {
+  expiredCount: number;
+}
+
 export interface AdminRouteDeps {
   log: Logger;
   /**
@@ -18,6 +22,13 @@ export interface AdminRouteDeps {
    * Returns the `StaleCleanupResult` containing the count of archived orders.
    */
   runStaleCleanup: () => Promise<StaleCleanupResult>;
+  /**
+   * Trigger an on-demand expiry scan — mark all orders whose timelock has
+   * passed as `expired`.  Returns the count of newly-expired orders.
+   *
+   * Omitting this disables the endpoint (the route is not mounted).
+   */
+  runExpiry?: () => Promise<ExpiryResult>;
 }
 
 /**
@@ -29,6 +40,7 @@ export interface AdminRouteDeps {
  * Routes:
  *   POST /admin/reconcile      — trigger an immediate reconciliation run
  *   POST /admin/stale-cleanup  — trigger an immediate stale-order cleanup run
+ *   POST /admin/expire-now     — trigger an immediate order-expiry scan
  *
  * These endpoints are intentionally POST so they cannot be triggered by bots
  * or browser prefetching. They are not idempotent in the HTTP sense: each call
@@ -94,6 +106,40 @@ export function adminRoutes(deps: AdminRouteDeps): Router {
       next(err);
     }
   });
+
+  /**
+   * POST /admin/expire-now
+   *
+   * Runs the order-expiry scan immediately (outside the normal schedule).
+   * Marks any `src_locked` or `dst_locked` order whose timelock has already
+   * passed as `expired`.  The `expired` state is non-terminal: refund actions
+   * remain valid.
+   *
+   * Useful when an operator wants to force the UI to surface expired orders
+   * immediately without waiting for the next scheduled scan (~1 min cadence).
+   *
+   * Response 200:
+   *   { ok: true, expiredCount: number }
+   *
+   * Response 501:
+   *   { ok: false, error: "not_configured" }  — runExpiry not injected
+   *
+   * Response 500:
+   *   { ok: false, error: "expiry_scan_failed", message: string }
+   */
+  if (deps.runExpiry) {
+    const runExpiry = deps.runExpiry;
+    router.post("/admin/expire-now", auth, async (_req, res, next) => {
+      deps.log.info("[admin] manual order-expiry scan triggered");
+      try {
+        const result = await runExpiry();
+        res.json({ ok: true, expiredCount: result.expiredCount });
+      } catch (err) {
+        deps.log.error({ err }, "[admin] manual order-expiry scan failed");
+        next(err);
+      }
+    });
+  }
 
   return router;
 }

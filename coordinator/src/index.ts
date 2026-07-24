@@ -13,7 +13,7 @@ import { Reconciler } from "./reconciliation/reconciler.js";
 import { StaleCleanupService } from "./services/stale-cleanup.js";
 import { createReadinessChecks } from "./readiness.js";
 import { retryAsync } from "./retry.js";
-import { solanaPlaceholderMode } from "./metrics.js";
+import { solanaPlaceholderMode, expiryScanRuns, ordersExpiredTotal, expiryScanLastRun } from "./metrics.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -46,6 +46,22 @@ async function main(): Promise<void> {
   const reconciler = new Reconciler(cfg, orders, log);
   const staleCleanup = new StaleCleanupService(repo, log);
 
+  // Defined before createApp so the reference is valid when injected.
+  const runExpiryScan = async (): Promise<{ expiredCount: number }> => {
+    try {
+      const expiredCount = await orders.expireStaleOrders();
+      expiryScanRuns.inc({ result: "success" });
+      ordersExpiredTotal.inc(expiredCount);
+      expiryScanLastRun.set(Math.floor(Date.now() / 1000));
+      if (expiredCount > 0) log.info({ count: expiredCount }, "expired stale orders by timelock");
+      return { expiredCount };
+    } catch (err) {
+      expiryScanRuns.inc({ result: "failure" });
+      log.warn({ err }, "order expiry scan failed");
+      throw err;
+    }
+  };
+
   const app = createApp({
     log,
     corsOrigin: cfg.corsOrigin,
@@ -62,7 +78,8 @@ async function main(): Promise<void> {
       await reconciler.run();
       return reconciler.getStatus();
     },
-    runStaleCleanup: () => staleCleanup.run()
+    runStaleCleanup: () => staleCleanup.run(),
+    runExpiry: runExpiryScan,
   });
 
   const server = app.listen(cfg.port, () => {
@@ -79,11 +96,7 @@ async function main(): Promise<void> {
   // Periodic expiry scan: mark src_locked / dst_locked orders as `expired`
   // once their timelock has passed.  Runs at the same cadence as reconciliation
   // so expiry is visible within ~1 min at default settings.
-  const runExpiry = (): void => {
-    orders.expireStaleOrders().then((n) => {
-      if (n > 0) log.info({ count: n }, "expired stale orders by timelock");
-    }).catch((err) => log.warn({ err }, "order expiry scan failed"));
-  };
+  const runExpiry = (): void => { void runExpiryScan().catch(() => undefined); };
   void runExpiry();
   const expiryInterval = setInterval(runExpiry, cfg.pollIntervalMs * 4);
 

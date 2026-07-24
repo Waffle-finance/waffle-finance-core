@@ -194,6 +194,28 @@ export const resolverLockActionsTotal = new Counter({
   registers: [registry],
 });
 
+/** Expiry scan runs (success | failure) */
+export const expiryScanRuns = new Counter({
+  name: "coordinator_expiry_scan_runs_total",
+  help: "Total order expiry scan runs by result (success|failure)",
+  labelNames: ["result"] as const,
+  registers: [registry],
+});
+
+/** Orders transitioned to `expired` by the periodic expiry scan */
+export const ordersExpiredTotal = new Counter({
+  name: "coordinator_orders_expired_total",
+  help: "Total orders marked expired by the periodic timelock scan",
+  registers: [registry],
+});
+
+/** Unix timestamp of the last completed expiry scan */
+export const expiryScanLastRun = new Gauge({
+  name: "coordinator_expiry_scan_last_run_timestamp_seconds",
+  help: "Unix timestamp of the most recent successful order expiry scan",
+  registers: [registry],
+});
+
 /**
  * Soroban event decode failures.
  *
