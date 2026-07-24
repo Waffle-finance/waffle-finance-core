@@ -13,10 +13,20 @@ import { validationError, orderValidationError, notFoundError } from "../errors.
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
+  // `expired` is a soft, non-terminal state: the timelock has passed but no
+  // on-chain refund has been confirmed yet.  Clients may still initiate a
+  // refund — flag this explicitly so UIs can show "Expired — Refund Available"
+  // rather than a locked/disabled state.
+  const isRefundable =
+    order.status === "expired" ||
+    order.status === "src_locked" ||
+    order.status === "dst_locked";
+
   return {
     id: order.publicId,
     direction: order.direction,
     status: order.status,
+    isRefundable,
     hashlock: order.hashlock,
     src: {
       chain: order.srcChain,
