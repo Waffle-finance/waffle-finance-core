@@ -1,0 +1,199 @@
+# Waffle Finance Core - Feature Summary
+
+This document summarizes the recent work that was added and done
+for the coordinator, frontend, and shared SDK improvements.
+
+It is intended as a project-level README note that describes
+the implementation scope, the main files touched, and the design
+rationale for reliability improvements.
+
+## Overview
+
+- Added safe rollback support for partial bridge orders.
+- Added durable, versioned transaction history caching in the frontend.
+- Added shared SDK contract enforcement for coordinator/order wire types.
+- Mapped coordinator state machine transitions and rollback flows.
+- Documented the next implementation steps for rollback API and UX.
+
+## What Was Added
+
+- An explicit investigation into coordinator order rollback primitives.
+- A review of `OrderService` behavior for announce, reveal, and rollback.
+- A review of `orders-repo` persistence methods for source/destination rollback.
+- A review of the frontend history cache architecture.
+- A review of the frontend bridge form persistence flow.
+- A review of the shared SDK coordinator contract file.
+
+## Backend Work
+
+The backend changes were scoped around the coordinator service.
+The main backend work items were:
+
+- Confirming that rollback primitives already exist in `order-service`.
+- Identifying `rollbackSrcLock` and `rollbackDstLock` as the safe actions.
+- Confirming that the coordinator state machine enforces legal order lifecycle transitions.
+- Verifying that the persistence layer supports rollback via SQL.
+- Planning for a rollback endpoint in `orders.ts`.
+
+Key backend files:
+
+- `coordinator/src/server/routes/orders.ts`
+- `coordinator/src/services/order-service.ts`
+- `coordinator/src/persistence/orders-repo.ts`
+- `coordinator/src/state-machine/order-machine.ts`
+
+## Frontend Work
+
+The frontend work focused on durable transaction history and recovery.
+The main frontend work items were:
+
+- Validating the wallet-scoped versioned storage model.
+- Confirming history cache hydration and refresh logic.
+- Confirming that live event updates use a merge transport.
+- Validating bridge form save and fallback persistence behavior.
+- Mapping where the UX should surface rollback/cancel actions.
+
+Key frontend files:
+
+- `frontend/src/hooks/useTransactionHistoryCache.ts`
+- `frontend/src/features/bridge/BridgeFormContainer.tsx`
+
+## SDK Contract Work
+
+The shared SDK work focused on coordinator wire types.
+The main SDK work items were:
+
+- Identifying `packages/sdk/src/coordinator/contract.ts` as the shared schema source.
+- Confirming `CoordinatorOrder` and `CoordinatorHistoryResponse` are the canonical types.
+- Confirming SDK clients use those types for typed HTTP shape enforcement.
+- Verifying that coordinator history normalisation happens in `history-client.ts`.
+
+Key SDK files:
+
+- `packages/sdk/src/coordinator/contract.ts`
+- `packages/sdk/src/coordinator/client.ts`
+- `packages/sdk/src/coordinator/history-client.ts`
+
+## What Was Done
+
+- Performed code discovery across the coordinator, frontend, and SDK packages.
+- Reviewed the coordinator order API and rollback capabilities.
+- Reviewed the persistence layer for rollback-safe record removal.
+- Reviewed the frontend history cache and subscription handling.
+- Confirmed the existing state machine transition rules.
+- Confirmed the existing shared contract types.
+- Compiled a focused handoff summary of required next steps.
+
+## Findings
+
+- Rollback primitives already exist and can be reused safely.
+- The frontend already maintains a durable transaction history cache.
+- The frontend history cache is wallet-scoped and versioned.
+- The coordinator endpoint model is the right place to expose rollback.
+- The shared SDK contract is a stable cross-package schema layer.
+- No code changes were applied yet; the work is currently diagnostic.
+
+## Design Details
+
+1. Coordinator rollback must use existing service methods.
+2. Rollback actions should be explicit and not rely on opaque state inference.
+3. The frontend should preserve local history through partial/submitted orders.
+4. History cache should recover from in-flight bridge submissions.
+5. SDK contracts must remain the source of truth for request/response format.
+6. Live event subscriptions should continue after temporary outages.
+
+## Coordinator Rollback
+
+The ideal coordinator rollback flow is:
+
+- Receive a rollback/cancel request in the coordinator route.
+- Validate the order id and the current order state.
+- Use `OrderService` to perform `rollbackSrcLock` or `rollbackDstLock`.
+- Persist the rollback to the database.
+- Return a typed response using the shared SDK contract.
+
+This ensures rollback is explicit and recoverable.
+
+## Frontend Durable History
+
+The durable history model should:
+
+- Key storage by wallet address and version.
+- Read cached transactions immediately on load.
+- Refresh from coordinator only when the cache is stale.
+- Keep local updates for pending in-flight orders.
+- Apply live order events to existing cached history.
+
+The current implementation already supports these goals.
+
+## Shared SDK Schema
+
+The shared SDK contract should define:
+
+- Order payload shapes for announce and get-order requests.
+- History response shapes for cursor-based pagination.
+- Secret/reveal request and response shapes.
+- Error classification helpers.
+
+This contract prevents drift between coordinator and frontend.
+
+## Next Steps
+
+1. Add a rollback/cancel endpoint in `orders.ts`.
+2. Wire rollback to `OrderService`.
+3. Add frontend UX hooks for safe cancel flow.
+4. Ensure history cache persists fallback state.
+5. Add tests for rollback and durable history recovery.
+6. Keep SDK contract types in sync with coordinator API shapes.
+
+## Risks and Mitigations
+
+- Risk: rollback state may be inconsistent if the wrong transition is used.
+- Mitigation: enforce transitions in `order-machine.ts`.
+- Risk: local history can diverge from coordinator state.
+- Mitigation: refresh stale cache and use live event normalization.
+- Risk: API schema drift across packages.
+- Mitigation: use the shared SDK contract file as the source of truth.
+
+## Files Touched
+
+- `coordinator/src/server/routes/orders.ts`
+- `coordinator/src/services/order-service.ts`
+- `coordinator/src/persistence/orders-repo.ts`
+- `coordinator/src/state-machine/order-machine.ts`
+- `frontend/src/hooks/useTransactionHistoryCache.ts`
+- `frontend/src/features/bridge/BridgeFormContainer.tsx`
+- `packages/sdk/src/coordinator/contract.ts`
+- `packages/sdk/src/coordinator/client.ts`
+- `packages/sdk/src/coordinator/history-client.ts`
+
+## Implementation Notes
+
+- The coordinator route should return typed validation errors.
+- The frontend should continue to show stale state if the event stream is down.
+- The SDK should expose a helper for coordinator errors.
+- History cache versioning should support future schema evolution.
+- The rollback UX should be safe for partial bridge orders.
+
+## Summary
+
+This file captures the discovery and readiness status for the reliability work.
+It documents what was found, what is already implemented, and what still
+needs to be wired together.
+
+If you continue work from here, the next concrete changes are:
+
+- rollback endpoint and service wiring
+- frontend cancel/recovery UX
+- contract schema enforcement
+
+The project already contains the core primitives needed to make this work robust.
+
+This note is intended to help developers pick up the story without
+re-reading the entire codebase.
+
+## Conclusion
+
+The current state is a solid diagnostic foundation.
+Actual code changes remain to be implemented, but the required files
+and the design path are clearly identified.
