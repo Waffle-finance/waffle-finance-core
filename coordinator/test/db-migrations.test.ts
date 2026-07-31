@@ -24,6 +24,7 @@ const EXPECTED_MIGRATIONS = [
   "007_audit_log.sql",
   "008_query_optimizations_advanced.sql",
   "009_chain_cursors.sql",
+  "010_soroban_checkpoints.sql",
 ];
 
 async function freshDb() {
@@ -105,7 +106,7 @@ describe("Schema migration logging — SQLite", () => {
   it("getCurrentSchemaVersion returns the last migration name", async () => {
     const db = await freshDb();
     const version = await getCurrentSchemaVersion(db);
-    expect(version).toBe("009_chain_cursors.sql");
+    expect(version).toBe("010_soroban_checkpoints.sql");
   });
 
   it("getCurrentSchemaVersion returns null for an empty migrations table", async () => {

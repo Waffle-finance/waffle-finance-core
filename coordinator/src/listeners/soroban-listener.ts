@@ -8,16 +8,39 @@ import {
   recordListenerProgress,
   sorobanDecodeErrors,
   workflowDispatchDecisions,
+  listenerCheckpointPersistTotal,
+  listenerCheckpointLedger,
+  listenerReplayWindowLedgers,
+  listenerReplayEventsTotal,
+  listenerRecoveryRunsTotal,
+  listenerCursorResetsTotal,
 } from "../metrics.js";
 import {
   decodeHtlcEvent,
   isMalformedEvent,
   type DecodedHtlcEvent,
 } from "../soroban-events.js";
-import { decideDispatch } from "../services/workflow-priority-policy.js";
+import {
+  decideDispatch,
+  type WorkflowPath,
+  type WorkflowMutation,
+} from "../services/workflow-priority-policy.js";
+import type { SorobanRecoveryMarker } from "../persistence/orders-repo.js";
 
 /** Maximum ledger gap before we treat it as a node inconsistency and re-scan. */
 const MAX_LEDGER_GAP = 100;
+
+/**
+ * Upper bound on the ledger span a single bounded replay/recovery pass will
+ * scan.  Sized at ~48h of Stellar ledgers (~5s/ledger) — the same window the
+ * reconciler uses.  If the checkpoint is further behind than this we can only
+ * cover the tail; the periodic reconciler backfills the remainder and we log
+ * the shortfall so operators can trigger a full historical replay if needed.
+ */
+const MAX_REPLAY_LEDGERS = 34_560;
+
+/** Page size for the getEvents scan during bounded replay/recovery. */
+const REPLAY_PAGE_LIMIT = 200;
 
 /**
  * Maximum number of processed event keys retained in the in-process
@@ -54,12 +77,25 @@ interface SorobanRpcEvent {
  *     Detected per-event: skip and warn.
  *
  *  2. Ledger gap             — cursor jumps forward by more than MAX_LEDGER_GAP.
- *     Detected per-event: reset cursor so the next iteration re-scans
- *     from lastProcessedLedger.
+ *     Detected per-event: run a bounded replay of the missed range from the
+ *     last safe ledger instead of silently jumping to the tip.
  *
  *  3. Stale / expired cursor — the RPC node no longer recognises our cursor
  *     (e.g. node restarted, history window pruned).
- *     Detected on RPC error: reset cursor and continue.
+ *     Detected on RPC error: reset cursor and replay from the last safe ledger.
+ *
+ * Durable checkpointing & replay-recovery
+ * ───────────────────────────────────────
+ * The listener persists a {@link SorobanCheckpoint} (last safe ledger,
+ * effective cursor, contract id, recovery marker) after every poll.  On
+ * startup it loads that checkpoint and resumes from the last safe point
+ * rather than reprocessing from scratch or jumping blindly to the chain tip.
+ * If the checkpoint is marked for replay (a gap / stale cursor / restart was
+ * observed and not yet reconciled), or a cursor reset happens in-loop, the
+ * listener runs a bounded replay of the missed ledger range.  Idempotency is
+ * guaranteed by the in-process dedup cache plus the {@link decideDispatch}
+ * policy, so replayed events never create duplicate source-lock, secret-reveal,
+ * or refunded transitions.
  *
  * Event decoding
  * ──────────────
@@ -75,6 +111,8 @@ export class SorobanListener {
   private cursor: string | undefined;
   private stopped = false;
   private lastProcessedLedger = 0;
+  /** The HTLC contract this listener is bound to; set in start(). */
+  private contractId: string | undefined;
 
   /**
    * In-process event deduplication cache.
@@ -102,8 +140,9 @@ export class SorobanListener {
       return;
     }
     const contractId = this.cfg.soroban.htlcContract;
+    this.contractId = contractId;
     this.log.info({ contract: contractId }, "starting");
-    void this.loop(contractId);
+    void this.bootstrapAndLoop(contractId);
   }
 
   stop(): void {
@@ -133,6 +172,185 @@ export class SorobanListener {
     this.processedEventKeys.set(key, true);
   }
 
+  // ─── Durable checkpointing ────────────────────────────────────────────────
+
+  /**
+   * Load the persisted checkpoint and resume from the last safe point.
+   *
+   *  - No checkpoint (fresh install, or re-pointed at a new contract): start
+   *    just behind the chain tip; the reconciler backfills any older history.
+   *  - Clean checkpoint with a cursor: resume the live stream directly from the
+   *    cursor — the RPC returns every event after it, including those that
+   *    occurred while the coordinator was offline.
+   *  - Checkpoint marked for replay, or clean without a cursor: run a bounded
+   *    replay of the missed range from the last safe ledger before going live.
+   */
+  private async bootstrap(contractId: string): Promise<void> {
+    const cp = await this.orders.getSorobanCheckpoint(contractId);
+    if (!cp) {
+      this.log.info(
+        { contract: contractId },
+        "no Soroban checkpoint found — starting near chain tip"
+      );
+      return;
+    }
+
+    this.lastProcessedLedger = cp.lastSafeLedger;
+    listenerCheckpointLedger.set({ chain: "stellar" }, cp.lastSafeLedger);
+    this.log.info(
+      {
+        contract: contractId,
+        lastSafeLedger: cp.lastSafeLedger,
+        hasCursor: cp.effectiveCursor !== null,
+        recoveryMarker: cp.recoveryMarker,
+      },
+      "resuming Soroban listener from persisted checkpoint"
+    );
+
+    if (cp.recoveryMarker !== "clean") {
+      // A prior run flagged a gap/stale cursor/restart and did not finish
+      // reconciling it (possibly crashed mid-replay). Replay before going live.
+      listenerCursorResetsTotal.inc({ chain: "stellar", reason: "restart" });
+      this.cursor = undefined;
+      await this.runBoundedReplay(contractId, cp.lastSafeLedger, "restart");
+      return;
+    }
+
+    if (cp.effectiveCursor) {
+      // Fast path: continue the live stream straight from the cursor.
+      this.cursor = cp.effectiveCursor;
+      return;
+    }
+
+    if (cp.lastSafeLedger > 0) {
+      // Clean, but no cursor to resume from — replay the offline gap so we
+      // don't silently skip events that landed since the last safe ledger.
+      await this.runBoundedReplay(contractId, cp.lastSafeLedger, "restart");
+    }
+  }
+
+  /**
+   * Persist the current listener position as a durable checkpoint.  Never
+   * throws: a persistence failure is counted and logged but must not stall
+   * event ingestion (the reconciler remains a safety net).
+   */
+  private async persistCheckpoint(marker: SorobanRecoveryMarker): Promise<void> {
+    if (!this.contractId) return;
+    try {
+      await this.orders.saveSorobanCheckpoint({
+        contractId: this.contractId,
+        lastSafeLedger: this.lastProcessedLedger,
+        effectiveCursor: this.cursor ?? null,
+        recoveryMarker: marker,
+      });
+      listenerCheckpointPersistTotal.inc({ chain: "stellar", result: "success" });
+      listenerCheckpointLedger.set({ chain: "stellar" }, this.lastProcessedLedger);
+    } catch (err) {
+      listenerCheckpointPersistTotal.inc({ chain: "stellar", result: "failure" });
+      this.log.warn(
+        { err, contract: this.contractId },
+        "Soroban checkpoint persist failed — resume will fall back to the reconciler"
+      );
+    }
+  }
+
+  private async bootstrapAndLoop(contractId: string): Promise<void> {
+    try {
+      await this.bootstrap(contractId);
+    } catch (err) {
+      // A bootstrap failure must not prevent the listener from running; fall
+      // back to a tip-relative start and let the reconciler backfill.
+      this.cursor = undefined;
+      this.log.warn(
+        { err, contract: contractId },
+        "Soroban listener bootstrap failed — starting from chain tip"
+      );
+    }
+    await this.loop(contractId);
+  }
+
+  // ─── Bounded replay / recovery ────────────────────────────────────────────
+
+  /**
+   * Scan a bounded ledger range from `fromLedger` up to the current chain tip
+   * and reconcile every HTLC event through the same idempotent dispatch path
+   * used by the live stream.  Adopts the RPC cursor returned by the final page
+   * so the listener can continue the live stream seamlessly afterwards.
+   *
+   * Marks the checkpoint `recovering` for the duration so a crash mid-replay
+   * re-runs it on the next start, and `clean` on success.
+   */
+  private async runBoundedReplay(
+    contractId: string,
+    fromLedger: number,
+    reason: "restart" | "ledger_gap" | "stale_cursor"
+  ): Promise<number> {
+    const startedAt = Date.now();
+    let applied = 0;
+    try {
+      await this.persistCheckpoint("recovering");
+
+      const latest = await this.server.getLatestLedger();
+      const tip = latest.sequence;
+      const boundedFrom = Math.max(0, fromLedger, tip - MAX_REPLAY_LEDGERS);
+      const window = Math.max(0, tip - boundedFrom);
+      listenerReplayWindowLedgers.set({ chain: "stellar" }, window);
+
+      if (fromLedger > 0 && fromLedger < tip - MAX_REPLAY_LEDGERS) {
+        this.log.warn(
+          { contract: contractId, reason, fromLedger, boundedFrom, tip, MAX_REPLAY_LEDGERS },
+          "Soroban replay window exceeds MAX_REPLAY_LEDGERS — some events may be " +
+            "permanently missed by the listener; the reconciler will backfill the remainder"
+        );
+      }
+
+      this.log.info(
+        { contract: contractId, reason, fromLedger, boundedFrom, tip, window },
+        "Soroban listener starting bounded replay/recovery"
+      );
+
+      let pageCursor: string | undefined;
+      let startLedger: number | undefined = boundedFrom;
+      do {
+        const events = await this.server.getEvents({
+          filters: [{ type: "contract", contractIds: [contractId] }],
+          startLedger: pageCursor ? undefined : startLedger,
+          cursor: pageCursor,
+          limit: REPLAY_PAGE_LIMIT,
+        });
+
+        for (const ev of events.events) {
+          const rpcEv = ev as unknown as SorobanRpcEvent;
+          if (await this.processSorobanEvent(rpcEv, "recovery")) applied++;
+          this.lastProcessedLedger = Math.max(this.lastProcessedLedger, rpcEv.ledger);
+        }
+
+        pageCursor = events.cursor ?? undefined;
+        // Adopt the cursor so the live loop resumes exactly where replay ended.
+        if (pageCursor) this.cursor = pageCursor;
+        if (events.events.length < REPLAY_PAGE_LIMIT) break;
+        startLedger = undefined;
+      } while (pageCursor && !this.stopped);
+
+      // Recovery reconciled the whole window: the safe point is now the tip.
+      this.lastProcessedLedger = Math.max(this.lastProcessedLedger, tip);
+      await this.persistCheckpoint("clean");
+
+      listenerRecoveryRunsTotal.inc({ chain: "stellar", result: "success" });
+      this.log.info(
+        { contract: contractId, reason, applied, window, ms: Date.now() - startedAt },
+        "Soroban listener replay/recovery complete"
+      );
+    } catch (err) {
+      listenerRecoveryRunsTotal.inc({ chain: "stellar", result: "failure" });
+      this.log.warn(
+        { err, contract: contractId, reason },
+        "Soroban listener replay/recovery failed — will retry on next trigger"
+      );
+    }
+    return applied;
+  }
+
   private async loop(contractId: string): Promise<void> {
     while (!this.stopped) {
       try {
@@ -156,13 +374,20 @@ export class SorobanListener {
             limit: 100,
           });
         } catch (rpcErr) {
-          // Stale / expired cursor — reset and let the next iteration re-scan.
+          // Stale / expired cursor — reset, flag the checkpoint, and recover the
+          // missed range by replaying from the last safe ledger.
           this.log.warn({ err: rpcErr }, "Soroban cursor reset due to error");
           this.cursor = undefined;
+          listenerCursorResetsTotal.inc({ chain: "stellar", reason: "stale_cursor" });
+          await this.orders
+            .markSorobanRecovery(contractId, "pending_replay")
+            .catch(() => {});
+          await this.runBoundedReplay(contractId, this.lastProcessedLedger, "stale_cursor");
           await new Promise((r) => setTimeout(r, this.cfg.pollIntervalMs));
           continue;
         }
 
+        let gapDetected = false;
         for (const ev of events.events) {
           // ── Guard 1: out-of-order event ──────────────────────────────────
           if (ev.ledger < this.lastProcessedLedger) {
@@ -187,9 +412,11 @@ export class SorobanListener {
                 lastProcessedLedger: this.lastProcessedLedger,
                 MAX_LEDGER_GAP,
               },
-              "Soroban ledger gap detected, re-scanning from last known ledger"
+              "Soroban ledger gap detected — replaying missed range from last safe ledger"
             );
             this.cursor = undefined;
+            listenerCursorResetsTotal.inc({ chain: "stellar", reason: "ledger_gap" });
+            gapDetected = true;
             break;
           }
 
@@ -199,17 +426,31 @@ export class SorobanListener {
             ev.ledger
           );
 
-          await this.processSorobanEvent(ev as unknown as SorobanRpcEvent);
+          await this.processSorobanEvent(ev as unknown as SorobanRpcEvent, "live");
         }
 
         recordListenerProgress("soroban", processedLedger, latest.sequence);
         observeListenerEventProcessing("soroban", "poll", startedAt);
 
-        // Advance the cursor only when this.cursor was NOT reset by the gap
-        // guard above.
-        if (events.cursor && this.cursor !== undefined) {
+        if (gapDetected) {
+          await this.orders
+            .markSorobanRecovery(contractId, "pending_replay")
+            .catch(() => {});
+          await this.runBoundedReplay(contractId, this.lastProcessedLedger, "ledger_gap");
+          await new Promise((r) => setTimeout(r, this.cfg.pollIntervalMs));
+          continue;
+        }
+
+        // Adopt the RPC cursor so subsequent polls (and the persisted
+        // checkpoint's effective cursor) continue exactly from here.  The gap
+        // guard clears this.cursor and `continue`s above, so we never reach
+        // this line with a cursor that should have been reset.
+        if (events.cursor) {
           this.cursor = events.cursor;
         }
+
+        // Persist the durable checkpoint so the next restart resumes here.
+        await this.persistCheckpoint("clean");
       } catch (err) {
         this.log.warn({ err }, "Soroban poll failed");
       }
@@ -218,9 +459,24 @@ export class SorobanListener {
   }
 
   /**
+   * Record that a mutation was applied and, on the replay/recovery path,
+   * increment the recovery-events metric.
+   */
+  private onApplied(path: WorkflowPath, mutation: WorkflowMutation): void {
+    if (path !== "live") {
+      listenerReplayEventsTotal.inc({ chain: "stellar", mutation });
+    }
+  }
+
+  /**
    * Decode a single Soroban contract event via the shared
    * {@link decodeHtlcEvent} utility and dispatch to the appropriate
    * OrderService method.
+   *
+   * `path` distinguishes the live poll stream (`"live"`) from the bounded
+   * replay/recovery scan (`"recovery"`); it feeds the {@link decideDispatch}
+   * priority policy so a replayed event never overrides a live one and never
+   * re-applies an already-recorded transition.
    *
    * A {@link MalformedEventError} is treated as an operational failure:
    * it is counted, logged at warn level, and skipped — it does NOT mutate
@@ -228,8 +484,13 @@ export class SorobanListener {
    *
    * Duplicate events (same kind + txHash already processed in this session)
    * are dropped before any DB interaction.
+   *
+   * @returns `true` when a state transition was applied, `false` otherwise.
    */
-  private async processSorobanEvent(ev: SorobanRpcEvent): Promise<void> {
+  private async processSorobanEvent(
+    ev: SorobanRpcEvent,
+    path: WorkflowPath = "live"
+  ): Promise<boolean> {
     const result = decodeHtlcEvent(ev.topic, ev.value);
 
     // ── Malformed payload ─────────────────────────────────────────────────
@@ -245,7 +506,7 @@ export class SorobanListener {
         },
         "Soroban event payload malformed — skipping without mutating order state"
       );
-      return;
+      return false;
     }
 
     // ── Unknown / governance topic ────────────────────────────────────────
@@ -254,7 +515,7 @@ export class SorobanListener {
         { ledger: ev.ledger, txHash: ev.txHash },
         "Soroban event with unknown topic — skipping"
       );
-      return;
+      return false;
     }
 
     const decoded: DecodedHtlcEvent = result;
@@ -262,14 +523,14 @@ export class SorobanListener {
     // ── In-process deduplication ──────────────────────────────────────────
     if (this.isDuplicate(decoded.kind, ev.txHash)) {
       this.log.debug(
-        { kind: decoded.kind, txHash: ev.txHash, ledger: ev.ledger },
+        { kind: decoded.kind, txHash: ev.txHash, ledger: ev.ledger, path },
         "Soroban event duplicate skipped (in-process cache)"
       );
-      return;
+      return false;
     }
 
     this.log.info(
-      { kind: decoded.kind, schemaVersion: decoded.schemaVersion, ledger: ev.ledger, txHash: ev.txHash },
+      { kind: decoded.kind, schemaVersion: decoded.schemaVersion, ledger: ev.ledger, txHash: ev.txHash, path },
       "Soroban HTLC event decoded"
     );
 
@@ -285,21 +546,21 @@ export class SorobanListener {
             },
             "Soroban created event: no matching announced order — skipping"
           );
-          return;
+          return false;
         }
         const decision = decideDispatch({
-          path: "live",
+          path,
           mutation: "src_lock",
           incomingSequence: ev.ledger,
           existingSequence: order.srcLockBlock,
           alreadyApplied: order.srcOrderId !== null,
         });
         workflowDispatchDecisions.inc({
-          path: "live",
+          path,
           mutation: "src_lock",
           outcome: decision.reason,
         });
-        if (!decision.shouldApply) return;
+        if (!decision.shouldApply) return false;
         await this.orders.recordSrcLock({
           publicId: order.publicId,
           orderId: decoded.orderId.toString(),
@@ -308,6 +569,8 @@ export class SorobanListener {
           timelock: decoded.timelock,
         });
         this.markProcessed(decoded.kind, ev.txHash);
+        this.onApplied(path, "src_lock");
+        return true;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!msg.includes("cannot record") && !msg.includes("duplicate")) {
@@ -317,7 +580,7 @@ export class SorobanListener {
           );
         }
       }
-      return;
+      return false;
     }
 
     // ── claimed ────────────────────────────────────────────────────────────
@@ -337,48 +600,51 @@ export class SorobanListener {
               },
               "Soroban claimed event: order not found — skipping"
             );
-            return;
+            return false;
           }
           const decision = decideDispatch({
-            path: "live",
+            path,
             mutation: "secret_reveal",
             incomingSequence: ev.ledger,
             existingSequence: null,
             alreadyApplied: byHash.preimage !== null,
           });
           workflowDispatchDecisions.inc({
-            path: "live",
+            path,
             mutation: "secret_reveal",
             outcome: decision.reason,
           });
-          if (!decision.shouldApply) return;
+          if (!decision.shouldApply) return false;
           await this.orders.recordSecret(
             byHash.publicId,
             decoded.preimage,
             ev.txHash
           );
           this.markProcessed(decoded.kind, ev.txHash);
-          return;
+          this.onApplied(path, "secret_reveal");
+          return true;
         }
         const decision = decideDispatch({
-          path: "live",
+          path,
           mutation: "secret_reveal",
           incomingSequence: ev.ledger,
           existingSequence: null,
           alreadyApplied: order.preimage !== null,
         });
         workflowDispatchDecisions.inc({
-          path: "live",
+          path,
           mutation: "secret_reveal",
           outcome: decision.reason,
         });
-        if (!decision.shouldApply) return;
+        if (!decision.shouldApply) return false;
         await this.orders.recordSecret(
           order.publicId,
           decoded.preimage,
           ev.txHash
         );
         this.markProcessed(decoded.kind, ev.txHash);
+        this.onApplied(path, "secret_reveal");
+        return true;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!msg.includes("cannot record") && !msg.includes("duplicate")) {
@@ -388,7 +654,7 @@ export class SorobanListener {
           );
         }
       }
-      return;
+      return false;
     }
 
     // ── refunded ───────────────────────────────────────────────────────────
@@ -408,40 +674,43 @@ export class SorobanListener {
               },
               "Soroban refunded event: order not found — skipping"
             );
-            return;
+            return false;
           }
           const decision = decideDispatch({
-            path: "live",
+            path,
             mutation: "refund",
             incomingSequence: ev.ledger,
             existingSequence: byHash.srcLockBlock,
             alreadyApplied: byHash.status === "refunded" || byHash.status === "completed",
           });
           workflowDispatchDecisions.inc({
-            path: "live",
+            path,
             mutation: "refund",
             outcome: decision.reason,
           });
-          if (!decision.shouldApply) return;
+          if (!decision.shouldApply) return false;
           await this.orders.markStatus(byHash.publicId, "refunded");
           this.markProcessed(decoded.kind, ev.txHash);
-          return;
+          this.onApplied(path, "refund");
+          return true;
         }
         const decision = decideDispatch({
-          path: "live",
+          path,
           mutation: "refund",
           incomingSequence: ev.ledger,
           existingSequence: order.srcLockBlock,
           alreadyApplied: order.status === "refunded" || order.status === "completed",
         });
         workflowDispatchDecisions.inc({
-          path: "live",
+          path,
           mutation: "refund",
           outcome: decision.reason,
         });
-        if (!decision.shouldApply) return;
+        if (!decision.shouldApply) return false;
         await this.orders.markStatus(order.publicId, "refunded");
         this.markProcessed(decoded.kind, ev.txHash);
+        this.onApplied(path, "refund");
+        return true;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!msg.includes("cannot transition") && !msg.includes("duplicate")) {
@@ -451,7 +720,9 @@ export class SorobanListener {
           );
         }
       }
-      return;
+      return false;
     }
+
+    return false;
   }
 }

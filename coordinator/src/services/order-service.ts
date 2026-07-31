@@ -5,7 +5,9 @@ import {
   type OrderHistoryResult,
   type AnnounceOrderInput,
   type Chain,
-  type OrderStatus
+  type OrderStatus,
+  type SorobanCheckpoint,
+  type SorobanRecoveryMarker
 } from "../persistence/orders-repo.js";
 import { canTransition, isTerminal } from "../state-machine/order-machine.js";
 import {
@@ -406,6 +408,31 @@ export class OrderService {
 
   async setChainCursor(chain: Chain, position: number): Promise<void> {
     return this.repo.setChainCursor(chain, position);
+  }
+
+  // ── Soroban listener checkpoints ──────────────────────────────────────────
+  // Thin delegators over the persistence adapter so the Soroban listener can
+  // load/persist its durable checkpoint without a direct database handle,
+  // mirroring the getChainCursor/setChainCursor pattern above.
+
+  getSorobanCheckpoint(contractId: string): Promise<SorobanCheckpoint | null> {
+    return this.repo.getSorobanCheckpoint(contractId);
+  }
+
+  saveSorobanCheckpoint(input: {
+    contractId: string;
+    lastSafeLedger: number;
+    effectiveCursor: string | null;
+    recoveryMarker: SorobanRecoveryMarker;
+  }): Promise<void> {
+    return this.repo.saveSorobanCheckpoint(input);
+  }
+
+  markSorobanRecovery(
+    contractId: string,
+    marker: SorobanRecoveryMarker
+  ): Promise<number> {
+    return this.repo.markSorobanRecovery(contractId, marker);
   }
 
   findOrdersMissingSecret(): Promise<

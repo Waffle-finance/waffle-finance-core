@@ -124,6 +124,99 @@ export function observeListenerEventProcessing(
   );
 }
 
+// ── Soroban listener checkpoint / replay-recovery metrics ─────────────────────
+//
+// These expose the durable checkpoint & replay-recovery subsystem of the
+// Soroban event listener (see coordinator/src/listeners/soroban-listener.ts).
+
+/**
+ * Soroban listener checkpoint persistence attempts, by result.
+ *
+ * `result` is `success` or `failure`.  A rising failure rate means the
+ * listener can no longer durably record its safe resume point — after a
+ * restart it would fall back to scanning near the chain tip and rely on the
+ * periodic reconciler to backfill, so this is an actionable alert.
+ */
+export const listenerCheckpointPersistTotal = new Counter({
+  name: "coordinator_listener_checkpoint_persist_total",
+  help: "Soroban listener checkpoint persistence attempts by chain and result (success|failure)",
+  labelNames: ["chain", "result"] as const,
+  registers: [registry],
+});
+
+/**
+ * Last safe ledger durably persisted in the Soroban listener checkpoint.
+ *
+ * This is the point the listener would resume from on the next restart.  It
+ * should track just behind the chain head during steady-state operation; a
+ * flat value while the head advances indicates a stalled or crashed listener.
+ */
+export const listenerCheckpointLedger = new Gauge({
+  name: "coordinator_listener_checkpoint_ledger",
+  help: "Last safe ledger persisted in the Soroban listener checkpoint, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Size, in ledgers, of the most recent bounded replay/recovery window scanned
+ * by the listener after a restart, stale cursor, or gap condition.
+ *
+ * A large window after a restart is expected (the coordinator was offline); a
+ * large window during steady-state operation indicates repeated cursor resets.
+ */
+export const listenerReplayWindowLedgers = new Gauge({
+  name: "coordinator_listener_replay_window_ledgers",
+  help: "Ledger span covered by the most recent Soroban listener replay/recovery pass, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Events applied by the Soroban listener's replay/recovery path, by mutation.
+ *
+ * `mutation` values mirror the workflow policy: `src_lock`, `secret_reveal`,
+ * `refund`.  Distinct from live-path processing so operators can see exactly
+ * what a post-restart recovery reconciled.
+ */
+export const listenerReplayEventsTotal = new Counter({
+  name: "coordinator_listener_replay_events_total",
+  help: "Events applied during Soroban listener replay/recovery, by chain and mutation",
+  labelNames: ["chain", "mutation"] as const,
+  registers: [registry],
+});
+
+/**
+ * Bounded replay/recovery runs performed by the Soroban listener, by result.
+ *
+ * `result` is `success` or `failure`.  A recovery run is triggered on startup
+ * from a checkpoint marked for replay, or in-loop after a stale cursor / gap.
+ */
+export const listenerRecoveryRunsTotal = new Counter({
+  name: "coordinator_listener_recovery_runs_total",
+  help: "Soroban listener bounded replay/recovery runs by chain and result (success|failure)",
+  labelNames: ["chain", "result"] as const,
+  registers: [registry],
+});
+
+/**
+ * Soroban listener cursor resets, by reason.
+ *
+ * `reason` values:
+ *  - `stale_cursor`  the RPC node no longer recognises our cursor.
+ *  - `ledger_gap`    the cursor jumped forward by more than the gap threshold.
+ *  - `restart`       a persisted checkpoint marked pending replay on startup.
+ *
+ * A sustained non-zero rate for `stale_cursor` or `ledger_gap` points at an
+ * unhealthy or inconsistent RPC node.
+ */
+export const listenerCursorResetsTotal = new Counter({
+  name: "coordinator_listener_cursor_resets_total",
+  help: "Soroban listener cursor resets by chain and reason (stale_cursor|ledger_gap|restart)",
+  labelNames: ["chain", "reason"] as const,
+  registers: [registry],
+});
+
 /** HTTP request duration histogram */
 export const httpRequestDuration = new Histogram({
   name: "coordinator_http_request_duration_seconds",

@@ -137,6 +137,27 @@ Indexes: `idx_audit_log_order_id (order_id, id ASC) WHERE order_id IS NOT NULL`,
 issues `UPDATE audit_log` or `DELETE FROM audit_log` violates the contract —
 flag it in review.
 
+### `soroban_checkpoints`
+
+Durable checkpoint for the Soroban event listener's replay-recovery subsystem
+(`coordinator/src/listeners/soroban-listener.ts`). Lets ingestion resume from
+the last safe ledger after a restart, redeploy, or temporary RPC inconsistency
+without reprocessing from scratch or skipping a missed range. Added by
+`010_soroban_checkpoints.sql`. The DB remains a cache — a lost checkpoint only
+costs a wider reconciler backfill, never correctness.
+
+| Column | Type (SQLite / Postgres) | Nullable | Notes |
+|---|---|---|---|
+| `contract_id` | `TEXT` | no | `PRIMARY KEY`. Keyed per HTLC contract, so re-pointing the coordinator at a new contract starts from a clean checkpoint. |
+| `last_safe_ledger` | `INTEGER` / `BIGINT` | no | Highest ledger fully processed; the safe resume point. **Advances forward only** — a stale-cursor reset or replay never rewinds it. Default `0`. |
+| `effective_cursor` | `TEXT` | yes | Opaque Soroban RPC pagination cursor, or `NULL` after a reset / fresh start. |
+| `recovery_marker` | `TEXT` | no | `CHECK IN ('clean','pending_replay','recovering')`, default `'clean'`. Drives replay on the next poll/restart; `'recovering'` is crash-safe (a mid-replay crash re-runs on next start). |
+| `updated_at` | `INTEGER` | no | Unix seconds; DB-assigned default. |
+
+The forward-only invariant on `last_safe_ledger` is enforced in SQL (a portable
+`CASE` in the upsert), so a late or out-of-order write can never regress the
+resume point.
+
 ---
 
 ## Cross-cutting rules

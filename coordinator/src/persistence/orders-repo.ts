@@ -32,6 +32,37 @@ export type OrderStatus =
 export type Chain = "ethereum" | "stellar" | "solana";
 export type Direction = "eth_to_xlm" | "xlm_to_eth" | "eth_to_sol" | "sol_to_eth";
 
+/**
+ * Ingestion-health flag for the durable Soroban listener checkpoint.
+ *
+ *  - `clean`          steady state; the listener can resume straight from the
+ *                     persisted cursor.
+ *  - `pending_replay` a gap / stale cursor / restart was observed; a bounded
+ *                     replay of the missed ledger range is owed before the
+ *                     listener returns to the live event stream.
+ *  - `recovering`     a bounded replay is currently in progress.  If the
+ *                     process dies mid-replay the marker stays here so the
+ *                     next start re-runs the replay (crash-safe recovery).
+ */
+export type SorobanRecoveryMarker = "clean" | "pending_replay" | "recovering";
+
+/**
+ * A durable checkpoint for the Soroban event listener.  See
+ * migrations/010_soroban_checkpoints.sql for the storage contract.
+ */
+export interface SorobanCheckpoint {
+  /** Soroban HTLC contract this checkpoint belongs to. */
+  contractId: string;
+  /** Highest ledger sequence fully processed; safe resume point. */
+  lastSafeLedger: number;
+  /** Opaque Soroban RPC pagination cursor, or null after a reset/fresh start. */
+  effectiveCursor: string | null;
+  /** Ingestion-health flag used to drive replay/recovery. */
+  recoveryMarker: SorobanRecoveryMarker;
+  /** Unix timestamp (seconds) of the last checkpoint write. */
+  updatedAt: number;
+}
+
 export interface OrderRow {
   id: number;
   publicId: string;
@@ -788,6 +819,109 @@ export class OrdersRepository {
       `),
       chain, position
     );
+  }
+
+  // ── Soroban listener checkpoints ──────────────────────────────────────────
+  //
+  // These three methods are the durable persistence adapter for the Soroban
+  // event listener's checkpoint/replay-recovery subsystem.  The listener owns
+  // the semantics (when to resume, when to replay); this adapter only owns
+  // storage and the forward-only invariant on `last_safe_ledger`.
+
+  /**
+   * Load the durable checkpoint for `contractId`, or `null` when the listener
+   * has never checkpointed this contract (fresh install, or the coordinator
+   * was re-pointed at a different HTLC contract).
+   */
+  async getSorobanCheckpoint(contractId: string): Promise<SorobanCheckpoint | null> {
+    const row = await this.get<{
+      contract_id: string;
+      last_safe_ledger: number;
+      effective_cursor: string | null;
+      recovery_marker: SorobanRecoveryMarker;
+      updated_at: number;
+    }>(
+      this.db.prepare(
+        `SELECT contract_id, last_safe_ledger, effective_cursor, recovery_marker, updated_at
+           FROM soroban_checkpoints
+          WHERE contract_id = ?`
+      ),
+      contractId
+    );
+    if (!row) return null;
+    return {
+      contractId: row.contract_id,
+      lastSafeLedger: Number(row.last_safe_ledger),
+      effectiveCursor: row.effective_cursor,
+      recoveryMarker: row.recovery_marker,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  /**
+   * Persist (upsert) the Soroban listener checkpoint.
+   *
+   * `last_safe_ledger` only ever moves forward: a stale-cursor reset or a
+   * replay that re-observes older ledgers must never rewind the safe resume
+   * point.  The forward-only clamp is enforced in SQL (portable across SQLite
+   * and Postgres) so concurrent writers can never regress it either.  The
+   * cursor and recovery marker always take the incoming value.
+   */
+  async saveSorobanCheckpoint(input: {
+    contractId: string;
+    lastSafeLedger: number;
+    effectiveCursor: string | null;
+    recoveryMarker: SorobanRecoveryMarker;
+  }): Promise<void> {
+    await this.run(
+      this.db.prepare(`
+        INSERT INTO soroban_checkpoints
+            (contract_id, last_safe_ledger, effective_cursor, recovery_marker, updated_at)
+        VALUES
+            (:contractId, :lastSafeLedger, :effectiveCursor, :recoveryMarker,
+             CAST(strftime('%s','now') AS INTEGER))
+        ON CONFLICT(contract_id) DO UPDATE SET
+          last_safe_ledger = CASE
+              WHEN excluded.last_safe_ledger > soroban_checkpoints.last_safe_ledger
+                THEN excluded.last_safe_ledger
+              ELSE soroban_checkpoints.last_safe_ledger
+            END,
+          effective_cursor = excluded.effective_cursor,
+          recovery_marker  = excluded.recovery_marker,
+          updated_at       = excluded.updated_at
+      `),
+      {
+        contractId: input.contractId,
+        lastSafeLedger: input.lastSafeLedger,
+        effectiveCursor: input.effectiveCursor,
+        recoveryMarker: input.recoveryMarker,
+      }
+    );
+  }
+
+  /**
+   * Flip only the recovery marker for an existing checkpoint, leaving the
+   * ledger and cursor untouched.  Used to record that a gap / stale cursor /
+   * restart was observed (`pending_replay`) or that a bounded replay has begun
+   * (`recovering`) without disturbing the safe resume point.
+   *
+   * Returns the number of rows changed — 0 when no checkpoint exists yet for
+   * `contractId`, in which case there is nothing to recover from.
+   */
+  async markSorobanRecovery(
+    contractId: string,
+    marker: SorobanRecoveryMarker
+  ): Promise<number> {
+    const result = await this.run(
+      this.db.prepare(`
+        UPDATE soroban_checkpoints
+           SET recovery_marker = :marker,
+               updated_at      = CAST(strftime('%s','now') AS INTEGER)
+         WHERE contract_id = :contractId
+      `),
+      { contractId, marker }
+    );
+    return result.changes;
   }
 
   /**

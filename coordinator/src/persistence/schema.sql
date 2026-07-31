@@ -144,3 +144,22 @@ CREATE TABLE IF NOT EXISTS chain_cursors (
     updated_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
 
+-- ── Soroban listener checkpoints ──────────────────────────────────────────────
+-- Durable checkpoint for the Soroban event listener so ingestion can resume
+-- safely after a restart, redeploy, or temporary RPC inconsistency without
+-- reprocessing from scratch or skipping a missed ledger range.
+-- See migrations/010_soroban_checkpoints.sql for the full column contract.
+--   contract_id       the Soroban HTLC contract the checkpoint belongs to.
+--   last_safe_ledger  highest fully-processed ledger; advances forward only.
+--   effective_cursor  opaque Soroban RPC pagination cursor, or NULL after a reset.
+--   recovery_marker   'clean' | 'pending_replay' | 'recovering' — drives replay.
+--   updated_at        unix timestamp (seconds) of the last checkpoint write.
+CREATE TABLE IF NOT EXISTS soroban_checkpoints (
+    contract_id      TEXT    PRIMARY KEY,
+    last_safe_ledger INTEGER NOT NULL DEFAULT 0,
+    effective_cursor TEXT,
+    recovery_marker  TEXT    NOT NULL DEFAULT 'clean'
+                     CHECK (recovery_marker IN ('clean', 'pending_replay', 'recovering')),
+    updated_at       INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+

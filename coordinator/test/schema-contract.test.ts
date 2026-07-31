@@ -195,3 +195,43 @@ describe("schema.sql shape vs. schema-contract.md — order_events, resolver_hea
     expect(fks[0].table).toBe("orders");
   });
 });
+
+describe("schema.sql shape vs. schema-contract.md — soroban_checkpoints", () => {
+  it("has the documented columns", async () => {
+    const db = await freshDb();
+    const cols = (db as any)
+      .prepare("PRAGMA table_info(soroban_checkpoints)")
+      .all()
+      .map((c: any) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        "contract_id",
+        "last_safe_ledger",
+        "effective_cursor",
+        "recovery_marker",
+        "updated_at",
+      ])
+    );
+  });
+
+  it("uses contract_id as the primary key", async () => {
+    const db = await freshDb();
+    const pk = (db as any)
+      .prepare("PRAGMA table_info(soroban_checkpoints)")
+      .all()
+      .filter((c: any) => c.pk > 0)
+      .map((c: any) => c.name);
+    expect(pk).toEqual(["contract_id"]);
+  });
+
+  it("rejects a recovery_marker outside the documented CHECK set", async () => {
+    const db = await freshDb();
+    expect(() =>
+      (db as any)
+        .prepare(
+          "INSERT INTO soroban_checkpoints (contract_id, last_safe_ledger, recovery_marker) VALUES ('C', 1, 'bogus')"
+        )
+        .run()
+    ).toThrow();
+  });
+});
