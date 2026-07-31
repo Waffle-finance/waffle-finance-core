@@ -1,0 +1,72 @@
+name: Soroban Contracts
+
+# Runs the Soroban contract test target — unit tests, the adversarial
+# state-machine harness (harness.rs), and the property-based fuzz suites
+# (prop_tests.rs + governance_props.rs) — on every push to main and every PR
+# that touches the contracts. A failing property sequence is shrunk by proptest
+# and its minimal reproduction is persisted under each contract's
+# `proptest-regressions/` directory, so CI fails loudly with a replayable case.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "soroban/**"
+      - ".github/workflows/soroban-contracts.yml"
+  pull_request:
+    paths:
+      - "soroban/**"
+      - ".github/workflows/soroban-contracts.yml"
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: soroban-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (htlc + resolver-registry)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: soroban
+    env:
+      # Deterministic, meaningful case count for the property suites. proptest
+      # reads PROPTEST_CASES and overrides the per-test default, so CI explores
+      # more sequences than a local `cargo test` while staying reproducible.
+      PROPTEST_CASES: "256"
+      # Surface a full backtrace and the failing seed on any harness panic.
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            soroban/target
+          key: soroban-cargo-${{ runner.os }}-${{ hashFiles('soroban/Cargo.lock') }}
+          restore-keys: |
+            soroban-cargo-${{ runner.os }}-
+
+      - name: Build tests
+        run: cargo test --workspace --no-run --locked
+
+      - name: Run contract tests (unit + harness + property fuzz)
+        run: cargo test --workspace --locked -- --nocapture
+
+      # If a property test failed, proptest wrote a minimal reproduction file.
+      # Print any regression seeds so the failing case is visible directly in
+      # the CI log and can be replayed locally with the same `cargo test`.
+      - name: Show proptest regression seeds on failure
+        if: failure()
+        run: |
+          echo "::group::proptest regression seeds"
+          find contracts -path '*/proptest-regressions/*.txt' -print -exec cat {} + || true
+          echo "::endgroup::"
+          echo "Replay a state-machine harness failure with: HARNESS_SEED=<seed> cargo test -p wafflefinance-htlc harness -- --nocapture"
