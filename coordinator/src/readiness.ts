@@ -1,16 +1,16 @@
-import type { CoordinatorConfig } from "./config.js";
-import type { Database } from "./persistence/db.js";
-import type { ReconciliationStatus } from "./reconciliation/reconciler.js";
-import type { CacheVerificationStatus } from "./reconciliation/cache-verifier.js";
-import type { ReadinessCheck } from "./server/routes/health.js";
-import { isSolanaPlaceholder } from "./config.js";
+import type { CoordinatorConfig } from './config.js';
+import type { Database } from './persistence/db.js';
+import type { ReconciliationStatus } from './reconciliation/reconciler.js';
+import type { CacheVerificationStatus } from './reconciliation/cache-verifier.js';
+import type { ReadinessCheck } from './server/routes/health.js';
+import { isSolanaPlaceholder } from './config.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type FetchLike = (
   url: string,
   init: {
-    method: "POST";
+    method: 'POST';
     headers: Record<string, string>;
     body: string;
     signal?: AbortSignal;
@@ -34,7 +34,7 @@ type FetchLike = (
  * - `degraded`       — one or more dependency checks are failing after the
  *                      coordinator was previously ready.
  */
-export type StartupPhase = "starting" | "pending" | "ready" | "degraded";
+export type StartupPhase = 'starting' | 'pending' | 'ready' | 'degraded';
 
 export interface ReadinessDeps {
   cfg: CoordinatorConfig;
@@ -72,15 +72,15 @@ async function timedCheck(name: string, probe: () => Promise<void>): Promise<Rea
     return {
       name,
       ok: false,
-      detail: "unavailable",
+      detail: 'unavailable',
       latencyMs: Date.now() - startedAt,
     };
   }
 }
 
 async function probeDatabase(db: Database): Promise<void> {
-  const stmt = db.prepare("SELECT 1 AS ok");
-  if ("getAsync" in stmt && typeof stmt.getAsync === "function") {
+  const stmt = db.prepare('SELECT 1 AS ok');
+  if ('getAsync' in stmt && typeof stmt.getAsync === 'function') {
     await stmt.getAsync();
     return;
   }
@@ -98,19 +98,19 @@ async function probeJsonRpc(
 
   try {
     const response = await fetcher(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method }),
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      throw new Error("rpc_http_error");
+      throw new Error('rpc_http_error');
     }
 
     const body = (await response.json()) as { error?: unknown };
     if (body?.error) {
-      throw new Error("rpc_error");
+      throw new Error('rpc_error');
     }
   } finally {
     clearTimeout(timeout);
@@ -119,12 +119,12 @@ async function probeJsonRpc(
 
 function reconciliationCheck(status: ReconciliationStatus): ReadinessCheck {
   if (status.lastRunOk === false) {
-    return { name: "reconciliation", ok: false, detail: "last_run_failed" };
+    return { name: 'reconciliation', ok: false, detail: 'last_run_failed' };
   }
   return {
-    name: "reconciliation",
+    name: 'reconciliation',
     ok: true,
-    detail: status.lastRunAt ? "last_run_ok" : "not_run_yet",
+    detail: status.lastRunAt ? 'last_run_ok' : 'not_run_yet',
   };
 }
 
@@ -140,19 +140,19 @@ function reconciliationCheck(status: ReconciliationStatus): ReadinessCheck {
  */
 function cacheAlignmentCheck(status: CacheVerificationStatus): ReadinessCheck {
   if (status.lastRunAt === null) {
-    return { name: "cache_alignment", ok: true, detail: "not_run_yet" };
+    return { name: 'cache_alignment', ok: true, detail: 'not_run_yet' };
   }
   if (status.lastRunOk === false) {
-    return { name: "cache_alignment", ok: false, detail: "verifier_error" };
+    return { name: 'cache_alignment', ok: false, detail: 'verifier_error' };
   }
   if (status.mismatches.length > 0) {
     return {
-      name: "cache_alignment",
+      name: 'cache_alignment',
       ok: false,
       detail: `mismatches_detected:${status.mismatches.length}`,
     };
   }
-  return { name: "cache_alignment", ok: true, detail: "aligned" };
+  return { name: 'cache_alignment', ok: true, detail: 'aligned' };
 }
 
 /**
@@ -172,20 +172,18 @@ export function deriveStartupPhase(
   checks: ReadinessCheck[],
   externalPhase?: StartupPhase
 ): StartupPhase {
-  if (externalPhase === "starting") return "starting";
+  if (externalPhase === 'starting') return 'starting';
 
-  const db = checks.find((c) => c.name === "database");
-  if (db && !db.ok) return "degraded";
+  const db = checks.find(c => c.name === 'database');
+  if (db && !db.ok) return 'degraded';
 
-  const anyFailed = checks.some(
-    (c) => !c.ok && c.name !== "startup_phase"
-  );
-  if (anyFailed) return "degraded";
+  const anyFailed = checks.some(c => !c.ok && c.name !== 'startup_phase');
+  if (anyFailed) return 'degraded';
 
-  const reconciliation = checks.find((c) => c.name === "reconciliation");
-  if (reconciliation?.detail === "not_run_yet") return "pending";
+  const reconciliation = checks.find(c => c.name === 'reconciliation');
+  if (reconciliation?.detail === 'not_run_yet') return 'pending';
 
-  return "ready";
+  return 'ready';
 }
 
 // ── Public factory ────────────────────────────────────────────────────────────
@@ -223,18 +221,18 @@ export function createReadinessChecks({
     // as ok=true with detail="disabled_placeholder" so it is visible in
     // health payloads without polluting the pass/fail count.
     const solanaCheck: ReadinessCheck = isSolanaPlaceholder(cfg.solana.programId)
-      ? { name: "solana_rpc", ok: true, detail: "disabled_placeholder" }
-      : await timedCheck("solana_rpc", () =>
-          probeJsonRpc(fetcher, cfg.solana.rpcUrl, "getHealth", timeoutMs)
+      ? { name: 'solana_rpc', ok: true, detail: 'disabled_placeholder' }
+      : await timedCheck('solana_rpc', () =>
+          probeJsonRpc(fetcher, cfg.solana.rpcUrl, 'getHealth', timeoutMs)
         );
 
     const checks: ReadinessCheck[] = [
-      await timedCheck("database", () => probeDatabase(db)),
-      await timedCheck("ethereum_rpc", () =>
-        probeJsonRpc(fetcher, cfg.ethereum.rpcUrl, "eth_blockNumber", timeoutMs)
+      await timedCheck('database', () => probeDatabase(db)),
+      await timedCheck('ethereum_rpc', () =>
+        probeJsonRpc(fetcher, cfg.ethereum.rpcUrl, 'eth_blockNumber', timeoutMs)
       ),
-      await timedCheck("soroban_rpc", () =>
-        probeJsonRpc(fetcher, cfg.soroban.rpcUrl, "getHealth", timeoutMs)
+      await timedCheck('soroban_rpc', () =>
+        probeJsonRpc(fetcher, cfg.soroban.rpcUrl, 'getHealth', timeoutMs)
       ),
       solanaCheck,
       reconciliationCheck(getReconciliationStatus()),
@@ -252,17 +250,17 @@ export function createReadinessChecks({
     if (getStartupPhase) {
       const phase = getStartupPhase();
 
-      if (phase === "starting") {
+      if (phase === 'starting') {
         checks.unshift({
-          name: "startup_phase",
+          name: 'startup_phase',
           ok: false,
-          detail: "starting",
+          detail: 'starting',
         });
-      } else if (phase === "pending") {
+      } else if (phase === 'pending') {
         checks.unshift({
-          name: "startup_phase",
+          name: 'startup_phase',
           ok: true,
-          detail: "pending",
+          detail: 'pending',
         });
       }
       // "ready" / "degraded" — no synthetic check; the real checks speak for themselves.

@@ -1,33 +1,35 @@
-import { loadConfig, logSolanaStatus } from "./config.js";
-import { getLogger } from "./logger.js";
-import { openDatabase } from "./persistence/db.js";
-import { OrdersRepository } from "./persistence/orders-repo.js";
-import { OrderService } from "./services/order-service.js";
-import { QuoteService } from "./services/quote-service.js";
-import { SecretService } from "./services/secret-service.js";
-import { createApp } from "./server/app.js";
-import { EthereumListener } from "./listeners/ethereum-listener.js";
-import { SorobanListener } from "./listeners/soroban-listener.js";
-import { SolanaListener } from "./listeners/solana-listener.js";
-import { Reconciler } from "./reconciliation/reconciler.js";
-import { CacheVerifier } from "./reconciliation/cache-verifier.js";
-import { StaleCleanupService } from "./services/stale-cleanup.js";
-import { ArchivalPolicy } from "./archival/archival-policy.js";
-import { BacklogScheduler, Priority } from "./backlog/backlog-scheduler.js";
-import { MaintenanceScheduler } from "./services/maintenance-scheduler.js";
-import { createReadinessChecks } from "./readiness.js";
-import type { StartupPhase } from "./readiness.js";
-import { retryAsync } from "./retry.js";
+import { loadConfig, logSolanaStatus } from './config.js';
+import { getLogger } from './logger.js';
+import { openDatabase } from './persistence/db.js';
+import { OrdersRepository } from './persistence/orders-repo.js';
+import { OrderService } from './services/order-service.js';
+import { QuoteService } from './services/quote-service.js';
+import { SecretService } from './services/secret-service.js';
+import { createApp } from './server/app.js';
+import { EthereumListener } from './listeners/ethereum-listener.js';
+import { SorobanListener } from './listeners/soroban-listener.js';
+import { SolanaListener } from './listeners/solana-listener.js';
+import { Reconciler } from './reconciliation/reconciler.js';
+import { CacheVerifier } from './reconciliation/cache-verifier.js';
+import { StaleCleanupService } from './services/stale-cleanup.js';
+import { ArchivalPolicy } from './archival/archival-policy.js';
+import { BacklogScheduler, Priority } from './backlog/backlog-scheduler.js';
+import { MaintenanceScheduler } from './services/maintenance-scheduler.js';
+import { createReadinessChecks } from './readiness.js';
+import type { StartupPhase } from './readiness.js';
+import { deriveRuntimeFallbackPolicy, evaluateDependencyHealth } from './degraded-mode.js';
+import { retryAsync } from './retry.js';
 import {
   solanaPlaceholderMode,
   expiryScanRuns,
   ordersExpiredTotal,
   expiryScanLastRun,
-} from "./metrics.js";
-import type { CoordinatorConfig } from "./config.js";
-import { AuditRepository } from "./audit/audit-repo.js";
-import { buildSystemAuditEntry } from "./audit/audit-log.js";
-import { PressureController } from "./services/pressure-controller.js";
+  coordinatorDependencyHealth,
+} from './metrics.js';
+import type { CoordinatorConfig } from './config.js';
+import { AuditRepository } from './audit/audit-repo.js';
+import { buildSystemAuditEntry } from './audit/audit-log.js';
+import { PressureController } from './services/pressure-controller.js';
 
 // ── Startup dependency probes ────────────────────────────────────────────────
 
@@ -48,13 +50,13 @@ async function probeRpcEndpoints(
   const fetcher: FetchLike = globalThis.fetch;
 
   const probes: Array<{ name: string; url: string; method: string }> = [
-    { name: "ethereum_rpc", url: cfg.ethereum.rpcUrl, method: "eth_blockNumber" },
-    { name: "soroban_rpc",  url: cfg.soroban.rpcUrl,  method: "getHealth"       },
+    { name: 'ethereum_rpc', url: cfg.ethereum.rpcUrl, method: 'eth_blockNumber' },
+    { name: 'soroban_rpc', url: cfg.soroban.rpcUrl, method: 'getHealth' },
   ];
 
   // Only probe the Solana RPC when the program id is a real address.
-  if (!cfg.solana.programId.startsWith("PLACEHOLDER")) {
-    probes.push({ name: "solana_rpc", url: cfg.solana.rpcUrl, method: "getHealth" });
+  if (!cfg.solana.programId.startsWith('PLACEHOLDER')) {
+    probes.push({ name: 'solana_rpc', url: cfg.solana.rpcUrl, method: 'getHealth' });
   }
 
   const errors: string[] = [];
@@ -64,9 +66,9 @@ async function probeRpcEndpoints(
       const timer = setTimeout(() => controller.abort(), 5_000);
       try {
         const res = await fetcher(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method }),
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method }),
           signal: controller.signal,
         });
         if (!res.ok) {
@@ -81,10 +83,10 @@ async function probeRpcEndpoints(
   );
 
   if (errors.length > 0) {
-    throw new Error(`RPC probe failed — ${errors.join("; ")}`);
+    throw new Error(`RPC probe failed — ${errors.join('; ')}`);
   }
 
-  log.info("all RPC endpoints reachable");
+  log.info('all RPC endpoints reachable');
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -100,31 +102,31 @@ async function main(): Promise<void> {
     cfg = loadConfig();
   } catch (err) {
     console.error(
-      "[coordinator] FATAL: configuration is invalid — cannot start.",
+      '[coordinator] FATAL: configuration is invalid — cannot start.',
       err instanceof Error ? err.message : err
     );
     process.exit(1);
   }
 
   const log = getLogger(cfg.logLevel);
-  log.info({ network: cfg.network, port: cfg.port }, "WaffleFinance coordinator starting");
+  log.info({ network: cfg.network, port: cfg.port }, 'WaffleFinance coordinator starting');
 
   // ── 2. Solana placeholder check ──────────────────────────────────────────
   const solanaStatus = logSolanaStatus(cfg.solana.programId);
-  solanaPlaceholderMode.set(solanaStatus === "placeholder" ? 1 : 0);
-  if (solanaStatus === "placeholder") {
+  solanaPlaceholderMode.set(solanaStatus === 'placeholder' ? 1 : 0);
+  if (solanaStatus === 'placeholder') {
     log.warn(
       { programId: cfg.solana.programId },
-      "Solana HTLC program is a placeholder — Solana listener and settlement flows are DISABLED"
+      'Solana HTLC program is a placeholder — Solana listener and settlement flows are DISABLED'
     );
   } else {
-    log.info({ programId: cfg.solana.programId }, "Solana HTLC program configured");
+    log.info({ programId: cfg.solana.programId }, 'Solana HTLC program configured');
   }
 
   // ── 3. Database connection (TRANSIENT retry, FATAL on schema mismatch) ──
   log.info(
     { maxAttempts: 10, baseDelayMs: 1_000 },
-    "connecting to database (will retry on transient failures)"
+    'connecting to database (will retry on transient failures)'
   );
 
   const db = await retryAsync(() => openDatabase(cfg.databaseUrl), {
@@ -132,13 +134,13 @@ async function main(): Promise<void> {
     baseDelayMs: 1_000,
     maxDelayMs: 30_000,
     jitterMs: 300,
-    shouldRetry: (err) => {
+    shouldRetry: err => {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("Schema validation failed")) return false;
-      if (msg.includes("Database schema is behind")) return false;
-      if (msg.includes("Database schema is ahead")) return false;
-      if (msg.includes("Schema version mismatch")) return false;
-      if (msg.includes("Migration history is out of order")) return false;
+      if (msg.includes('Schema validation failed')) return false;
+      if (msg.includes('Database schema is behind')) return false;
+      if (msg.includes('Database schema is ahead')) return false;
+      if (msg.includes('Schema version mismatch')) return false;
+      if (msg.includes('Migration history is out of order')) return false;
       return true;
     },
     onRetry: ({ attempt, maxAttempts, delayMs, err }) => {
@@ -149,34 +151,31 @@ async function main(): Promise<void> {
           delayMs,
           err: err instanceof Error ? err.message : String(err),
         },
-        "database connection attempt failed — retrying (transient)"
+        'database connection attempt failed — retrying (transient)'
       );
     },
   }).catch((err): never => {
     const msg = err instanceof Error ? err.message : String(err);
     if (
-      msg.includes("Schema validation failed") ||
-      msg.includes("Database schema is") ||
-      msg.includes("Schema version mismatch") ||
-      msg.includes("Migration history is out of order")
+      msg.includes('Schema validation failed') ||
+      msg.includes('Database schema is') ||
+      msg.includes('Schema version mismatch') ||
+      msg.includes('Migration history is out of order')
     ) {
       log.error(
         { err },
-        "FATAL: database schema mismatch — run migrations before starting the coordinator"
+        'FATAL: database schema mismatch — run migrations before starting the coordinator'
       );
     } else {
-      log.error(
-        { err },
-        "FATAL: could not connect to database after all retry attempts"
-      );
+      log.error({ err }, 'FATAL: could not connect to database after all retry attempts');
     }
     process.exit(1);
   });
 
-  log.info("database ready");
+  log.info('database ready');
 
   // ── 4. RPC endpoint health probe (TRANSIENT retry) ─────────────────────
-  log.info("probing chain RPC endpoints (will retry on transient failures)");
+  log.info('probing chain RPC endpoints (will retry on transient failures)');
 
   await retryAsync(() => probeRpcEndpoints(cfg, log), {
     maxAttempts: 8,
@@ -191,18 +190,18 @@ async function main(): Promise<void> {
           delayMs,
           err: err instanceof Error ? err.message : String(err),
         },
-        "RPC probe failed — coordinator is PENDING (waiting for dependencies)"
+        'RPC probe failed — coordinator is PENDING (waiting for dependencies)'
       );
     },
-  }).catch((err) => {
+  }).catch(err => {
     log.warn(
       { err: err instanceof Error ? err.message : String(err) },
-      "RPC probe exhausted retries — starting listeners anyway; readiness will reflect degraded state"
+      'RPC probe exhausted retries — starting listeners anyway; readiness will reflect degraded state'
     );
   });
 
   // ── 5. Wire up services ─────────────────────────────────────────────────
-  let startupPhase: StartupPhase = "starting";
+  let startupPhase: StartupPhase = 'starting';
 
   const repo = new OrdersRepository(db);
   const auditRepo = new AuditRepository(db);
@@ -210,9 +209,15 @@ async function main(): Promise<void> {
   const secrets = new SecretService(orders, log, cfg.secretStorageKey ?? undefined);
   const quotes = new QuoteService(log);
 
-  auditRepo.append(buildSystemAuditEntry("system.startup", "coordinator started", {
-    serviceVersion: process.env.npm_package_version ?? null,
-  })).catch(() => { /* non-fatal */ });
+  auditRepo
+    .append(
+      buildSystemAuditEntry('system.startup', 'coordinator started', {
+        serviceVersion: process.env.npm_package_version ?? null,
+      })
+    )
+    .catch(() => {
+      /* non-fatal */
+    });
 
   const reconciler = new Reconciler(cfg, orders, log);
   const cacheVerifier = new CacheVerifier(cfg, repo, log);
@@ -243,25 +248,25 @@ async function main(): Promise<void> {
   const maintenance = new MaintenanceScheduler(backlog, log, cfg.pollIntervalMs);
 
   maintenance.register({
-    name: "expiry_scan",
+    name: 'expiry_scan',
     cadenceMultiplier: 4,
     priority: Priority.REPLAY_JOB,
     execute: async () => {
       const expiredCount = await orders.expireStaleOrders();
       // Keep the pre-existing per-scan metrics so dashboards that already
       // depend on coordinator_expiry_scan_runs_total continue to work.
-      expiryScanRuns.inc({ result: "success" });
+      expiryScanRuns.inc({ result: 'success' });
       ordersExpiredTotal.inc(expiredCount);
       expiryScanLastRun.set(Math.floor(Date.now() / 1000));
       if (expiredCount > 0) {
-        log.info({ expiredCount }, "expiry_scan: marked orders expired by timelock");
+        log.info({ expiredCount }, 'expiry_scan: marked orders expired by timelock');
       }
       return { expiredCount };
     },
   });
 
   maintenance.register({
-    name: "stale_cleanup",
+    name: 'stale_cleanup',
     cadenceMultiplier: 240,
     priority: Priority.STALE_CLEANUP,
     execute: async () => {
@@ -271,7 +276,7 @@ async function main(): Promise<void> {
   });
 
   maintenance.register({
-    name: "archival_policy",
+    name: 'archival_policy',
     cadenceMultiplier: 240,
     priority: Priority.STALE_CLEANUP,
     execute: async () => {
@@ -282,8 +287,8 @@ async function main(): Promise<void> {
 
   // Admin-facing expiry trigger — wraps the maintenance job so the admin
   // route and the scheduler both go through the same metric + skip path.
-  const runExpiry = async (): Promise<{ expiredCount: number }> => {
-    const result = await maintenance.runJob("expiry_scan");
+  const runExpiryTrigger = async (): Promise<{ expiredCount: number }> => {
+    const result = await maintenance.runJob('expiry_scan');
     // On skip, report 0 expired (the previous run is still in flight).
     const expiredCount = (result.detail?.expiredCount as number | undefined) ?? 0;
     return { expiredCount };
@@ -309,12 +314,41 @@ async function main(): Promise<void> {
       return reconciler.getStatus();
     },
     runStaleCleanup: () => staleCleanup.run(),
-    runExpiry,
+    runExpiry: runExpiryTrigger,
   });
 
   const server = app.listen(cfg.port, () => {
-    log.info({ port: cfg.port }, "HTTP server listening");
+    log.info({ port: cfg.port }, 'HTTP server listening');
   });
+
+  const updateDependencyHealthMetric = (checks: Array<{ name: string; ok: boolean }>) => {
+    const report = evaluateDependencyHealth(checks);
+    coordinatorDependencyHealth.reset();
+    coordinatorDependencyHealth.set({ mode: report.overall }, 1);
+  };
+
+  const readiness = createReadinessChecks({
+    cfg,
+    db,
+    getReconciliationStatus: () => reconciler.getStatus(),
+    getStartupPhase: () => startupPhase,
+    getCacheVerificationStatus: () => cacheVerifier.getStatus(),
+  });
+
+  const initialReadinessChecks = await readiness();
+  updateDependencyHealthMetric(initialReadinessChecks);
+  const fallbackPolicy = deriveRuntimeFallbackPolicy(initialReadinessChecks);
+
+  if (fallbackPolicy.mode !== 'healthy') {
+    log.warn(
+      {
+        mode: fallbackPolicy.mode,
+        disabledListeners: fallbackPolicy.disabledListeners,
+        reasons: fallbackPolicy.reasons,
+      },
+      'coordinator entering degraded mode; reducing listener activity'
+    );
+  }
 
   // ── 6. Background intervals ─────────────────────────────────────────────
   //
@@ -329,7 +363,7 @@ async function main(): Promise<void> {
   const applyPressurePolicy = () => {
     const pressure = backlog.getTotalDepth();
     pressureController.observe({
-      kind: "reconciliation",
+      kind: 'reconciliation',
       queueDepth: pressure,
       lag: Math.max(0, (cfg.pollIntervalMs ?? 15000) - 15000),
       failureRate: 0.05,
@@ -340,23 +374,31 @@ async function main(): Promise<void> {
   // stale-cleanup work but yields to any live events the listeners enqueue.
   applyPressurePolicy();
   void backlog.enqueue({
-    name: "reconciler:startup",
+    name: 'reconciler:startup',
     priority: Priority.REPLAY_JOB,
     execute: async () => {
       await reconciler.run();
-      startupPhase = "ready";
-      log.info("first reconciliation complete — coordinator is READY");
+      const report = evaluateDependencyHealth(await readiness());
+      startupPhase = report.overall === 'healthy' ? 'ready' : 'degraded';
+      if (report.overall === 'healthy') {
+        log.info('first reconciliation complete — coordinator is READY');
+      } else {
+        log.warn(
+          { mode: report.overall, degradedServices: report.degradedServices },
+          'first reconciliation complete — coordinator remains DEGRADED'
+        );
+      }
     },
   });
-  void backlog.run().catch((err) => {
-    log.warn({ err }, "first reconciliation run failed — staying in pending state");
+  void backlog.run().catch(err => {
+    log.warn({ err }, 'first reconciliation run failed — staying in pending state');
   });
 
   // Periodic reconciliation: every pollIntervalMs × 4 (default ~60 s)
   const reconcileInterval = setInterval(() => {
     applyPressurePolicy();
     backlog.enqueue({
-      name: "reconciler:periodic",
+      name: 'reconciler:periodic',
       priority: Priority.REPLAY_JOB,
       execute: () => reconciler.run(),
     });
@@ -367,11 +409,11 @@ async function main(): Promise<void> {
   const runExpiry = (): void => {
     applyPressurePolicy();
     backlog.enqueue({
-      name: "expiry-scan",
+      name: 'expiry-scan',
       priority: Priority.REPLAY_JOB,
       execute: async () => {
         const n = await orders.expireStaleOrders();
-        if (n > 0) log.info({ count: n }, "expired stale orders by timelock");
+        if (n > 0) log.info({ count: n }, 'expired stale orders by timelock');
       },
     });
     void backlog.run();
@@ -385,12 +427,12 @@ async function main(): Promise<void> {
   const runStaleCleanup = (): void => {
     applyPressurePolicy();
     backlog.enqueue({
-      name: "stale-cleanup",
+      name: 'stale-cleanup',
       priority: Priority.STALE_CLEANUP,
       execute: () => staleCleanup.run().then(() => undefined),
     });
     backlog.enqueue({
-      name: "archival-policy",
+      name: 'archival-policy',
       priority: Priority.STALE_CLEANUP,
       execute: () => archivalPolicy.runArchival().then(() => undefined),
     });
@@ -403,7 +445,7 @@ async function main(): Promise<void> {
   // and low-cost — it only samples 50 active orders — so running it more
   // frequently than hourly would provide no additional safety margin.
   const runCacheVerify = (): void => {
-    cacheVerifier.run().catch((err) => log.warn({ err }, "cache verification failed"));
+    cacheVerifier.run().catch(err => log.warn({ err }, 'cache verification failed'));
   };
   // Run once shortly after startup so operators see an initial
   // `cache_alignment` status in the first /readyz response.
@@ -419,24 +461,44 @@ async function main(): Promise<void> {
   const ethListener = new EthereumListener(cfg, orders, log);
   const sorobanListener = new SorobanListener(cfg, orders, log);
   const solanaListener = new SolanaListener(cfg, orders, log);
-  ethListener.start();
-  sorobanListener.start();
-  solanaListener.start();
+
+  if (fallbackPolicy.enabledListeners.includes('ethereum')) {
+    ethListener.start();
+  } else {
+    log.warn({ chain: 'ethereum' }, 'Ethereum listener disabled by degraded-mode policy');
+  }
+
+  if (fallbackPolicy.enabledListeners.includes('soroban')) {
+    sorobanListener.start();
+  } else {
+    log.warn({ chain: 'soroban' }, 'Soroban listener disabled by degraded-mode policy');
+  }
+
+  if (fallbackPolicy.enabledListeners.includes('solana')) {
+    solanaListener.start();
+  } else {
+    log.warn({ chain: 'solana' }, 'Solana listener disabled by degraded-mode policy');
+  }
 
   // Transition to "pending" — dependencies are up, first reconciliation
   // not yet done.  The readiness endpoint will return HTTP 200 but with
   // detail="pending" so orchestration systems can distinguish "warming up"
   // from "fully ready".
-  startupPhase = "pending";
+  startupPhase = fallbackPolicy.mode === 'healthy' ? 'pending' : 'degraded';
 
-  log.info({ mode: pressureController.getMode(), limits: pressureController.getLimits() }, "coordinator fully started — all listeners active");
+  log.info(
+    { mode: pressureController.getMode(), limits: pressureController.getLimits() },
+    'coordinator fully started — all listeners active'
+  );
 
   // ── 8. Graceful shutdown ────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
-    log.info({ signal }, "shutting down");
+    log.info({ signal }, 'shutting down');
     auditRepo
-      .append(buildSystemAuditEntry("system.shutdown", `coordinator shutdown via ${signal}`))
-      .catch(() => { /* non-fatal */ });
+      .append(buildSystemAuditEntry('system.shutdown', `coordinator shutdown via ${signal}`))
+      .catch(() => {
+        /* non-fatal */
+      });
 
     // Stop the maintenance scheduler first so no new jobs are enqueued
     // after we begin draining.
@@ -448,18 +510,18 @@ async function main(): Promise<void> {
     sorobanListener.stop();
     solanaListener.stop();
     server.close(() => {
-      if ("close" in db) (db as any).close();
+      if ('close' in db) (db as any).close();
       process.exit(0);
     });
   };
 
-  process.on("SIGINT",  () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error(
-    "[coordinator] FATAL: unhandled startup error:",
+    '[coordinator] FATAL: unhandled startup error:',
     err instanceof Error ? err.message : err
   );
   process.exit(1);

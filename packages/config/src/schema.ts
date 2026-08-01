@@ -1,77 +1,90 @@
-import { z } from "zod";
-import { privateKeyToAccount } from "viem/accounts";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { z } from 'zod';
+import { privateKeyToAccount } from 'viem/accounts';
+import { Keypair, StrKey } from '@stellar/stellar-sdk';
 
 // Common Schemas
-export const networkModeSchema = z.enum(["testnet", "mainnet"]).default("testnet");
+export const networkModeSchema = z.enum(['testnet', 'mainnet']).default('testnet');
 export type NetworkMode = z.infer<typeof networkModeSchema>;
 
-export const logLevelSchema = z
-  .enum(["trace", "debug", "info", "warn", "error"])
-  .default("info");
+export const logLevelSchema = z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info');
 
 export const ethereumPrivateKeySchema = z
   .string()
-  .refine((val) => /^0x[0-9a-fA-F]{64}$/.test(val), {
-    message: "must be a 0x-prefixed 32-byte hex private key"
+  .refine(val => /^0x[0-9a-fA-F]{64}$/.test(val), {
+    message: 'must be a 0x-prefixed 32-byte hex private key',
   })
-  .refine((val) => {
-    try {
-      privateKeyToAccount(val as `0x${string}`);
-      return true;
-    } catch {
-      return false;
+  .refine(
+    val => {
+      try {
+        privateKeyToAccount(val as `0x${string}`);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    {
+      message: 'must be a usable secp256k1 private key',
     }
-  }, {
-    message: "must be a usable secp256k1 private key"
-  })
+  )
   .transform(v => v as `0x${string}`);
 
 export const stellarSecretSchema = z
   .string()
-  .refine((val) => StrKey.isValidEd25519SecretSeed(val), {
-    message: "must be a valid Stellar Ed25519 secret seed (expected an 'S...' StrKey)"
+  .refine(val => StrKey.isValidEd25519SecretSeed(val), {
+    message: "must be a valid Stellar Ed25519 secret seed (expected an 'S...' StrKey)",
   })
-  .refine((val) => {
-    try {
-      Keypair.fromSecret(val);
-      return true;
-    } catch {
-      return false;
+  .refine(
+    val => {
+      try {
+        Keypair.fromSecret(val);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    {
+      message: 'could not be parsed into a Stellar keypair',
     }
-  }, {
-    message: "could not be parsed into a Stellar keypair"
-  });
+  );
 
 export const evmAddressSchema = z
   .string()
-  .regex(/^0x[0-9a-fA-F]{40}$/, { message: "must be a 0x-prefixed 20-byte address" })
-  .transform((v) => v as `0x${string}`);
+  .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be a 0x-prefixed 20-byte address' })
+  .transform(v => v as `0x${string}`);
 
 export const optionalEvmAddressSchema = z
   .string()
   .optional()
-  .or(z.literal(""))
-  .transform((v) => (v && v.trim().length > 0 ? v.trim() : null))
-  .refine((v) => v === null || /^0x[0-9a-fA-F]{40}$/.test(v), {
-    message: "must be a 0x-prefixed 20-byte address"
+  .or(z.literal(''))
+  .transform(v => (v && v.trim().length > 0 ? v.trim() : null))
+  .refine(v => v === null || /^0x[0-9a-fA-F]{40}$/.test(v), {
+    message: 'must be a 0x-prefixed 20-byte address',
   })
-  .transform((v) => (v ? (v as `0x${string}`) : null));
+  .transform(v => (v ? (v as `0x${string}`) : null));
+
+// Shared feature flags schema (used by coordinator/relayer/resolver)
+export const featureFlagsSchema = z.object({
+  solanaSimulationMode: z.coerce.boolean().default(false),
+  sorobanEarlySupport: z.coerce.boolean().default(false),
+  experimentalUiRoutes: z.coerce.boolean().default(false),
+});
+
+export type FeatureFlags = z.infer<typeof featureFlagsSchema>;
 
 // Coordinator Configuration Schema
 export const coordinatorConfigSchema = z.object({
   network: networkModeSchema,
   port: z.coerce.number().int().positive().default(3001),
-  databaseUrl: z.string().default("file:./wafflefinance.db"),
+  databaseUrl: z.string().default('file:./wafflefinance.db'),
   logLevel: logLevelSchema,
-  corsOrigin: z.string().default("*"),
+  corsOrigin: z.string().default('*'),
   pollIntervalMs: z.coerce.number().int().positive().default(15000),
   secretStorageKey: z
     .string()
     .optional()
-    .transform((v) => (v && v.trim().length > 0 ? v.trim() : undefined)),
-  apiKeys: z.string().default(""),
-  trustedProxies: z.string().default(""),
+    .transform(v => (v && v.trim().length > 0 ? v.trim() : undefined)),
+  apiKeys: z.string().default(''),
+  trustedProxies: z.string().default(''),
   featureFlags: featureFlagsSchema.default({}),
   ethereum: z.object({
     rpcUrl: z.string().url(),
@@ -83,13 +96,22 @@ export const coordinatorConfigSchema = z.object({
     rpcUrl: z.string().url(),
     horizonUrl: z.string().url(),
     networkPassphrase: z.string(),
-    htlcContract: z.string().optional().transform((v) => v ?? null),
-    resolverRegistry: z.string().optional().transform((v) => v ?? null),
+    htlcContract: z
+      .string()
+      .optional()
+      .transform(v => v ?? null),
+    resolverRegistry: z
+      .string()
+      .optional()
+      .transform(v => v ?? null),
   }),
   solana: z.object({
     rpcUrl: z.string().url(),
-    programId: z.string().optional().transform((v) => v ?? "PLACEHOLDER"),
-    commitment: z.enum(["processed", "confirmed", "finalized"]).default("confirmed"),
+    programId: z
+      .string()
+      .optional()
+      .transform(v => v ?? 'PLACEHOLDER'),
+    commitment: z.enum(['processed', 'confirmed', 'finalized']).default('confirmed'),
   }),
 });
 
@@ -105,43 +127,46 @@ export const relayerConfigSchema = z.object({
   visitorTtlMs: z.coerce.number().int().positive().default(300000),
   retryAttempts: z.coerce.number().int().nonnegative().default(3),
   retryDelay: z.coerce.number().int().nonnegative().default(2000),
-  nodeEnv: z.string().default("development"),
+  nodeEnv: z.string().default('development'),
   enableMockMode: z.coerce.boolean().default(false),
   debug: z.coerce.boolean().default(false),
   featureFlags: featureFlagsSchema.default({}),
   resolverAllowlist: z
     .string()
     .optional()
-    .transform((v) => {
+    .transform(v => {
       if (!v) return [];
-      return v.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+      return v
+        .split(',')
+        .map(x => x.trim().toLowerCase())
+        .filter(Boolean);
     }),
   rpcTimeoutMs: z.coerce.number().int().positive().default(30000),
   ethereum: z.object({
-    network: z.string().default("mainnet"),
+    network: z.string().default('mainnet'),
     rpcUrl: z.string().url(),
-    fusionApiUrl: z.string().url().default("https://api.1inch.dev/fusion"),
-    fusionApiKey: z.string().default(""),
-    privateKey: z.string().default(""), // Loaded raw, validated separately at relayer level if needed
+    fusionApiUrl: z.string().url().default('https://api.1inch.dev/fusion'),
+    fusionApiKey: z.string().default(''),
+    privateKey: z.string().default(''), // Loaded raw, validated separately at relayer level if needed
     gasPrice: z.coerce.number().int().positive().default(20),
     gasLimit: z.coerce.number().int().positive().default(300000),
     startBlock: z.coerce.number().int().nonnegative().default(0),
     minConfirmations: z.coerce.number().int().positive().default(6),
   }),
   stellar: z.object({
-    network: z.string().default("testnet"),
+    network: z.string().default('testnet'),
     horizonUrl: z.string().url(),
     networkPassphrase: z.string(),
-    secretKey: z.string().default(""),
-    publicKey: z.string().default(""),
+    secretKey: z.string().default(''),
+    publicKey: z.string().default(''),
     startLedger: z.coerce.number().int().nonnegative().default(0),
     minConfirmations: z.coerce.number().int().positive().default(1),
   }),
   solana: z.object({
-    rpcUrl: z.string().url().default("https://api.devnet.solana.com"),
-    privateKey: z.string().default(""),
-    programId: z.string().default("PLACEHOLDER"),
-    commitment: z.enum(["processed", "confirmed", "finalized"]).default("confirmed"),
+    rpcUrl: z.string().url().default('https://api.devnet.solana.com'),
+    privateKey: z.string().default(''),
+    programId: z.string().default('PLACEHOLDER'),
+    commitment: z.enum(['processed', 'confirmed', 'finalized']).default('confirmed'),
   }),
   fees: z.object({
     feeRate: z.coerce.number().int().nonnegative().default(50),
@@ -171,7 +196,7 @@ export type RelayerConfig = z.infer<typeof relayerConfigSchema>;
 export const resolverConfigSchema = z.object({
   network: networkModeSchema,
   pollIntervalMs: z.coerce.number().int().positive().default(15000),
-  coordinatorUrl: z.string().url().default("http://localhost:3001"),
+  coordinatorUrl: z.string().url().default('http://localhost:3001'),
   logLevel: logLevelSchema,
   featureFlags: featureFlagsSchema.default({}),
   ethereum: z.object({
@@ -182,34 +207,42 @@ export const resolverConfigSchema = z.object({
     resolverPrivateKey: z
       .string()
       .optional()
-      .or(z.literal(""))
-      .transform((v) => (v && v.trim().length > 0 ? v.trim() : null))
-      .refine((v) => v === null || /^0x[0-9a-fA-F]{64}$/.test(v), {
-        message: "must be a 0x-prefixed 32-byte hex private key"
+      .or(z.literal(''))
+      .transform(v => (v && v.trim().length > 0 ? v.trim() : null))
+      .refine(v => v === null || /^0x[0-9a-fA-F]{64}$/.test(v), {
+        message: 'must be a 0x-prefixed 32-byte hex private key',
       })
-      .transform((v) => v as `0x${string}` | null),
+      .transform(v => v as `0x${string}` | null),
   }),
   soroban: z.object({
     rpcUrl: z.string().url(),
     horizonUrl: z.string().url(),
     networkPassphrase: z.string(),
-    htlc: z.string().optional().transform((v) => v ?? null),
-    resolverRegistry: z.string().optional().transform((v) => v ?? null),
+    htlc: z
+      .string()
+      .optional()
+      .transform(v => v ?? null),
+    resolverRegistry: z
+      .string()
+      .optional()
+      .transform(v => v ?? null),
     resolverSecret: z
       .string()
       .optional()
-      .or(z.literal(""))
-      .transform((v) => (v && v.trim().length > 0 ? v.trim() : null))
-      .refine((v) => v === null || StrKey.isValidEd25519SecretSeed(v), {
-        message: "must be a valid Stellar Ed25519 secret seed (expected an 'S...' StrKey)"
+      .or(z.literal(''))
+      .transform(v => (v && v.trim().length > 0 ? v.trim() : null))
+      .refine(v => v === null || StrKey.isValidEd25519SecretSeed(v), {
+        message: "must be a valid Stellar Ed25519 secret seed (expected an 'S...' StrKey)",
       })
-      .transform((v) => v as string | null),
+      .transform(v => v as string | null),
   }),
-  rpc: z.object({
-    maxRetries: z.coerce.number().int().nonnegative().default(3),
-    baseDelayMs: z.coerce.number().int().nonnegative().default(100),
-    maxDelayMs: z.coerce.number().int().nonnegative().default(2000),
-  }).default({}),
+  rpc: z
+    .object({
+      maxRetries: z.coerce.number().int().nonnegative().default(3),
+      baseDelayMs: z.coerce.number().int().nonnegative().default(100),
+      maxDelayMs: z.coerce.number().int().nonnegative().default(2000),
+    })
+    .default({}),
 });
 
 export type ResolverConfig = z.infer<typeof resolverConfigSchema>;
@@ -222,7 +255,7 @@ export const frontendConfigSchema = z.object({
   mainnetRpcUrl: z.string().optional(),
   infuraApiKey: z.string().optional(),
   oneinchApiKey: z.string().optional(),
-  apiBaseUrl: z.string().url().default("http://localhost:3001"),
+  apiBaseUrl: z.string().url().default('http://localhost:3001'),
   featureFlags: z
     .object({
       solanaSimulationMode: z.coerce.boolean().default(false),
@@ -233,12 +266,3 @@ export const frontendConfigSchema = z.object({
 });
 
 export type FrontendConfig = z.infer<typeof frontendConfigSchema>;
-
-// Shared feature flags schema (used by coordinator/relayer/resolver)
-export const featureFlagsSchema = z.object({
-  solanaSimulationMode: z.coerce.boolean().default(false),
-  sorobanEarlySupport: z.coerce.boolean().default(false),
-  experimentalUiRoutes: z.coerce.boolean().default(false),
-});
-
-export type FeatureFlags = z.infer<typeof featureFlagsSchema>;
