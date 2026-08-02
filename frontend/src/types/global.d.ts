@@ -39,6 +39,15 @@ declare global {
     readonly VITE_ENABLE_MOCK_DATA: string;
     readonly VITE_INFURA_API_KEY: string;
     readonly VITE_ONEINCH_API_KEY: string;
+    // Feature-flag overrides. Set to 'true' or 'false' to force a flag on/off
+    // regardless of build mode. See frontend/src/config/feature-flags.ts.
+    readonly VITE_FEATURE_FAUCET_ENABLED: string;
+    readonly VITE_FEATURE_HISTORY_STREAM_ENABLED: string;
+    readonly VITE_FEATURE_REFUND_FLOW_ENABLED: string;
+    readonly VITE_FEATURE_SOLANA_ROUTES_ENABLED: string;
+    readonly VITE_FEATURE_INTRO_ANIMATION_ENABLED: string;
+    readonly VITE_FEATURE_DARK_VEIL_ENABLED: string;
+    readonly VITE_FEATURE_CLAIM_FALLBACK_ENABLED: string;
   }
 
   interface ImportMeta {

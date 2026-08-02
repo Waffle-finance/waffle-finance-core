@@ -8,7 +8,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { classifyRpcError, parseBalanceHex } from '@wafflefinance/sdk/shared-utils';
 import { isTestnet, getCurrentNetwork } from '../../config/networks';
-import { selectApiBaseUrl, selectIsMockDataEnabled } from '../../config/selectors';
+import { selectApiBaseUrl, selectIsMockDataEnabled, selectSolanaRoutesEnabled } from '../../config/selectors';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
 import { sanitizeAmountInput } from '../../lib/sanitizeAmountInput';
 import { usePersistedBridgeDraft } from '../../hooks/usePersistedBridgeDraft';
@@ -268,6 +268,7 @@ const updateTransactionStatus = (orderId: string, status: 'pending' | 'completed
 const SEPOLIA_CHAIN_ID = '0xaa36a7'; // 11155111 in hex
 const API_BASE_URL = selectApiBaseUrl();
 const ENABLE_MOCK_DATA = selectIsMockDataEnabled();
+const SOLANA_ROUTES_ENABLED = selectSolanaRoutesEnabled();
 
 function directionToChains(dir: BridgeDirection): { srcChain: SupportedChain; dstChain: SupportedChain } {
   const parts = dir.split('_to_');
@@ -1547,11 +1548,12 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     clearPersistedDraft();
   };
 
-  const isSolanaDirection =
+  const isSolanaDirection = SOLANA_ROUTES_ENABLED && (
     direction === 'eth_to_sol' ||
     direction === 'sol_to_eth' ||
     direction === 'xlm_to_sol' ||
-    direction === 'sol_to_xlm';
+    direction === 'sol_to_xlm'
+  );
 
   return (
     <div className="w-full rounded-[1.25rem] p-4 swap-card-bg swap-card-border md:p-5 lg:p-6">

@@ -6,7 +6,7 @@ import { useSolanaWallet } from './hooks/useSolanaWallet'
 import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
-import { selectIsMainnetEnabled, selectResolvedNetworkMode, selectCurrentEthereumNetwork, selectCurrentStellarNetwork, selectApiBaseUrl } from './config/selectors';
+import { selectIsMainnetEnabled, selectResolvedNetworkMode, selectCurrentEthereumNetwork, selectCurrentStellarNetwork, selectApiBaseUrl, selectIntroAnimationEnabled, selectDarkVeilEnabled } from './config/selectors';
 
 // Non-critical components are lazy-loaded so the initial bridge form bundle
 // stays as small as possible. Suspense boundaries provide invisible fallbacks
@@ -33,7 +33,11 @@ function App() {
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState<'bridge' | 'history'>('bridge');
+  const introAllowed = selectIntroAnimationEnabled();
+  const darkVeilAllowed = selectDarkVeilEnabled();
+
   const [showIntro, setShowIntro] = useState(() => {
+    if (!introAllowed) return false;
     return sessionStorage.getItem('wafflefinance:intro-seen') !== 'true';
   });
   const [introLogoReady, setIntroLogoReady] = useState(false);
@@ -584,22 +588,24 @@ function App() {
         </section>
       </main>
 
-      <div className="background-depth pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-        <div className="dark-veil-layer">
-          <Suspense fallback={null}>
-            <DarkVeil
-              hueShift={0}
-              noiseIntensity={0.008}
-              scanlineIntensity={0.035}
-              scanlineFrequency={1.8}
-              speed={0.9}
-              warpAmount={0.08}
-              resolutionScale={0.72}
-              verticalOffset={0.42}
-            />
-          </Suspense>
+      {darkVeilAllowed && (
+        <div className="background-depth pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+          <div className="dark-veil-layer">
+            <Suspense fallback={null}>
+              <DarkVeil
+                hueShift={0}
+                noiseIntensity={0.008}
+                scanlineIntensity={0.035}
+                scanlineFrequency={1.8}
+                speed={0.9}
+                warpAmount={0.08}
+                resolutionScale={0.72}
+                verticalOffset={0.42}
+              />
+            </Suspense>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Waffle backdrop — blended large waffle pattern behind everything */}
       <div className="waffle-backdrop-wrap">

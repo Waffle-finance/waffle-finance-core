@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useToast } from './Toast';
 import { getFaucets, isTestnet } from '../config/networks';
+import { selectFaucetEnabled } from '../config/selectors';
 
 interface TestnetFaucetProps {
   ethAddress?: string;
@@ -11,8 +12,8 @@ export default function TestnetFaucet({ ethAddress, stellarAddress }: TestnetFau
   const [isOpen, setIsOpen] = useState(false);
   const toast = useToast();
 
-  // Only show faucets on testnet
-  if (!isTestnet()) {
+  // Only show faucets on testnet and when the faucetEnabled flag is active.
+  if (!isTestnet() || !selectFaucetEnabled()) {
     return null;
   }
 

@@ -56,6 +56,10 @@ export function selectDarkVeilEnabled(): boolean {
   return featureFlags.darkVeilEnabled;
 }
 
+export function selectClaimFallbackEnabled(): boolean {
+  return featureFlags.claimFallbackEnabled;
+}
+
 // ── Network selectors ─────────────────────────────────────────────────────────
 
 export function selectIsMainnetEnabled(): boolean {
