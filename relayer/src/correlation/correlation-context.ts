@@ -54,6 +54,7 @@ import {
   correlationOpDurationSeconds,
   correlationRetryHopsTotal,
 } from '../metrics.js';
+import { getLogger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Internal structured log helper
@@ -292,7 +293,8 @@ export async function withCorrelation<T>(
 
 /**
  * Stamp the current correlation ID into an arbitrary log record and emit it.
- * When called outside a correlation scope the `correlationId` field is omitted.
+ * When called outside a correlation scope the `correlationId` field is omitted
+ * (the mixin in logger.ts handles this automatically).
  *
  * @param level   Severity: 'info' | 'warn' | 'error'.
  * @param msg     Human-readable message.

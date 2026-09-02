@@ -74,6 +74,7 @@ import {
   settlementPendingRecoveryGauge,
 } from '../metrics.js';
 import { correlationLog } from '../correlation/correlation-context.js';
+import { getLogger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -406,11 +407,7 @@ export class SettlementFailureStore {
     msg: string,
     extra?: Record<string, unknown>,
   ): void {
-    const line = JSON.stringify({
-      level, msg, ts: new Date().toISOString(), ...extra,
-    }) + '\n';
-    if (level === 'error') process.stderr.write(line);
-    else process.stdout.write(line);
+    getLogger()[level](extra ?? {}, msg);
   }
 
   // ── Persistence ───────────────────────────────────────────────────────────
@@ -434,12 +431,7 @@ export class SettlementFailureStore {
       writeFileSync(tmp, JSON.stringify({ ...record, savedAt: Date.now() }), 'utf-8');
       renameSync(tmp, fpath);
     } catch (err) {
-      process.stderr.write(JSON.stringify({
-        level: 'warn',
-        msg: '[settlement-failure-store] failed to persist record',
-        orderId: record.orderId,
-        error: err instanceof Error ? err.message : String(err),
-      }) + '\n');
+      getLogger().warn({ orderId: record.orderId, err: err instanceof Error ? err.message : String(err) }, '[settlement-failure-store] failed to persist record');
     }
   }
 

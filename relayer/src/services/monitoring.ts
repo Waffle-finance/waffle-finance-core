@@ -5,6 +5,9 @@
 
 import { EventEmitter } from 'events';
 import { getCurrentTimestamp } from './utils.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ service: 'monitoring' });
 
 export interface HealthMetrics {
   uptime: number;
@@ -149,7 +152,7 @@ export class UptimeMonitor extends EventEmitter {
    */
   startMonitoring(interval: number = 30000): void {
     if (this.isRunning) {
-      console.log('⚠️  Monitoring already running');
+      log.warn('[monitoring] already running');
       return;
     }
 
@@ -158,7 +161,7 @@ export class UptimeMonitor extends EventEmitter {
       this.collectMetrics();
     }, interval);
 
-    console.log('📊 Uptime monitoring started');
+    log.info({ intervalMs: interval }, '[monitoring] uptime monitoring started');
     this.emit('monitoring:started');
   }
 
@@ -176,7 +179,7 @@ export class UptimeMonitor extends EventEmitter {
       this.monitoringInterval = null;
     }
 
-    console.log('📊 Uptime monitoring stopped');
+    log.info('[monitoring] uptime monitoring stopped');
     this.emit('monitoring:stopped');
   }
 
@@ -194,7 +197,7 @@ export class UptimeMonitor extends EventEmitter {
     };
 
     this.services.set(name, service);
-    console.log(`📋 Service registered: ${name}`);
+    log.debug({ serviceName: name }, '[monitoring] service registered');
   }
 
   /**
@@ -221,7 +224,7 @@ export class UptimeMonitor extends EventEmitter {
       // Emit metrics update
       this.emit('metrics:updated', this.metrics);
     } catch (error) {
-      console.error('❌ Failed to collect metrics:', error);
+      log.error({ err: error }, '[monitoring] failed to collect metrics');
       this.emit('metrics:error', error);
     }
   }

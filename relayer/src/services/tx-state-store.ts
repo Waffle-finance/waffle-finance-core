@@ -81,6 +81,7 @@ import {
   txStateReconciliationDurationSeconds,
 } from '../metrics.js';
 import { correlationLog } from '../correlation/correlation-context.js';
+import { getLogger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -572,24 +573,17 @@ export class TxStateStore {
     record: TxStateRecord | undefined,
     extra?: Record<string, unknown>,
   ): void {
-    const entry: Record<string, unknown> = {
-      level,
-      msg,
-      ts: new Date().toISOString(),
-      ...extra,
-    };
+    const fields: Record<string, unknown> = { ...extra };
     if (record) {
-      entry.orderId = record.orderId;
-      entry.correlationId = record.correlationId;
-      entry.state = record.state;
-      entry.route = record.route;
+      fields.orderId = record.orderId;
+      fields.correlationId = record.correlationId;
+      fields.state = record.state;
+      fields.route = record.route;
     }
-    const line = JSON.stringify(entry) + '\n';
-    if (level === 'error') process.stderr.write(line);
-    else process.stdout.write(line);
+    getLogger()[level](fields, msg);
 
     // Also stamp correlation context if we're inside one
-    correlationLog(level, msg, entry);
+    correlationLog(level, msg, fields);
   }
 
   // ── Persistence ───────────────────────────────────────────────────────────
@@ -614,14 +608,7 @@ export class TxStateStore {
       writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
       renameSync(tmp, fpath);
     } catch (err) {
-      process.stderr.write(
-        JSON.stringify({
-          level: 'warn',
-          msg: '[tx-state] failed to persist record',
-          orderId: record.orderId,
-          error: err instanceof Error ? err.message : String(err),
-        }) + '\n',
-      );
+      getLogger().warn({ orderId: record.orderId, err: err instanceof Error ? err.message : String(err) }, '[tx-state] failed to persist record');
     }
   }
 

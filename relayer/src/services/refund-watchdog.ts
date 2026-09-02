@@ -57,6 +57,9 @@ import {
   watchdogTickDurationSeconds,
 } from '../metrics.js';
 import { sanitizeForLog } from '../utils/sanitize-for-log.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ service: 'refund-watchdog' });
 
 const DEFAULT_INTERVAL_MS = 60_000;       // 1 minute
 const DEFAULT_STALE_AFTER_MS = 5 * 60_000; // 5 minutes
@@ -150,14 +153,9 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
   const staleAfterMs = config.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const ledger = config.refundLedger ?? globalRefundLedger;
 
-  process.stdout.write(
-    JSON.stringify({
-      level: 'info',
-      msg: '[refund-watchdog] starting',
-      intervalSecs: Math.round(intervalMs / 1000),
-      staleAfterSecs: Math.round(staleAfterMs / 1000),
-      network: config.networkMode,
-    }) + '\n'
+  log.info(
+    { intervalSecs: Math.round(intervalMs / 1000), staleAfterSecs: Math.round(staleAfterMs / 1000), network: config.networkMode },
+    '[refund-watchdog] starting'
   );
 
   const tick = async (): Promise<void> => {
@@ -179,13 +177,9 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
               order.status = 'refunded';
               order.refundTxHash = ledgerEntry.state.txHash;
               order.refundedAt = ledgerEntry.state.committedAt;
-              process.stdout.write(
-                JSON.stringify({
-                  level: 'info',
-                  msg: '[refund-watchdog] duplicate suppressed — syncing from ledger',
-                  orderId,
-                  txHash: ledgerEntry.state.txHash,
-                }) + '\n'
+              log.info(
+                { orderId, txHash: ledgerEntry.state.txHash },
+                '[refund-watchdog] duplicate suppressed — syncing from ledger'
               );
             }
             continue;
@@ -217,13 +211,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
 
           const stellarAddress = order.stellarAddress;
           if (!stellarAddress) {
-            process.stderr.write(
-              JSON.stringify({
-                level: 'warn',
-                msg: '[refund-watchdog] missing stellarAddress — skipping',
-                orderId,
-              }) + '\n'
-            );
+            log.warn({ orderId }, '[refund-watchdog] missing stellarAddress — skipping');
             watchdogRefundFailureTotal.inc({
               reason: 'missing_address',
               network_mode: config.networkMode,
@@ -240,14 +228,9 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
             continue;
           }
 
-          process.stdout.write(
-            JSON.stringify({
-              level: 'info',
-              msg: '[refund-watchdog] attempting refund',
-              orderId,
-              ageSecs: Math.round(age / 1000),
-              stellarTxHash: order.stellarTxHash,
-            }) + '\n'
+          log.info(
+            { orderId, ageSecs: Math.round(age / 1000), stellarTxHash: order.stellarTxHash },
+            '[refund-watchdog] attempting refund'
           );
 
           try {
@@ -270,28 +253,15 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
 
             watchdogRefundSuccessTotal.inc({ network_mode: config.networkMode });
 
-            process.stdout.write(
-              JSON.stringify({
-                level: 'info',
-                msg: '[refund-watchdog] refund succeeded',
-                orderId,
-                amount: refund.amount,
-                stroops: refund.stroops.toString(),
-                destination: stellarAddress,
-                txHash: refund.hash,
-              }) + '\n'
+            log.info(
+              { orderId, amount: refund.amount, stroops: refund.stroops.toString(), destination: stellarAddress, txHash: refund.hash },
+              '[refund-watchdog] refund succeeded'
             );
           } catch (refundErr: unknown) {
             if (refundErr instanceof RefundAmountUnknownError) {
               // Amount not yet available — release and defer; not a hard failure.
               ledger.release(orderId);
-              process.stdout.write(
-                JSON.stringify({
-                  level: 'info',
-                  msg: '[refund-watchdog] amount unknown — deferring to next tick',
-                  orderId,
-                }) + '\n'
-              );
+              log.info({ orderId }, '[refund-watchdog] amount unknown — deferring to next tick');
               // Do NOT stamp watchdogFailedAt — we want to retry next tick.
             } else if (refundErr instanceof HorizonTimeoutError) {
               // Tx may have landed — mark ambiguous rather than releasing.
@@ -304,13 +274,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
                 network_mode: config.networkMode,
               });
 
-              process.stderr.write(
-                JSON.stringify({
-                  level: 'warn',
-                  msg: '[refund-watchdog] Horizon timeout — marked ambiguous',
-                  orderId,
-                }) + '\n'
-              );
+              log.warn({ orderId }, '[refund-watchdog] Horizon timeout — marked ambiguous');
             } else {
               // Definitive failure — release lock so a future tick can retry.
               ledger.release(orderId);
@@ -324,14 +288,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
                 network_mode: config.networkMode,
               });
 
-              process.stderr.write(
-                JSON.stringify({
-                  level: 'error',
-                  msg: '[refund-watchdog] refund failed',
-                  orderId,
-                  error: order.watchdogFailureReason,
-                }) + '\n'
-              );
+              log.error({ orderId, err: order.watchdogFailureReason }, '[refund-watchdog] refund failed');
             }
           }
         } catch (err: unknown) {
@@ -346,14 +303,7 @@ export function startRefundWatchdog(config: WatchdogConfig): { stop: () => void 
             network_mode: config.networkMode,
           });
 
-          process.stderr.write(
-            JSON.stringify({
-              level: 'error',
-              msg: '[refund-watchdog] unexpected error',
-              orderId,
-              error: order.watchdogFailureReason,
-            }) + '\n'
-          );
+          log.error({ orderId, err: order.watchdogFailureReason }, '[refund-watchdog] unexpected error');
         }
       }
     } finally {
@@ -430,37 +380,19 @@ async function checkAmbiguousRefund(
       order.refundTxHash = landed.hash;
       order.refundedAt = Date.now();
 
-      process.stdout.write(
-        JSON.stringify({
-          level: 'info',
-          msg: '[refund-watchdog] ambiguous refund confirmed on-chain',
-          orderId,
-          txHash: landed.hash,
-          amount,
-        }) + '\n'
-      );
+      log.info({ orderId, txHash: landed.hash, amount }, '[refund-watchdog] ambiguous refund confirmed on-chain');
       return true;
     }
 
     // Not found in last 50 txs — safe to release and allow a new submission.
     ledger.releaseAmbiguous(orderId);
-    process.stdout.write(
-      JSON.stringify({
-        level: 'info',
-        msg: '[refund-watchdog] ambiguous refund not found on-chain — releasing for retry',
-        orderId,
-      }) + '\n'
-    );
+    log.info({ orderId }, '[refund-watchdog] ambiguous refund not found on-chain — releasing for retry');
     return false;
   } catch (checkErr: unknown) {
     // Horizon unavailable — leave ambiguous, try again next tick.
-    process.stderr.write(
-      JSON.stringify({
-        level: 'warn',
-        msg: '[refund-watchdog] could not check ambiguous refund — leaving for next tick',
-        orderId,
-        error: checkErr instanceof Error ? checkErr.message : String(checkErr),
-      }) + '\n'
+    log.warn(
+      { orderId, err: checkErr instanceof Error ? checkErr.message : String(checkErr) },
+      '[refund-watchdog] could not check ambiguous refund — leaving for next tick'
     );
     return false;
   }

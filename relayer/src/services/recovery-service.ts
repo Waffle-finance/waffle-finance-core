@@ -9,6 +9,9 @@ import FusionEventManager, { EventType } from '../events/event-handlers.js';
 import { ActiveOrder } from './types.js';
 import { getCurrentTimestamp } from './utils.js';
 import { KeyedMutex } from '../utils/concurrency.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ service: 'recovery-service' });
 
 // Recovery status types
 export enum RecoveryStatus {
@@ -113,14 +116,13 @@ export class RecoveryService extends EventEmitter {
       this.monitorTimelocksAndRecover();
     }, this.config.monitoringInterval);
 
-    console.log('✅ Recovery Service: Timelock monitoring started');
+    log.info('[recovery] timelock monitoring started');
   }
 
   /**
    * Setup event listeners
    */
   private setupEventListeners(): void {
-    // Listen to order events
     this.eventManager.on('order_created', (data) => {
       this.trackNewOrder(data.orderHash);
     });
@@ -150,7 +152,7 @@ export class RecoveryService extends EventEmitter {
         });
       }
     } catch (error) {
-      console.error('❌ Recovery monitoring error:', error);
+      log.error({ err: error }, '[recovery] monitoring error');
     }
   }
 
@@ -158,10 +160,9 @@ export class RecoveryService extends EventEmitter {
    * Check if recovery should be initiated
    */
   private shouldInitiateRecovery(order: ActiveOrder, currentTime: number): boolean {
-    // Check if timelock has expired
     const timelock = order.deadline;
     const gracePeriod = this.config.gracePeriod;
-    
+
     return (
       currentTime > timelock + gracePeriod &&
       !this.isRecoveryInProgress(order.orderHash) &&
@@ -174,7 +175,7 @@ export class RecoveryService extends EventEmitter {
    */
   private async initiateTimeoutRecovery(order: ActiveOrder): Promise<void> {
     const recoveryId = `recovery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+
     const recoveryRequest: RecoveryRequest = {
       id: recoveryId,
       orderHash: order.orderHash,
@@ -197,9 +198,8 @@ export class RecoveryService extends EventEmitter {
     this.recoveryRequests.set(recoveryId, recoveryRequest);
     this.stats.pendingRecoveries++;
 
-    console.log(`🔄 orderHash=${order.orderHash} Recovery initiated for order ${order.orderHash} (${recoveryId})`);
-    
-    // Emit recovery event
+    log.info({ orderHash: order.orderHash, recoveryId }, '[recovery] recovery initiated');
+
     this.eventManager.emitEvent(EventType.Recovery, order.orderHash, {
       recoveryId,
       type: RecoveryType.TimeoutRefund,
@@ -208,7 +208,6 @@ export class RecoveryService extends EventEmitter {
       timestamp: getCurrentTimestamp()
     });
 
-    // Execute recovery
     await this.executeRecovery(recoveryId);
   }
 
@@ -218,7 +217,7 @@ export class RecoveryService extends EventEmitter {
   private async executeRecovery(recoveryId: string): Promise<void> {
     const recovery = this.recoveryRequests.get(recoveryId);
     if (!recovery) {
-      console.error(`❌ Recovery ${recoveryId} not found`);
+      log.error({ recoveryId }, '[recovery] recovery not found');
       return;
     }
 
@@ -234,7 +233,6 @@ export class RecoveryService extends EventEmitter {
         throw new Error('Order not found');
       }
 
-      // Execute recovery based on type
       switch (recovery.type) {
         case RecoveryType.TimeoutRefund:
           await this.executeTimeoutRefund(recovery, order);
@@ -250,10 +248,9 @@ export class RecoveryService extends EventEmitter {
           break;
       }
 
-      // Mark as completed
       recovery.status = RecoveryStatus.Completed;
       recovery.updatedAt = getCurrentTimestamp();
-      
+
       this.stats.successfulRecoveries++;
       this.stats.pendingRecoveries--;
       this.stats.totalValueRecovered = (
@@ -261,9 +258,8 @@ export class RecoveryService extends EventEmitter {
       ).toString();
       this.stats.lastRecoveryAt = getCurrentTimestamp();
 
-      console.log(`✅ orderHash=${recovery.orderHash} Recovery completed: ${recoveryId}`);
-      
-      // Emit success event
+      log.info({ orderHash: recovery.orderHash, recoveryId }, '[recovery] recovery completed');
+
       this.eventManager.emitEvent(EventType.Recovery, recovery.orderHash, {
         recoveryId,
         type: recovery.type,
@@ -273,15 +269,14 @@ export class RecoveryService extends EventEmitter {
       });
 
     } catch (error) {
-      console.error(`❌ orderHash=${recovery.orderHash} Recovery failed: ${recoveryId}`, error);
-      
+      log.error({ orderHash: recovery.orderHash, recoveryId, err: error }, '[recovery] recovery failed');
+
       recovery.status = RecoveryStatus.Failed;
       recovery.updatedAt = getCurrentTimestamp();
-      
+
       this.stats.failedRecoveries++;
       this.stats.pendingRecoveries--;
 
-      // Emit failure event
       this.eventManager.emitEvent(EventType.Recovery, recovery.orderHash, {
         recoveryId,
         type: recovery.type,
@@ -291,7 +286,6 @@ export class RecoveryService extends EventEmitter {
         timestamp: getCurrentTimestamp()
       });
 
-      // Retry if configured
       if (this.config.maxRetries > 0) {
         setTimeout(() => {
           this.retryRecovery(recoveryId);
@@ -304,119 +298,107 @@ export class RecoveryService extends EventEmitter {
    * Execute timeout refund
    */
   private async executeTimeoutRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🔄 orderHash=${order.orderHash} Executing timeout refund for order ${order.orderHash}`);
-    
-    // 1. Ethereum refund
-    if (order.srcChainId === 1) { // Ethereum
+    log.info({ orderHash: order.orderHash }, '[recovery] executing timeout refund');
+
+    if (order.srcChainId === 1) {
       await this.executeEthereumRefund(order);
     }
 
-    // 2. Stellar refund
-    if (order.dstChainId === 999) { // Stellar
+    if (order.dstChainId === 999) {
       await this.executeStellarRefund(order);
     }
 
-    // 3. Update order status
-    // This would normally update the order in the database
-    console.log(`✅ orderHash=${order.orderHash} Timeout refund completed for order ${order.orderHash}`);
+    log.info({ orderHash: order.orderHash }, '[recovery] timeout refund completed');
   }
 
   /**
    * Execute emergency refund
    */
   private async executeEmergencyRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🚨 orderHash=${order.orderHash} Executing emergency refund for order ${order.orderHash}`);
-    console.log(`orderHash=${order.orderHash} Emergency reason: ${recovery.metadata.emergencyReason}`);
-    
-    // Emergency refund logic - more aggressive, bypasses normal checks
+    log.info({ orderHash: order.orderHash, reason: recovery.metadata.emergencyReason }, '[recovery] executing emergency refund');
+
     await this.executeEthereumEmergencyRefund(order);
     await this.executeStellarEmergencyRefund(order);
-    
-    console.log(`✅ orderHash=${order.orderHash} Emergency refund completed for order ${order.orderHash}`);
+
+    log.info({ orderHash: order.orderHash }, '[recovery] emergency refund completed');
   }
 
   /**
    * Execute public withdrawal
    */
   private async executePublicWithdrawal(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`🔓 orderHash=${order.orderHash} Executing public withdrawal for order ${order.orderHash}`);
-    
-    // Public withdrawal - anyone can trigger after timelock + grace period
+    log.info({ orderHash: order.orderHash }, '[recovery] executing public withdrawal');
+
     await this.executePublicEthereumWithdrawal(order);
     await this.executePublicStellarWithdrawal(order);
-    
-    console.log(`✅ orderHash=${order.orderHash} Public withdrawal completed for order ${order.orderHash}`);
+
+    log.info({ orderHash: order.orderHash }, '[recovery] public withdrawal completed');
   }
 
   /**
    * Execute force recovery (admin only)
    */
   private async executeForceRecovery(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
-    console.log(`⚡ orderHash=${order.orderHash} Executing force recovery for order ${order.orderHash}`);
-    
-    // Force recovery - admin override
+    log.info({ orderHash: order.orderHash }, '[recovery] executing force recovery');
+
     await this.executeForceEthereumRecovery(order);
     await this.executeForceeStellarRecovery(order);
-    
-    console.log(`✅ orderHash=${order.orderHash} Force recovery completed for order ${order.orderHash}`);
+
+    log.info({ orderHash: order.orderHash }, '[recovery] force recovery completed');
   }
 
   /**
    * Ethereum refund operations
    */
   private async executeEthereumRefund(order: ActiveOrder): Promise<void> {
-    // Mock implementation - would call actual Ethereum contract
-    console.log(`🔄 orderHash=${order.orderHash} Ethereum refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
-    
-    // Simulate contract call
+    log.info({ orderHash: order.orderHash, amount: order.order.makingAmount, asset: order.order.makerAsset, chain: 'ethereum' }, '[recovery] executing eth refund');
     await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    console.log(`✅ orderHash=${order.orderHash} Ethereum refund successful`);
+    log.info({ orderHash: order.orderHash, chain: 'ethereum' }, '[recovery] eth refund successful');
   }
 
   private async executeEthereumEmergencyRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🚨 orderHash=${order.orderHash} Ethereum emergency refund: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.makingAmount, chain: 'ethereum' }, '[recovery] executing eth emergency refund');
     await new Promise(resolve => setTimeout(resolve, 500));
-    console.log(`✅ orderHash=${order.orderHash} Ethereum emergency refund successful`);
+    log.info({ orderHash: order.orderHash, chain: 'ethereum' }, '[recovery] eth emergency refund successful');
   }
 
   private async executePublicEthereumWithdrawal(order: ActiveOrder): Promise<void> {
-    console.log(`🔓 orderHash=${order.orderHash} Ethereum public withdrawal: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.makingAmount, chain: 'ethereum' }, '[recovery] executing eth public withdrawal');
     await new Promise(resolve => setTimeout(resolve, 1000));
-    console.log(`✅ orderHash=${order.orderHash} Ethereum public withdrawal successful`);
+    log.info({ orderHash: order.orderHash, chain: 'ethereum' }, '[recovery] eth public withdrawal successful');
   }
 
   private async executeForceEthereumRecovery(order: ActiveOrder): Promise<void> {
-    console.log(`⚡ orderHash=${order.orderHash} Ethereum force recovery: ${order.order.makingAmount} ${order.order.makerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.makingAmount, chain: 'ethereum' }, '[recovery] executing eth force recovery');
     await new Promise(resolve => setTimeout(resolve, 800));
-    console.log(`✅ orderHash=${order.orderHash} Ethereum force recovery successful`);
+    log.info({ orderHash: order.orderHash, chain: 'ethereum' }, '[recovery] eth force recovery successful');
   }
 
   /**
    * Stellar refund operations
    */
   private async executeStellarRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🔄 orderHash=${order.orderHash} Stellar refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.takingAmount, asset: order.order.takerAsset, chain: 'stellar' }, '[recovery] executing stellar refund');
     await new Promise(resolve => setTimeout(resolve, 1200));
-    console.log(`✅ orderHash=${order.orderHash} Stellar refund successful`);
+    log.info({ orderHash: order.orderHash, chain: 'stellar' }, '[recovery] stellar refund successful');
   }
 
   private async executeStellarEmergencyRefund(order: ActiveOrder): Promise<void> {
-    console.log(`🚨 orderHash=${order.orderHash} Stellar emergency refund: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.takingAmount, chain: 'stellar' }, '[recovery] executing stellar emergency refund');
     await new Promise(resolve => setTimeout(resolve, 600));
-    console.log(`✅ orderHash=${order.orderHash} Stellar emergency refund successful`);
+    log.info({ orderHash: order.orderHash, chain: 'stellar' }, '[recovery] stellar emergency refund successful');
   }
 
   private async executePublicStellarWithdrawal(order: ActiveOrder): Promise<void> {
-    console.log(`🔓 orderHash=${order.orderHash} Stellar public withdrawal: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.takingAmount, chain: 'stellar' }, '[recovery] executing stellar public withdrawal');
     await new Promise(resolve => setTimeout(resolve, 1100));
-    console.log(`✅ orderHash=${order.orderHash} Stellar public withdrawal successful`);
+    log.info({ orderHash: order.orderHash, chain: 'stellar' }, '[recovery] stellar public withdrawal successful');
   }
 
   private async executeForceeStellarRecovery(order: ActiveOrder): Promise<void> {
-    console.log(`⚡ orderHash=${order.orderHash} Stellar force recovery: ${order.order.takingAmount} ${order.order.takerAsset}`);
+    log.info({ orderHash: order.orderHash, amount: order.order.takingAmount, chain: 'stellar' }, '[recovery] executing stellar force recovery');
     await new Promise(resolve => setTimeout(resolve, 900));
-    console.log(`✅ orderHash=${order.orderHash} Stellar force recovery successful`);
+    log.info({ orderHash: order.orderHash, chain: 'stellar' }, '[recovery] stellar force recovery successful');
   }
 
   /**
@@ -443,7 +425,7 @@ export class RecoveryService extends EventEmitter {
       return;
     }
 
-    console.log(`🔄 orderHash=${recovery.orderHash} Retrying recovery: ${recoveryId}`);
+    log.info({ orderHash: recovery.orderHash, recoveryId }, '[recovery] retrying recovery');
     recovery.status = RecoveryStatus.Pending;
     recovery.updatedAt = getCurrentTimestamp();
 
@@ -463,7 +445,7 @@ export class RecoveryService extends EventEmitter {
     metadata: Partial<RecoveryRequest['metadata']> = {}
   ): Promise<string> {
     const recoveryId = `manual_recovery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+
     const recoveryRequest: RecoveryRequest = {
       id: recoveryId,
       orderHash,
@@ -479,13 +461,12 @@ export class RecoveryService extends EventEmitter {
     this.recoveryRequests.set(recoveryId, recoveryRequest);
     this.stats.pendingRecoveries++;
 
-    console.log(`🔄 orderHash=${orderHash} Manual recovery initiated: ${recoveryId} by ${initiator}`);
-    
-    // Execute recovery
+    log.info({ orderHash, recoveryId, initiator }, '[recovery] manual recovery initiated');
+
     await this.recoveryMutex.runExclusive(orderHash, async () => {
       await this.executeRecovery(recoveryId);
     });
-    
+
     return recoveryId;
   }
 
@@ -511,21 +492,21 @@ export class RecoveryService extends EventEmitter {
    */
   private isRecoveryInProgress(orderHash: string): boolean {
     return Array.from(this.recoveryRequests.values()).some(
-      recovery => recovery.orderHash === orderHash && 
+      recovery => recovery.orderHash === orderHash &&
       recovery.status === RecoveryStatus.InProgress
     );
   }
 
   private trackNewOrder(orderHash: string): void {
-    console.log(`📊 orderHash=${orderHash} Recovery tracking: New order ${orderHash}`);
+    log.debug({ orderHash }, '[recovery] tracking new order');
   }
 
   private handleOrderCancellation(orderHash: string): void {
-    console.log(`📊 orderHash=${orderHash} Recovery tracking: Order cancelled ${orderHash}`);
+    log.debug({ orderHash }, '[recovery] tracking order cancelled');
   }
 
   private handleOrderCompletion(orderHash: string): void {
-    console.log(`📊 orderHash=${orderHash} Recovery tracking: Order completed ${orderHash}`);
+    log.debug({ orderHash }, '[recovery] tracking order completed');
   }
 
   /**
@@ -557,7 +538,7 @@ export class RecoveryService extends EventEmitter {
       clearInterval(this.monitoringInterval);
       this.monitoringInterval = null;
     }
-    console.log('🛑 Recovery Service: Monitoring stopped');
+    log.info('[recovery] monitoring stopped');
   }
 
   /**
@@ -566,8 +547,8 @@ export class RecoveryService extends EventEmitter {
   public cleanup(): void {
     this.stopMonitoring();
     this.removeAllListeners();
-    console.log('🧹 Recovery Service: Cleanup completed');
+    log.info('[recovery] cleanup completed');
   }
 }
 
-export default RecoveryService; 
+export default RecoveryService;

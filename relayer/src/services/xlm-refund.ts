@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Permissionless XLM refund helper for failed XLM→ETH swaps.
  *
  * Lives outside index.ts so it can be reused by:
@@ -42,6 +42,9 @@ import {
   refundHorizonRetries,
   refundDuplicatesSuppressed,
 } from '../metrics.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ service: 'xlm-refund' });
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -199,20 +202,15 @@ const TERMINAL_RESULT_CODES = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
-// Structured logger (thin wrapper — replace with winston when available)
+// Structured logger (delegates to shared Pino logger)
 // ---------------------------------------------------------------------------
 
-function log(
+function _log(
   level: 'info' | 'warn' | 'error',
   msg: string,
   ctx: Record<string, unknown> = {}
 ): void {
-  const entry = JSON.stringify({ level, msg, ...ctx, ts: new Date().toISOString() });
-  if (level === 'error') {
-    process.stderr.write(entry + '\n');
-  } else {
-    process.stdout.write(entry + '\n');
-  }
+  log[level](ctx, msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +370,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
       // submitOnce already reloads the account at the top of each attempt,
       // so we just increment attempt and loop without extra delay.
       if (err instanceof HorizonTerminalError && err.resultCode === 'tx_bad_seq') {
-        log('warn', '[xlm-refund] tx_bad_seq — reloading account on next attempt', {
+        _log('warn', '[xlm-refund] tx_bad_seq — reloading account on next attempt', {
           orderId, attempt,
         });
         if (attempt < maxRetries) {
@@ -387,7 +385,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
       if (err instanceof HorizonTerminalError && err.resultCode === 'tx_insufficient_fee') {
         const nextFee = currentFeeStroops * 2n;
         if (nextFee > feeBumpCapStroops) {
-          log('error', '[xlm-refund] fee-bump cap exceeded — abandoning refund', {
+          _log('error', '[xlm-refund] fee-bump cap exceeded — abandoning refund', {
             orderId, currentFeeStroops: currentFeeStroops.toString(),
             nextFee: nextFee.toString(), feeBumpCapStroops: feeBumpCapStroops.toString(),
           });
@@ -396,7 +394,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
             'fee_bump_cap_exceeded'
           );
         }
-        log('warn', '[xlm-refund] tx_insufficient_fee — bumping fee', {
+        _log('warn', '[xlm-refund] tx_insufficient_fee — bumping fee', {
           orderId, from: currentFeeStroops.toString(), to: nextFee.toString(),
         });
         currentFeeStroops = nextFee;
@@ -417,7 +415,7 @@ export async function refundXlmToUser(args: RefundXlmArgs): Promise<RefundXlmRes
       if (attempt < maxRetries) {
         const delayMs = Math.min(30_000, 1_000 * Math.pow(2, attempt));
         refundHorizonRetries.inc({ network_mode: networkMode });
-        log('warn', '[xlm-refund] transient error — retrying', {
+        _log('warn', '[xlm-refund] transient error — retrying', {
           orderId,
           attempt: attempt + 1,
           maxRetries: maxRetries + 1,
@@ -471,7 +469,7 @@ async function resolveRefundStroops(opts: {
         }
       }
     } catch (lookupErr) {
-      log('warn', '[xlm-refund] original tx lookup failed', {
+      _log('warn', '[xlm-refund] original tx lookup failed', {
         orderId,
         stellarTxHash,
         error: lookupErr instanceof Error ? lookupErr.message : String(lookupErr),

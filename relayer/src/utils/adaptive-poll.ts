@@ -1,3 +1,5 @@
+import { getLogger } from '../logger.js';
+
 /**
  * Poll loop with two speeds:
  * - **Attentive** (visitor on site or order in flight): re-check every `activeIntervalMs`
@@ -77,15 +79,18 @@ export function startAdaptivePoll(options: AdaptivePollOptions): AdaptivePollHan
       }
     } catch (err: any) {
       consecutiveFailures++;
-      console.warn(
-        `[${label}] poll tick failed (${consecutiveFailures} consecutive):`,
-        err?.shortMessage ?? err?.message ?? err,
+      getLogger().warn(
+        { label, consecutiveFailures, err: err?.shortMessage ?? err?.message ?? String(err) },
+        `[${label}] poll tick failed`,
       );
     } finally {
       running = false;
       if (consecutiveFailures > 0) {
         const backoff = calculateBackoff();
-        console.warn(`[${label}] backing off ${backoff}ms after ${consecutiveFailures} failure(s)`);
+        getLogger().warn(
+          { label, consecutiveFailures, backoffMs: backoff },
+          `[${label}] backing off after failures`,
+        );
         schedule(backoff);
       } else {
         schedule(active || attentive ? activeIntervalMs : idleIntervalMs);
@@ -94,8 +99,9 @@ export function startAdaptivePoll(options: AdaptivePollOptions): AdaptivePollHan
   };
 
   schedule(0);
-  console.log(
-    `[${label}] adaptive poll — attentive ${activeIntervalMs / 1000}s / deep idle ${idleIntervalMs / 1000}s, RPC only when active`,
+  getLogger().info(
+    { label, activeIntervalMs, idleIntervalMs },
+    `[${label}] adaptive poll started`,
   );
 
   return {

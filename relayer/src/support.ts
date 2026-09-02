@@ -22,6 +22,7 @@ import {
   type SupportVerdict,
   type TokenClass,
 } from '@wafflefinance/config';
+import { getLogger } from './logger.js';
 
 /** The config fields the relayer policy is derived from. */
 export interface RelayerPolicyConfig {
@@ -58,18 +59,19 @@ export function buildSupportPolicy(
 }
 
 /**
- * Print the policy's warnings and its full capability description.
+ * Log the support policy's warnings and full capability description.
  *
- * The relayer boots before any structured logger exists and uses `console`
- * throughout, so this matches the surrounding style.  The description contains
- * no secrets — only chain names, actions, asset classes and reasons.
+ * Warnings indicate misconfiguration (missing keys, placeholder values, etc.)
+ * and are logged at warn level. The full capability description is logged at
+ * info level so operators can confirm exactly which routes are available.
  */
 export function logSupportPolicy(policy: SupportPolicy): void {
+  const log = getLogger().child({ service: 'support-policy' });
   const validation = validateSupportPolicy(policy);
   for (const warning of validation.warnings) {
-    console.warn(`[SUPPORT] ${warning.code}: ${warning.message}`);
+    log.warn({ code: warning.code }, warning.message);
   }
-  console.log(formatSupportPolicy(policy));
+  log.info({ capabilities: formatSupportPolicy(policy) }, '[support] policy loaded');
 }
 
 /**

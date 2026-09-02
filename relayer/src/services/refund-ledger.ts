@@ -1,4 +1,4 @@
-/**
+﻿/**
  * RefundLedger — idempotency store for XLM refunds.
  *
  * Problem it solves
@@ -50,10 +50,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { getLogger } from '../logger.js';
 
 export type RefundState =
   | { phase: 'in_flight' }
@@ -251,14 +248,7 @@ export class RefundLedger {
       renameSync(tmp, fpath);
     } catch (err) {
       // Non-fatal — in-memory state is authoritative; disk is best-effort.
-      process.stderr.write(
-        JSON.stringify({
-          level: 'warn',
-          msg: '[refund-ledger] failed to persist entry',
-          orderId,
-          error: err instanceof Error ? err.message : String(err),
-        }) + '\n'
-      );
+      getLogger().warn({ orderId, err: err instanceof Error ? err.message : String(err) }, '[refund-ledger] failed to persist entry');
     }
   }
 
