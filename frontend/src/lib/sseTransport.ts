@@ -9,8 +9,8 @@
  * polling fallback when SSE is unavailable (use `useOrderStream` for that).
  */
 
+import { createOrderEventPayload } from "./orderEvents";
 import {
-  createOrderEventPayload,
   type OrderEventTransport,
   type OrderObservationEmitter,
 } from "./orderEventStream";
