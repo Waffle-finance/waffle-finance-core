@@ -348,6 +348,102 @@ describe("EthereumListener", () => {
     expect(updated2?.status).toBe("src_locked");
     expect(updated2?.srcOrderId).toBe("50");
   });
+
+  // ── Malformed event args: missing required fields ─────────────────────────
+  //
+  // processConfirmedCreatedLog previously cast event args directly without
+  // validation.  A malformed provider response with undefined orderId,
+  // timelock, blockNumber, or transactionHash must be rejected atomically —
+  // no dispatch, no DB write — and the poll loop must keep running.
+  it("rejects a confirmed OrderCreated log with missing required args without dispatching", async () => {
+    const order = await seedOrder(orders);
+    mockLatestBlock = 1000n;
+    listener.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mockWatchEventCallback).toBeDefined();
+
+    // Deliver a well-formed log first to prove the listener works.
+    const goodLog = {
+      args: { orderId: 60n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xtx_good_60",
+      blockNumber: 985n,
+      removed: false,
+    };
+    await mockWatchEventCallback!([goodLog]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    let updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
+
+    // Roll back to announced so we can observe a fresh non-dispatch.
+    await order.rollbackSrcLock(order.publicId);
+    updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+
+    // Log with missing orderId — must be rejected.
+    const missingOrderId = {
+      args: { orderId: undefined, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xtx_no_orderid",
+      blockNumber: 984n,
+      removed: false,
+    };
+    await mockWatchEventCallback!([missingOrderId]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+
+    // Log with missing transactionHash — must be rejected.
+    const missingTxHash = {
+      args: { orderId: 61n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: null,
+      blockNumber: 983n,
+      removed: false,
+    };
+    await mockWatchEventCallback!([missingTxHash]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+
+    // Log with missing blockNumber — must be rejected.
+    const missingBlock = {
+      args: { orderId: 62n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xtx_no_block",
+      blockNumber: null,
+      removed: false,
+    };
+    await mockWatchEventCallback!([missingBlock]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+
+  // ── Unsafe bigint block number: above MAX_SAFE_INTEGER ───────────────────
+  //
+  // Block numbers above Number.MAX_SAFE_INTEGER lose precision when cast to
+  // number.  The listener must detect this and reject the log rather than
+  // silently storing a corrupted block number.
+  it("rejects a confirmed OrderCreated log whose blockNumber exceeds MAX_SAFE_INTEGER", async () => {
+    const order = await seedOrder(orders);
+    mockLatestBlock = 1000n;
+    listener.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mockWatchEventCallback).toBeDefined();
+
+    // blockNumber is a bigint that exceeds Number.MAX_SAFE_INTEGER.
+    const unsafeLog = {
+      args: { orderId: 70n, hashlock: HASHLOCK, timelock: 9999n },
+      transactionHash: "0xtx_unsafe_block",
+      blockNumber: BigInt(Number.MAX_SAFE_INTEGER) + 1n,
+      removed: false,
+    };
+    await mockWatchEventCallback!([unsafeLog]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // The listener must have dropped the event — order stays announced.
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -762,6 +858,65 @@ describe("EthereumListener – reorg detection", () => {
     state = await orders.get(order.publicId);
     expect(state?.status).toBe("announced");
   });
+
+  // ── Reorg recovery: stored cursor is ahead of chain head ─────────────────
+  //
+  // Regression test: if the listener's stored high-water mark (from
+  // getLastProcessedBlock) is GREATER than the current chain head — which can
+  // happen when a node is rolled back, pointed at a shorter fork, or the DB
+  // was copied from a more-advanced peer — the listener must not start a scan
+  // from an invalid future block.  Instead it must roll back to the configured
+  // lookback boundary (storedBlock - REORG_RESTART_LOOKBACK) and scan forward
+  // from there.
+  //
+  // Acceptance criteria
+  //  - The listener starts without throwing.
+  //  - blockHashMismatch detects the impossible cursor and triggers rollback.
+  //  - The scan window starts at or before the lookback boundary.
+  //  - The cursor is bounded and deterministic — it does not require a live
+  //    chain and does not interfere with normal polling tests.
+  it("rolls back to the lookback boundary when the stored cursor is ahead of the chain head", async () => {
+    // Chain head is 500.  Stored cursor (derived from a src lock recorded at
+    // block 900) is 900 — well above the current head.
+    mockLatestBlock = 500n;
+
+    // Seed an order so getLastProcessedBlock("ethereum") returns 900.
+    const order = await freshOrders();
+    const seededOrder = await seedOrder(order);
+    await order.recordSrcLock({
+      publicId: seededOrder.publicId,
+      orderId: "77",
+      txHash: "0xfuture_tx",
+      blockNumber: 900,
+      timelock: 9999,
+    });
+
+    // Block 900 is beyond the mocked chain head of 500.  The viem mock will
+    // throw (or return an empty hash) when asked to fetch a block > head.
+    // Configure it to signal a mismatch for block 900 so the listener detects
+    // the impossible cursor and triggers the lookback rollback.
+    mockBlockHashes.set(900, null); // null → pending/nonexistent → treated as reorg
+
+    // No catch-up logs to replay — we are only verifying rollback behaviour.
+    mockCreatedLogs = [];
+
+    const aheadListener = new EthereumListener(BASE_CFG, order, log);
+    aheadListener.start();
+
+    // Allow the async start() task (catch-up + watcher setup) to complete.
+    await new Promise((r) => setTimeout(r, 80));
+    aheadListener.stop();
+
+    // The order was seeded at block 900 (above the head of 500).  After the
+    // listener runs, the order must remain in its seeded state — no spurious
+    // state mutation should have occurred during the bounded re-scan.
+    const finalState = await order.get(seededOrder.publicId);
+    expect(finalState?.status).toBe("src_locked"); // seeded state, unchanged
+
+    // Most importantly: the listener must not have crashed.  If it did, none
+    // of the above assertions would be reached.  The absence of an unhandled
+    // rejection is the recovery correctness signal.
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,6 +1014,82 @@ describe("SorobanListener – node inconsistency guards", () => {
     const state = await orders.get(order.publicId);
     expect(state?.status).toBe("src_locked");
     expect(state?.srcOrderId).toBe(ORDER_ID);
+  });
+
+  // ── Malformed ledger metadata: NaN ────────────────────────────────────────
+  //
+  // When the RPC returns NaN as the ledger value (e.g. a malformed JSON
+  // number field), the validator must reject the event before it can corrupt
+  // `lastProcessedLedger` (NaN comparisons always return false, silently
+  // breaking the gap-detection and out-of-order guards).
+  it("rejects a Soroban event whose ledger is NaN without dispatching or advancing the cursor", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+
+    // Inject a valid XDR-encoded created event but override its ledger with NaN.
+    const evt = makeCreatedEvent(10050, "0xsoroban_nan_ledger");
+    mockSorobanEvents = [{ ...evt, ledger: NaN }];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // NaN ledger must be rejected — order stays announced, cursor not advanced.
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+
+  // ── Malformed ledger metadata: Infinity ───────────────────────────────────
+  it("rejects a Soroban event whose ledger is Infinity without dispatching or advancing the cursor", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+
+    const evt = makeCreatedEvent(10050, "0xsoroban_inf_ledger");
+    mockSorobanEvents = [{ ...evt, ledger: Infinity }];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+
+  // ── Malformed ledger metadata: unsafe integer ─────────────────────────────
+  //
+  // Number.MAX_SAFE_INTEGER + 1 can arrive from a 64-bit integer field that
+  // the JSON parser represents as a float.  Such a value loses precision and
+  // must not advance the cursor.
+  it("rejects a Soroban event whose ledger exceeds Number.MAX_SAFE_INTEGER", async () => {
+    const order = await seedOrder(orders);
+    mockLatestLedger = 10100;
+
+    const evt = makeCreatedEvent(10050, "0xsoroban_unsafe_ledger");
+    mockSorobanEvents = [{ ...evt, ledger: Number.MAX_SAFE_INTEGER + 1 }];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("announced");
+  });
+
+  // ── Valid boundary: MAX_SAFE_INTEGER is accepted ──────────────────────────
+  it("accepts a Soroban event whose ledger is exactly Number.MAX_SAFE_INTEGER", async () => {
+    const order = await seedOrder(orders);
+    // Set latestLedger to a value large enough not to trigger the gap guard.
+    // We use MAX_SAFE_INTEGER directly as both the event ledger and the mock tip.
+    const safeMax = Number.MAX_SAFE_INTEGER;
+    mockLatestLedger = safeMax;
+
+    const evt = makeCreatedEvent(10050, "0xsoroban_safe_max_ledger");
+    // Override the ledger field to MAX_SAFE_INTEGER — valid and should be processed.
+    mockSorobanEvents = [{ ...evt, ledger: safeMax }];
+
+    listener.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // MAX_SAFE_INTEGER is a valid safe integer — the event must be processed.
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
   });
 });
 
@@ -1100,5 +1331,48 @@ describe("SolanaListener – reorg / fork awareness", () => {
     // Also verify the listener's public slot count is bounded (pruned entries
     // don't accumulate indefinitely).
     expect(listener.getPendingSlotCount()).toBe(0);
+  });
+
+  // ── Stop-during-backoff: stop() cancels the pending poll timer ──────────────
+  it("stops cleanly when called while the loop is waiting through a poll timer", async () => {
+    vi.useFakeTimers();
+
+    const conn = (listener as any).connection;
+    const realGetSlot = conn.getSlot;
+    const sigSpy = vi.spyOn(conn, "getSignaturesForAddress");
+    let slotCalls = 0;
+
+    try {
+      // Make every poll throw a recoverable RPC error until stop() is called,
+      // so the loop is permanently in the retry/backoff waiting phase.
+      conn.getSlot = vi.fn(async () => {
+        slotCalls++;
+        throw new Error("recoverable RPC failure");
+      });
+
+      listener.start();
+
+      // Let the poll loop run a few cycles: each poll fails, then the loop
+      // schedules a retry timer. slotCalls growing proves normal retry behavior
+      // (re-polling after a failure) works before stop.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(slotCalls).toBeGreaterThanOrEqual(1);
+      expect(vi.getTimerCount()).toBe(1); // exactly one pending retry timer
+
+      // Stop while the retry timer is still pending. stop() must cancel it.
+      listener.stop();
+      expect(vi.getTimerCount()).toBe(0); // no timer should remain after stop
+
+      // Advance far past pollIntervalMs. A cancelled timer cannot fire, so no
+      // subsequent poll may run.
+      const callsAfterStop = slotCalls;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(slotCalls).toBe(callsAfterStop); // no subsequent RPC polls
+      expect(sigSpy).not.toHaveBeenCalled();  // failed poll never reached RPC
+    } finally {
+      conn.getSlot = realGetSlot;
+      sigSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

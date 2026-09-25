@@ -399,6 +399,7 @@ export class SorobanListener {
           });
           this.log.warn({ err }, "Soroban event handler threw");
           // Do NOT advance dedup on handler error — allow retry on next poll.
+          throw err;
         }
       }
     }

@@ -43,6 +43,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
+import { getLogger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -168,14 +169,7 @@ export class StellarProofLedger {
       renameSync(tmp, fpath);
     } catch (err) {
       // Non-fatal — in-memory state is authoritative within this process.
-      process.stderr.write(
-        JSON.stringify({
-          level: 'warn',
-          msg: '[stellar-proof-ledger] failed to persist entry',
-          stellarTxHash: entry.stellarTxHash,
-          error: err instanceof Error ? err.message : String(err),
-        }) + '\n'
-      );
+      getLogger().warn({ stellarTxHash: entry.stellarTxHash, err: err instanceof Error ? err.message : String(err) }, '[stellar-proof-ledger] failed to persist entry');
     }
   }
 

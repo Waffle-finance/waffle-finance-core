@@ -245,11 +245,12 @@ export class FeeModel {
     };
   }
 
-  // ── Config accessors ──────────────────────────────────────────────────────
+  // Config accessors
 
   /** Update prices and gas assumptions without re-instantiating. */
   update(patch: Partial<FeeModelConfig>): void {
     this._config = { ...this._config, ...patch };
+    this._assertConfig();
   }
 
   get ethPriceUsd(): number { return this._config.ethPriceUsd; }
@@ -266,6 +267,19 @@ export class FeeModel {
    */
   computeRelayDecision(input: RelayFeeInput): RelayDecision {
     this._assertConfig();
+
+    if (input.orderAmountNative < 0n) {
+      throw new FeeModelConfigError('orderAmountNative cannot be negative');
+    }
+    if (input.safetyDepositWei < 0n) {
+      throw new FeeModelConfigError('safetyDepositWei cannot be negative');
+    }
+    if (input.expectedPayoutNative < 0n) {
+      throw new FeeModelConfigError('expectedPayoutNative cannot be negative');
+    }
+    if (input.gasLimitUnits !== undefined && input.gasLimitUnits <= 0n) {
+      throw new FeeModelConfigError('gasLimitUnits must be positive');
+    }
 
     const gasLimitUnits = input.gasLimitUnits ?? DEFAULT_GAS_LIMIT;
     const gasPriceWei = BigInt(Math.round(this._config.gasPriceGwei * 1e9));
@@ -394,6 +408,9 @@ export class FeeModel {
     }
     if (this._config.gasPriceGwei < 0) {
       throw new FeeModelConfigError('gasPriceGwei cannot be negative');
+    }
+    if (this._config.minProfitThresholdUsd < 0) {
+      throw new FeeModelConfigError('minProfitThresholdUsd cannot be negative');
     }
   }
 }

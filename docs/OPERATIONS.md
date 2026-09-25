@@ -174,7 +174,10 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 
 1. Verify resolver is registered:
    ```bash
-   pnpm --filter @wafflefinance/resolver status
+   # Check resolver health endpoint (the service exposes /health on RESOLVER_HEALTH_PORT)
+   curl http://localhost:${RESOLVER_HEALTH_PORT:-8081}/health
+   # Or check on-chain registration via the SDK:
+   pnpm --filter @wafflefinance/resolver start -- --check-registration
    ```
 2. Check resolver has sufficient stake
 3. Verify resolver RPC endpoints are configured correctly

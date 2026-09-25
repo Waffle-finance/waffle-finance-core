@@ -354,3 +354,111 @@ describe("OrdersRepository — transition event trail", () => {
     expect(events).toHaveLength(0);
   });
 });
+
+// ── #568: setStatus distinguishes NOT_FOUND vs STALE_STATUS ──────────────────
+
+describe("OrdersRepository.setStatus — NOT_FOUND vs STALE_STATUS (#568)", () => {
+  it("throws with code=NOT_FOUND when the order does not exist", async () => {
+    const repo = await freshRepo();
+    const err = await repo
+      .setStatus("wf_nonexistent_order_id", "failed")
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe("NOT_FOUND");
+    expect(err.message).toMatch(/not found/i);
+  });
+
+  it("throws with code=STALE_STATUS when the order exists but expectedStatus does not match", async () => {
+    const repo = await freshRepo();
+    const order = await announce(repo);
+    // The order is in "announced" — expect "src_locked" which is wrong
+    const err = await repo
+      .setStatus(order.publicId, "failed", "system", "src_locked")
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe("STALE_STATUS");
+    expect((err as any).currentStatus).toBe("announced");
+    expect(err.message).toMatch(/src_locked/);
+  });
+
+  it("succeeds when expectedStatus matches the current status", async () => {
+    const repo = await freshRepo();
+    const order = await announce(repo);
+    // order starts as "announced" — update with matching expected status
+    await expect(
+      repo.setStatus(order.publicId, "failed", "system", "announced")
+    ).resolves.toBeUndefined();
+    const updated = await repo.findByPublicId(order.publicId);
+    expect(updated!.status).toBe("failed");
+  });
+
+  it("succeeds unconditionally (no expectedStatus) when the order exists", async () => {
+    const repo = await freshRepo();
+    const order = await announce(repo);
+    await expect(
+      repo.setStatus(order.publicId, "completed")
+    ).resolves.toBeUndefined();
+    const updated = await repo.findByPublicId(order.publicId);
+    expect(updated!.status).toBe("completed");
+  });
+
+  it("throws NOT_FOUND (not STALE_STATUS) when order does not exist even with expectedStatus", async () => {
+    const repo = await freshRepo();
+    const err = await repo
+      .setStatus("wf_no_such_order", "completed", "system", "announced")
+      .catch((e) => e);
+    expect((err as any).code).toBe("NOT_FOUND");
+  });
+});
+
+describe("OrdersRepository per-order cursors (TD-043)", () => {
+  it("updates and retrieves per-order cursors correctly", async () => {
+    const repo = await freshRepo();
+    const order = await announce(repo);
+
+    expect(order.lastEthBlock).toBeNull();
+    expect(order.lastSorobanLedger).toBeNull();
+    expect(order.lastSolanaSlot).toBeNull();
+
+    await repo.updateOrderCursor(order.publicId, "ethereum", 100);
+    await repo.updateOrderCursor(order.publicId, "stellar", 500);
+    await repo.updateOrderCursor(order.publicId, "solana", 1200);
+
+    const updated = await repo.findByPublicId(order.publicId);
+    expect(updated!.lastEthBlock).toBe(100);
+    expect(updated!.lastSorobanLedger).toBe(500);
+    expect(updated!.lastSolanaSlot).toBe(1200);
+  });
+
+  it("only advances per-order cursor forward (monotonic)", async () => {
+    const repo = await freshRepo();
+    const order = await announce(repo);
+
+    await repo.updateOrderCursor(order.publicId, "ethereum", 200);
+    await repo.updateOrderCursor(order.publicId, "ethereum", 150); // lower value ignored
+
+    const updated = await repo.findByPublicId(order.publicId);
+    expect(updated!.lastEthBlock).toBe(200);
+  });
+
+  it("computes min active order cursor across active orders and ignores terminal orders", async () => {
+    const repo = await freshRepo();
+    const o1 = await repo.announce(BASE_ORDER);
+    const o2 = await repo.announce({
+      ...BASE_ORDER,
+      hashlock: "0x" + "c".repeat(64)
+    });
+
+    await repo.updateOrderCursor(o1.publicId, "ethereum", 100);
+    await repo.updateOrderCursor(o2.publicId, "ethereum", 150);
+
+    let min = await repo.getMinActiveOrderCursor("ethereum");
+    expect(min).toBe(100);
+
+    // Mark o1 as completed (terminal)
+    await repo.setStatus(o1.publicId, "completed");
+
+    min = await repo.getMinActiveOrderCursor("ethereum");
+    expect(min).toBe(150);
+  });
+});

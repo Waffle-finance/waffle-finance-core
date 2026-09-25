@@ -50,6 +50,17 @@ function makeStubDeps(overrides: Partial<AppDeps> = {}): AppDeps {
       eventsReplayed: 3
     })),
     runStaleCleanup: vi.fn(async () => ({ archivedCount: 7 })),
+    getReconciliationCursors: vi.fn(async () => ({
+      chainCursors: [{ chain: "ethereum", position: 100, updatedAt: 1 }],
+      orderCursors: [{
+        publicId: "wf_test",
+        status: "announced",
+        lastEthBlock: 50,
+        lastSorobanLedger: null,
+        lastSolanaSlot: null,
+        updatedAt: 1,
+      }],
+    })),
     ...overrides
   };
 }
@@ -257,5 +268,34 @@ describe("Admin routes — GET is not allowed", () => {
       .get("/admin/stale-cleanup")
       .set("Authorization", AUTH_HEADER);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /admin/reconciliation-cursors", () => {
+  beforeEach(() => {
+    delete process.env.COORDINATOR_OPERATOR_KEYS;
+  });
+
+  it("returns 401 when Authorization header is missing", async () => {
+    const app = makeApp();
+    const res = await request(app).get("/admin/reconciliation-cursors");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns chain and order cursor state on success", async () => {
+    const getReconciliationCursors = vi.fn(async () => ({
+      chainCursors: [{ chain: "ethereum", position: 5000, updatedAt: 123 }],
+      orderCursors: [],
+    }));
+    const app = makeApp({ getReconciliationCursors });
+
+    const res = await request(app)
+      .get("/admin/reconciliation-cursors")
+      .set("Authorization", AUTH_HEADER);
+
+    expect(res.status).toBe(200);
+    expect(getReconciliationCursors).toHaveBeenCalledOnce();
+    expect(res.body.ok).toBe(true);
+    expect(res.body.chainCursors).toHaveLength(1);
   });
 });

@@ -498,6 +498,7 @@ describe("createReadinessChecks — cache_alignment check", () => {
         sampleSize: 0,
         mismatches: [],
         aligned: true,
+        incompleteEvents: 0,
       }),
     })();
 
@@ -533,6 +534,7 @@ describe("createReadinessChecks — cache_alignment check", () => {
         lastRunAt: Date.now(),
         sampleSize: 10,
         aligned: false,
+        incompleteEvents: 0,
         mismatches: [
           {
             publicId: "wf_0xaaaa",
@@ -586,6 +588,7 @@ describe("createReadinessChecks — cache_alignment check", () => {
         sampleSize: 0,
         mismatches: [],
         aligned: false,
+        incompleteEvents: 0,
       }),
     })();
 
@@ -621,6 +624,7 @@ describe("createReadinessChecks — cache_alignment check", () => {
         sampleSize: 12,
         mismatches: [],
         aligned: true,
+        incompleteEvents: 0,
       }),
     })();
 
@@ -654,5 +658,89 @@ describe("createReadinessChecks — cache_alignment check", () => {
     })();
 
     expect(checks.find((c) => c.name === "cache_alignment")).toBeUndefined();
+  });
+});
+
+// ── #577: incomplete cache-verifier events ────────────────────────────────────
+
+describe("CacheVerifier — #577: malformed/incomplete events", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("skips an OrderCreated event with missing hashlock, records incompleteEvents=1, no repair attempted", async () => {
+    const { repo } = await freshDb();
+    const orders = new OrderService(repo, log);
+    await seedEthOrder(orders, nextHashlock(), "announced");
+
+    const { createPublicClient } = await import("viem");
+    const mockClient = (createPublicClient as MockedFunction<any>).mock.results.at(-1)?.value;
+
+    // Malformed: args exist but hashlock is undefined
+    mockClient.getLogs.mockImplementation(async ({ event }: any) => {
+      if (event?.name === "OrderCreated") {
+        return [{ args: { orderId: 1n /* no hashlock */ } }];
+      }
+      return [];
+    });
+
+    const verifier = new CacheVerifier(BASE_CFG, repo, log);
+    const status = await verifier.run();
+
+    // No repair should have been attempted — mismatches is empty
+    expect(status.mismatches).toHaveLength(0);
+    // Incomplete event was recorded
+    expect(status.incompleteEvents).toBe(1);
+    expect(status.aligned).toBe(true);
+    expect(status.lastRunOk).toBe(true);
+  });
+
+  it("skips an OrderClaimed event with missing orderId, records incompleteEvents=1", async () => {
+    const { repo } = await freshDb();
+    const orders = new OrderService(repo, log);
+    await seedEthOrder(orders, nextHashlock(), "src_locked");
+
+    const { createPublicClient } = await import("viem");
+    const mockClient = (createPublicClient as MockedFunction<any>).mock.results.at(-1)?.value;
+
+    mockClient.getLogs.mockImplementation(async ({ event }: any) => {
+      if (event?.name === "OrderClaimed") {
+        return [{ args: { preimage: "0xdeadbeef" /* no orderId */ } }];
+      }
+      return [];
+    });
+
+    const verifier = new CacheVerifier(BASE_CFG, repo, log);
+    const status = await verifier.run();
+
+    expect(status.mismatches).toHaveLength(0);
+    expect(status.incompleteEvents).toBe(1);
+  });
+
+  it("complete events retain their normal verification behavior alongside malformed ones", async () => {
+    const { repo } = await freshDb();
+    const orders = new OrderService(repo, log);
+    const hashlock = nextHashlock();
+    await seedEthOrder(orders, hashlock, "announced");
+
+    const { createPublicClient } = await import("viem");
+    const mockClient = (createPublicClient as MockedFunction<any>).mock.results.at(-1)?.value;
+
+    mockClient.getLogs.mockImplementation(async ({ event }: any) => {
+      if (event?.name === "OrderCreated") {
+        return [
+          { args: { orderId: 1n /* no hashlock — malformed */ } },
+          { args: { orderId: 2n, hashlock, timelock: 9999n } }, // valid
+        ];
+      }
+      return [];
+    });
+
+    const verifier = new CacheVerifier(BASE_CFG, repo, log);
+    const status = await verifier.run();
+
+    // Malformed event counted
+    expect(status.incompleteEvents).toBe(1);
+    // Valid event produced a mismatch (DB=announced but chain has lock)
+    expect(status.mismatches).toHaveLength(1);
+    expect(status.mismatches[0].mismatchType).toBe("src_lock_unexpected");
   });
 });

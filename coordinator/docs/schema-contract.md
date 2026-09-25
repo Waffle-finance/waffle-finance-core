@@ -63,6 +63,9 @@ The central table: one row per cross-chain swap order.
 | `preimage_enc_version`   | `INTEGER`                    | yes      | `NULL` = plaintext/legacy, `1` = AES-256-GCM (`crypto/secret-cipher.ts`). Added by `003_secret_encryption.sql`. |
 | `secret_revealed_tx`     | `TEXT`                       | yes      |                                                                          |
 | `resolver_address`       | `TEXT`                       | yes      | Resolver that filled the destination side.                            |
+| `last_eth_block`         | `INTEGER` / `BIGINT`         | yes      | Per-order Ethereum reconciler high-water mark. Added by `011_order_ledger_cursors.sql`. |
+| `last_soroban_ledger`    | `INTEGER` / `BIGINT`         | yes      | Per-order Soroban/Stellar reconciler high-water mark.                 |
+| `last_solana_slot`       | `INTEGER` / `BIGINT`         | yes      | Per-order Solana reconciler high-water mark.                          |
 | `created_at` / `updated_at` | `INTEGER` / `INTEGER`     | no       | Unix seconds, DB-assigned default (`strftime`/`EXTRACT(EPOCH …)`).     |
 | `archived_at`            | `INTEGER` / `BIGINT`         | yes      | Soft-delete timestamp. `NULL` = live. Added by `006_stale_cleanup.sql`. Note the intentional `INTEGER` vs `BIGINT` divergence — SQLite's `INTEGER` is already 64-bit; Postgres's is 32-bit. |
 

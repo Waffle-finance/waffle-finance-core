@@ -6,6 +6,23 @@
 import { EventType, EventMessage, EventListener } from './event-handlers.js';
 import FusionEventManager from './event-handlers.js';
 
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by `registerClient` when a caller attempts to register an ID that
+ * is already associated with an active client.  Callers should map this to
+ * an HTTP 409 Conflict response.
+ */
+export class ConflictError extends Error {
+  readonly code = 'CONFLICT' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 // Client subscription configuration
 export interface ClientSubscriptionConfig {
   maxSubscriptionsPerClient: number;
@@ -152,9 +169,17 @@ export class ClientSubscriptionManager {
   }
 
   /**
-   * Register new client
+   * Register new client.
+   *
+   * Throws a `ConflictError` when the supplied ID is already active so that
+   * callers can return a meaningful error response (e.g. HTTP 409) instead of
+   * silently replacing the existing connection and detaching its callbacks.
    */
   registerClient(clientInfo: Omit<ClientInfo, 'quotaUsage' | 'connectedAt' | 'lastActivity'>): string {
+    if (this.clients.has(clientInfo.id)) {
+      throw new ConflictError(`Client ID already registered: ${clientInfo.id}`);
+    }
+
     const client: ClientInfo = {
       ...clientInfo,
       connected: true,
@@ -175,7 +200,10 @@ export class ClientSubscriptionManager {
    */
   unregisterClient(clientId: string): boolean {
     const client = this.clients.get(clientId);
-    if (!client) return false;
+    if (!client) {
+      console.warn(`👤 Unknown client unregistration attempted: ${clientId}`);
+      return false;
+    }
 
     // Remove client's subscription
     if (client.subscription) {
@@ -208,12 +236,18 @@ export class ClientSubscriptionManager {
       throw new Error('Subscription limit exceeded');
     }
 
+    // Reject empty event-type sets
+    const resolvedEventTypes = eventTypes ?? [];
+    if (resolvedEventTypes.length === 0) {
+      throw new Error('At least one event type is required');
+    }
+
     // Create subscription
     const subscriptionId = this.generateId();
     const subscription: ClientSubscription = {
       id: subscriptionId,
       clientId,
-      eventTypes: new Set(eventTypes || []),
+      eventTypes: new Set(resolvedEventTypes),
       filters: {
         orderHashes: filters?.orderHashes ? new Set(filters.orderHashes) : undefined,
         resolvers: filters?.resolvers ? new Set(filters.resolvers) : undefined,

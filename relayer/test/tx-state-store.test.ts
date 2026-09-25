@@ -455,3 +455,217 @@ describe('TxStateStore — disk persistence and restart recovery', () => {
     }
   });
 });
+
+// ===========================================================================
+// TxStateStore — persisted block number validation (issue #610)
+// ===========================================================================
+
+describe('TxStateStore — persisted block number validation', () => {
+  function writeRawRecord(dir: string, record: object): void {
+    const orderId = (record as any).orderId as string;
+    const safe = orderId.replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 120);
+    const fpath = path.join(dir, `${safe}.json`);
+    fs.writeFileSync(fpath, JSON.stringify({ ...record, savedAt: Date.now() }), 'utf-8');
+  }
+
+  it('rejects a record with a negative minedBlock', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      writeRawRecord(dir, {
+        orderId: 'neg-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xabc',
+        minedBlock: -1,          // invalid: negative
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      // The corrupt record must NOT be loaded.
+      expect(store.get('neg-block')).toBeUndefined();
+      expect(store.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a record with a fractional minedBlock', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      writeRawRecord(dir, {
+        orderId: 'frac-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xabc',
+        minedBlock: 100.5,       // invalid: fractional
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      expect(store.get('frac-block')).toBeUndefined();
+      expect(store.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a record with NaN as minedBlock', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      // JSON.stringify(NaN) => 'null'; write raw to simulate corrupt file
+      const orderId = 'nan-block';
+      const fpath = path.join(dir, `${orderId}.json`);
+      const raw = JSON.stringify({
+        orderId,
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xabc',
+        minedBlock: null,        // null is treated as absent → valid, so test non-finite via string injection
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+        savedAt: Date.now(),
+      }).replace('"minedBlock":null', '"minedBlock":"not-a-number"');
+      fs.writeFileSync(fpath, raw, 'utf-8');
+
+      const store = new TxStateStore({ storageDir: dir });
+      // "not-a-number" is not a valid block number — record must be rejected.
+      expect(store.get(orderId)).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a record with a valid nonnegative integer minedBlock', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      writeRawRecord(dir, {
+        orderId: 'valid-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xabc',
+        minedBlock: 42,          // valid: nonnegative integer
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      const record = store.get('valid-block');
+      expect(record).toBeDefined();
+      expect(record!.minedBlock).toBe(42);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a record with minedBlock = 0 (genesis edge case)', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      writeRawRecord(dir, {
+        orderId: 'zero-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xabc',
+        minedBlock: 0,           // valid: zero is a nonnegative integer
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      const record = store.get('zero-block');
+      expect(record).toBeDefined();
+      expect(record!.minedBlock).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a record with no minedBlock (pre-mined state)', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      writeRawRecord(dir, {
+        orderId: 'no-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'submission_acked',
+        txHash: '0xabc',
+        // minedBlock absent — normal for submission_acked
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      const record = store.get('no-block');
+      expect(record).toBeDefined();
+      expect(record!.minedBlock).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects corrupt record but loads adjacent valid records', () => {
+    const dir = path.join(os.tmpdir(), `waffle-tx-store-blockval-${Date.now()}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+
+      // Invalid record
+      writeRawRecord(dir, {
+        orderId: 'bad-block',
+        correlationId: 'cid',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xbad',
+        minedBlock: -999,        // invalid
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      // Valid adjacent record
+      writeRawRecord(dir, {
+        orderId: 'good-block',
+        correlationId: 'cid2',
+        route: 'eth_to_xlm',
+        state: 'chain_mined',
+        txHash: '0xgood',
+        minedBlock: 777,         // valid
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        transitions: [],
+        recoveryAttempts: 0,
+      });
+
+      const store = new TxStateStore({ storageDir: dir });
+      expect(store.get('bad-block')).toBeUndefined();
+      expect(store.get('good-block')).toBeDefined();
+      expect(store.size()).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

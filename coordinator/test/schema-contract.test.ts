@@ -99,6 +99,7 @@ describe("schema.sql shape vs. schema-contract.md — orders", () => {
       "dst_chain", "dst_address", "dst_asset", "dst_amount",
       "dst_order_id", "dst_lock_tx", "dst_lock_block", "dst_timelock",
       "preimage", "preimage_enc_version", "secret_revealed_tx", "resolver_address",
+      "last_eth_block", "last_soroban_ledger", "last_solana_slot",
       "created_at", "updated_at", "archived_at",
     ];
     for (const col of expected) {

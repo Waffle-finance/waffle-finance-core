@@ -59,6 +59,7 @@ export interface AppDeps {
    * Omitting this disables the endpoint (the route is not mounted).
    */
   runExpiry?: () => Promise<ExpiryResult>;
+  getReconciliationCursors?: () => ReturnType<OrderService["getReconciliationCursorState"]>;
   /**
    * When provided, the SSE endpoint `GET /api/orders/:id/events` is mounted
    * and OrderService transitions broadcast events to connected clients.
@@ -140,6 +141,7 @@ export function createApp(deps: AppDeps): Express {
         runReconcile: deps.runReconcile,
         runStaleCleanup: deps.runStaleCleanup,
         runExpiry: deps.runExpiry,
+        getReconciliationCursors: deps.getReconciliationCursors,
       })
     );
   }

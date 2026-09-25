@@ -23,6 +23,7 @@ import type { Contract, EventLog, JsonRpcProvider } from 'ethers';
 import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
 import { withRetry, type RetryOptions } from '../utils/retry-policy.js';
 import { CursorStore } from '../utils/cursor-store.js';
+import { getLogger } from '../logger.js';
 
 export interface ContractEventBinding {
   /** Event name as declared in the contract ABI (e.g. "OrderCreated"). */
@@ -78,6 +79,8 @@ const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_IDLE_INTERVAL_MS = 120_000;
 const DEFAULT_MAX_WINDOW = 500;
 
+const logger = getLogger();
+
 export async function startContractEventPoller(
   contract: Contract,
   provider: JsonRpcProvider,
@@ -87,6 +90,10 @@ export async function startContractEventPoller(
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   const idleIntervalMs = options.idleIntervalMs ?? DEFAULT_IDLE_INTERVAL_MS;
   const maxWindow = options.maxBlockWindow ?? DEFAULT_MAX_WINDOW;
+
+  if (maxWindow <= 0) {
+    throw new RangeError(`maxBlockWindow must be positive, got ${maxWindow}`);
+  }
   const label = options.label ?? 'contract-poller';
   const isActive = options.isActive ?? (() => true);
   const isAttentive = options.isAttentive ?? (() => true);
@@ -98,7 +105,7 @@ export async function startContractEventPoller(
   const persisted = cursorStore.load(label);
   if (persisted !== null) {
     lastProcessed = persisted;
-    console.log(`[${label}] resumed from persisted cursor ${lastProcessed}`);
+    logger.info({ label, cursor: lastProcessed }, 'Resumed from persisted cursor');
   } else {
     lastProcessed = options.startBlock ?? (await withRetry(() => provider.getBlockNumber(), retryOpts));
   }
@@ -110,7 +117,7 @@ export async function startContractEventPoller(
     try {
       cursorStore.save(label, block);
     } catch (err: any) {
-      console.warn(`[${label}] failed to persist cursor:`, err?.message ?? err);
+      logger.warn({ label, err: err?.message ?? err }, 'Failed to persist cursor');
     }
   };
 
@@ -124,10 +131,18 @@ export async function startContractEventPoller(
       const fromBlock = lastProcessed + 1;
       const toBlock = Math.min(head, fromBlock + maxWindow - 1);
 
+      // Inverted range can occur after cursor rollback or a short chain
+      // reorganization.  Return an empty poll rather than feeding a
+      // negative window into the provider.
+      if (fromBlock > toBlock) {
+        logger.warn({ label, fromBlock, toBlock }, 'Inverted range, skipping');
+        return;
+      }
+
       for (const binding of bindings) {
         const filterFactory = contract.filters[binding.eventName];
         if (typeof filterFactory !== 'function') {
-          console.warn(`[${label}] no filter factory for event "${binding.eventName}"; skipping`);
+          logger.warn({ label, eventName: binding.eventName }, 'No filter factory for event; skipping');
           continue;
         }
         const filter = filterFactory();
@@ -138,9 +153,9 @@ export async function startContractEventPoller(
             const args = Array.from(ev.args as any);
             await binding.handler(...args, ev as EventLog);
           } catch (handlerErr: any) {
-            console.error(
-              `[${label}] handler for ${binding.eventName} threw:`,
-              handlerErr?.message ?? handlerErr,
+            logger.error(
+              { label, eventName: binding.eventName, err: handlerErr?.message ?? handlerErr },
+              'Handler threw',
             );
           }
         }
@@ -148,7 +163,7 @@ export async function startContractEventPoller(
 
       persistCursor(toBlock);
     } catch (err: any) {
-      console.warn(`[${label}] poll failed, cursor ${lastProcessed} preserved:`, err?.shortMessage ?? err?.message ?? err);
+      logger.warn({ label, cursor: lastProcessed, err: err?.shortMessage ?? err?.message ?? err }, 'Poll failed, cursor preserved');
     } finally {
       isPolling = false;
     }
@@ -163,8 +178,9 @@ export async function startContractEventPoller(
     tick,
   });
 
-  console.log(
-    `[${label}] from block ${lastProcessed}, ${bindings.length} event(s) — active ${intervalMs / 1000}s / idle ${idleIntervalMs / 1000}s`,
+  logger.info(
+    { label, fromBlock: lastProcessed, eventCount: bindings.length, activeIntervalS: intervalMs / 1000, idleIntervalS: idleIntervalMs / 1000 },
+    'Contract event poller started',
   );
 
   return {

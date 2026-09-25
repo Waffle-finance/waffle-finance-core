@@ -348,6 +348,57 @@ describe("SorobanListener cursor persistence", () => {
     expect(callArg?.cursor).toBeUndefined();
     listener.stop();
   });
+
+  it("does not advance cursor when a handler throws an error, allowing retry", async () => {
+    const store = new SorobanCursorStore({ storageDir: TEST_DIR });
+    store.save("test-handler-fail", "0000000000000010");
+    const server = makeMockServer({
+      events: [fakeRpcEvent(createdTopics(), createdValue())],
+      cursor: "0000000000000011",
+    });
+    // Set a very short poll interval so it retries quickly
+    const listener = new SorobanListener(BASE_CFG, 10, SILENT_LOG, {
+      cursorStore: store, cursorLabel: "test-handler-fail",
+    });
+    injectServer(listener, server);
+    
+    // Make the handler throw on the first call, succeed on the second
+    let calls = 0;
+    let firstCallTime = 0;
+    const handlers = {
+      onOrderCreated: vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) {
+            firstCallTime = Date.now();
+            throw new Error("handler failed");
+        }
+      }),
+      onOrderClaimed: vi.fn(),
+      onOrderRefunded: vi.fn(),
+    };
+    
+    await listener.start(handlers);
+    
+    // Wait for the first call to fail
+    await vi.waitFor(() => {
+      expect(calls).toBeGreaterThanOrEqual(1);
+    });
+    
+    // Cursor should NOT be advanced because the handler threw
+    expect(store.load("test-handler-fail")).toBe("0000000000000010");
+    expect(listener.getCursor()).toBe("0000000000000010");
+    
+    // Wait for the second call to succeed
+    await vi.waitFor(() => {
+      expect(calls).toBeGreaterThanOrEqual(2);
+    });
+    
+    // Cursor should now be advanced
+    expect(store.load("test-handler-fail")).toBe("0000000000000011");
+    expect(listener.getCursor()).toBe("0000000000000011");
+    
+    listener.stop();
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

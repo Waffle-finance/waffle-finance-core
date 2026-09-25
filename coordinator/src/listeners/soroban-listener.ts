@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { rpc } from "@stellar/stellar-sdk";
 import type { xdr } from "@stellar/stellar-sdk";
 import type { Logger } from "pino";
@@ -56,12 +57,16 @@ const DEDUP_CACHE_MAX = 10_000;
  * the version we use, so we extract the relevant slice.
  */
 interface SorobanRpcEvent {
+  id?: string;
+  pagingToken?: string;
   ledger: number;
   txHash: string;
   /** Array of xdr.ScVal — the published topics. */
   topic: xdr.ScVal[];
   /** Single xdr.ScVal — the published data (a Soroban Vec/tuple). */
   value: xdr.ScVal;
+  eventIndex?: number;
+  inSuccessfulContractCall?: boolean;
 }
 
 // ─── SorobanListener ─────────────────────────────────────────────────────────
@@ -151,19 +156,45 @@ export class SorobanListener {
 
   // ─── Event deduplication helpers ─────────────────────────────────────────
 
-  /** Build the dedup cache key: `"<kind>:<txHash>"`. */
-  private dedupKey(kind: string, txHash: string): string {
-    return `${kind}:${txHash}`;
+  /**
+   * Computes a stable discriminator for a Soroban RPC event.
+   * Priority:
+   * 1. `ev.id` (RPC string identifier, e.g. `<ledger>-<index>`)
+   * 2. `ev.eventIndex` (numeric index within ledger/tx)
+   * 3. SHA-256 hash of `ev.value` XDR payload
+   */
+  private getEventDiscriminator(ev: SorobanRpcEvent): string {
+    if (ev.id !== undefined && ev.id !== "") {
+      return String(ev.id);
+    }
+    if (ev.eventIndex !== undefined) {
+      return `idx:${ev.eventIndex}`;
+    }
+    if (ev.value) {
+      try {
+        const xdrBuf = ev.value.toXDR();
+        const hash = createHash("sha256").update(xdrBuf).digest("hex").slice(0, 16);
+        return `val:${hash}`;
+      } catch {
+        // Fallback if toXDR fails
+      }
+    }
+    return "";
   }
 
-  /** Returns true if this (kind, txHash) pair was already processed in-process. */
-  isDuplicate(kind: string, txHash: string): boolean {
-    return this.processedEventKeys.has(this.dedupKey(kind, txHash));
+  /** Build the dedup cache key: `"<kind>:<txHash>[:<discriminator>]"`. */
+  private dedupKey(kind: string, txHash: string, discriminator: string = ""): string {
+    return discriminator ? `${kind}:${txHash}:${discriminator}` : `${kind}:${txHash}`;
   }
 
-  /** Mark (kind, txHash) as processed; evicts oldest entry on overflow. */
-  private markProcessed(kind: string, txHash: string): void {
-    const key = this.dedupKey(kind, txHash);
+  /** Returns true if this (kind, txHash, discriminator) tuple was already processed in-process. */
+  isDuplicate(kind: string, txHash: string, discriminator: string = ""): boolean {
+    return this.processedEventKeys.has(this.dedupKey(kind, txHash, discriminator));
+  }
+
+  /** Mark (kind, txHash, discriminator) as processed; evicts oldest entry on overflow. */
+  private markProcessed(kind: string, txHash: string, discriminator: string = ""): void {
+    const key = this.dedupKey(kind, txHash, discriminator);
     if (this.processedEventKeys.has(key)) return;
     if (this.processedEventKeys.size >= DEDUP_CACHE_MAX) {
       const oldest = this.processedEventKeys.keys().next().value;
@@ -491,6 +522,21 @@ export class SorobanListener {
     ev: SorobanRpcEvent,
     path: WorkflowPath = "live"
   ): Promise<boolean> {
+    // ── Ledger metadata validation ────────────────────────────────────────
+    // The RPC delivers `ledger` as a raw Number.  A malformed or adversarial
+    // response can produce NaN, ±Infinity, or a value above MAX_SAFE_INTEGER.
+    // Any of those would silently corrupt the cursor (NaN comparisons always
+    // return false, unsafe integers lose precision).  Reject the event before
+    // it can advance the cursor or reach persistence.
+    if (!Number.isFinite(ev.ledger) || !Number.isSafeInteger(ev.ledger) || ev.ledger < 0) {
+      sorobanDecodeErrors.inc({ reason: "invalid_ledger_metadata" });
+      this.log.warn(
+        { ledger: ev.ledger, txHash: ev.txHash, path },
+        "Soroban event has invalid ledger metadata (NaN, Infinity, or unsafe integer) — rejecting without dispatch"
+      );
+      return false;
+    }
+
     const result = decodeHtlcEvent(ev.topic, ev.value);
 
     // ── Malformed payload ─────────────────────────────────────────────────
@@ -519,18 +565,19 @@ export class SorobanListener {
     }
 
     const decoded: DecodedHtlcEvent = result;
+    const discriminator = this.getEventDiscriminator(ev);
 
     // ── In-process deduplication ──────────────────────────────────────────
-    if (this.isDuplicate(decoded.kind, ev.txHash)) {
+    if (this.isDuplicate(decoded.kind, ev.txHash, discriminator)) {
       this.log.debug(
-        { kind: decoded.kind, txHash: ev.txHash, ledger: ev.ledger, path },
+        { kind: decoded.kind, txHash: ev.txHash, ledger: ev.ledger, path, discriminator },
         "Soroban event duplicate skipped (in-process cache)"
       );
       return false;
     }
 
     this.log.info(
-      { kind: decoded.kind, schemaVersion: decoded.schemaVersion, ledger: ev.ledger, txHash: ev.txHash, path },
+      { kind: decoded.kind, schemaVersion: decoded.schemaVersion, ledger: ev.ledger, txHash: ev.txHash, path, discriminator },
       "Soroban HTLC event decoded"
     );
 
@@ -568,7 +615,7 @@ export class SorobanListener {
           blockNumber: ev.ledger,
           timelock: decoded.timelock,
         });
-        this.markProcessed(decoded.kind, ev.txHash);
+        this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "src_lock");
         return true;
       } catch (err: unknown) {
@@ -620,7 +667,7 @@ export class SorobanListener {
             decoded.preimage,
             ev.txHash
           );
-          this.markProcessed(decoded.kind, ev.txHash);
+          this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "secret_reveal");
           return true;
         }
@@ -642,7 +689,7 @@ export class SorobanListener {
           decoded.preimage,
           ev.txHash
         );
-        this.markProcessed(decoded.kind, ev.txHash);
+        this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "secret_reveal");
         return true;
       } catch (err: unknown) {
@@ -690,7 +737,7 @@ export class SorobanListener {
           });
           if (!decision.shouldApply) return false;
           await this.orders.markStatus(byHash.publicId, "refunded");
-          this.markProcessed(decoded.kind, ev.txHash);
+          this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "refund");
           return true;
         }
@@ -708,7 +755,7 @@ export class SorobanListener {
         });
         if (!decision.shouldApply) return false;
         await this.orders.markStatus(order.publicId, "refunded");
-        this.markProcessed(decoded.kind, ev.txHash);
+        this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "refund");
         return true;
       } catch (err: unknown) {

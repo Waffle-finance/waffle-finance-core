@@ -89,6 +89,8 @@ async function fetchPricesFromCoinGecko(): Promise<PriceSnapshot> {
     if (
       typeof xlmUsdPrice !== 'number' ||
       typeof ethUsdPrice !== 'number' ||
+      !Number.isFinite(xlmUsdPrice) ||
+      !Number.isFinite(ethUsdPrice) ||
       xlmUsdPrice <= 0 ||
       ethUsdPrice <= 0
     ) {
@@ -196,28 +198,32 @@ export { PRICE_CACHE_FRESH_MS, PRICE_CACHE_STALE_MS };
 // ---------------------------------------------------------------------------
 
 /**
- * Calculate the relayer's safety deposit for a given ETH order amount.
+ * Calculate the relayer's safety deposit for a given ETH order amount using real-time prices.
  *
  * Uses tiered USD bands to keep the deposit proportional to order size.
  * On testnet the EscrowFactory contract enforces a hard minimum of 0.01 ETH,
  * which is applied automatically when `networkMode` resolves to 'testnet'.
  *
- * This function is intentionally synchronous and uses a static ETH price
- * for the tier calculation. For production-grade dynamic pricing, callers
- * should use `calculateDynamicSafetyDepositAsync` instead.
- *
  * @param amountInWei  Order amount in wei (string or bigint).
  * @param networkMode  'testnet' | 'mainnet' | undefined (defaults to env).
  * @param defaultNetworkMode The resolved default network from config.
  */
-export function calculateDynamicSafetyDeposit(
+export async function calculateDynamicSafetyDeposit(
   amountInWei: string | bigint,
   networkMode: string | undefined,
   defaultNetworkMode: string
-): bigint {
-  const ETH_USD_PRICE = 3500; // Static fallback price for tier calculation
+): Promise<bigint> {
+  let ethUsdPrice = 3500;
+  try {
+    const prices = await getRealTimePrices();
+    ethUsdPrice = prices.ethUsdPrice;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: msg }, 'Failed to fetch real-time ETH price for safety deposit; using fallback');
+  }
+
   const amountInEth = parseFloat(ethers.formatEther(amountInWei.toString()));
-  const amountInUsd = amountInEth * ETH_USD_PRICE;
+  const amountInUsd = amountInEth * ethUsdPrice;
 
   // Tiered safety deposit rates
   let safetyDepositInEth: number;
@@ -244,6 +250,7 @@ export function calculateDynamicSafetyDeposit(
       {
         amountEth: amountInEth,
         amountUsd: amountInUsd,
+        ethUsdPrice,
         dynamicDeposit: originalSafetyDeposit,
         finalDeposit: safetyDepositInEth,
         network: 'testnet',
@@ -256,6 +263,7 @@ export function calculateDynamicSafetyDeposit(
       {
         amountEth: amountInEth,
         amountUsd: amountInUsd,
+        ethUsdPrice,
         dynamicDeposit: originalSafetyDeposit,
         finalDeposit: safetyDepositInEth,
         network: 'mainnet',
@@ -268,65 +276,6 @@ export function calculateDynamicSafetyDeposit(
 }
 
 /**
- * Async variant of `calculateDynamicSafetyDeposit` that fetches the live ETH
- * price from the SWR cache instead of relying on a hardcoded constant.
- *
- * Use this in the order-creation hot path so the deposit amount stays
- * accurate during ETH price swings.
+ * Backward compatibility alias for calculateDynamicSafetyDeposit.
  */
-export async function calculateDynamicSafetyDepositAsync(
-  amountInWei: string | bigint,
-  networkMode: string | undefined,
-  defaultNetworkMode: string
-): Promise<bigint> {
-  const { ethUsdPrice } = await getRealTimePrices();
-  const amountInEth = parseFloat(ethers.formatEther(amountInWei.toString()));
-  const amountInUsd = amountInEth * ethUsdPrice;
-
-  let safetyDepositInEth: number;
-  if (amountInUsd <= 50) {
-    safetyDepositInEth = 0.00005;
-  } else if (amountInUsd <= 100) {
-    safetyDepositInEth = 0.0001;
-  } else if (amountInUsd <= 500) {
-    safetyDepositInEth = 0.0002;
-  } else if (amountInUsd <= 1000) {
-    safetyDepositInEth = 0.0005;
-  } else {
-    safetyDepositInEth = Math.min(0.002, amountInEth * 0.01);
-  }
-
-  const originalSafetyDeposit = safetyDepositInEth;
-  const isTestnet =
-    networkMode === 'testnet' || defaultNetworkMode === 'testnet';
-
-  if (isTestnet) {
-    const TESTNET_MIN = 0.01;
-    safetyDepositInEth = Math.max(safetyDepositInEth, TESTNET_MIN);
-    logger.debug(
-      {
-        amountEth: amountInEth,
-        amountUsd: amountInUsd,
-        ethUsdPrice,
-        dynamicDeposit: originalSafetyDeposit,
-        finalDeposit: safetyDepositInEth,
-        network: 'testnet',
-      },
-      'Testnet safety deposit calculated (async)'
-    );
-  } else {
-    logger.debug(
-      {
-        amountEth: amountInEth,
-        amountUsd: amountInUsd,
-        ethUsdPrice,
-        dynamicDeposit: originalSafetyDeposit,
-        finalDeposit: safetyDepositInEth,
-        network: 'mainnet',
-      },
-      'Mainnet safety deposit calculated (async)'
-    );
-  }
-
-  return ethers.parseEther(safetyDepositInEth.toString());
-}
+export const calculateDynamicSafetyDepositAsync = calculateDynamicSafetyDeposit;

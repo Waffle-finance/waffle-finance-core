@@ -129,7 +129,7 @@ describe("PostgreSQL Database Compatibility", () => {
     const migrations = await queryMigrations(db);
     expect(migrations.length).toBeGreaterThan(0);
     const version = await getCurrentSchemaVersion(db);
-    const expected = dbType === "postgres" ? "007_audit_log_postgres.sql" : "007_audit_log.sql";
+    const expected = dbType === "postgres" ? "011_order_ledger_cursors_postgres.sql" : "011_order_ledger_cursors.sql";
     expect(version).toBe(expected);
   });
 
@@ -557,6 +557,10 @@ describe("PostgreSQL Migration Edge Cases", () => {
       "005_schema_migrations.sql",
       "006_stale_cleanup_postgres.sql",
       "007_audit_log_postgres.sql",
+      "008_query_optimizations_advanced_postgres.sql",
+      "009_chain_cursors_postgres.sql",
+      "010_soroban_checkpoints_postgres.sql",
+      "011_order_ledger_cursors_postgres.sql",
     ]);
 
     await fresh.getPool().end();
@@ -610,7 +614,7 @@ describe("PostgreSQL Migration Edge Cases", () => {
     if (!fresh) return;
 
     const version = await getCurrentSchemaVersion(fresh);
-    expect(version).toBe("007_audit_log_postgres.sql");
+    expect(version).toBe("011_order_ledger_cursors_postgres.sql");
 
     await fresh.getPool().end();
   });

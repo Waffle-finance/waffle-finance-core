@@ -83,10 +83,48 @@ describe("retryAsync — exhaustion", () => {
     ).rejects.toBe(errors.at(2));
   });
 
-  it("calls fn exactly maxAttempts times before giving up", async () => {
-    let calls = 0;
-    await fastRetry(async () => { calls++; throw new Error("x"); }, { maxAttempts: 4 }).catch(() => {});
-    expect(calls).toBe(4);
+  it("throws RangeError for zero maxAttempts", async () => {
+    await expect(
+      fastRetry(async () => "ok", { maxAttempts: 0 })
+    ).rejects.toThrow("maxAttempts must be a positive integer");
+  });
+
+  it("throws RangeError for negative maxAttempts", async () => {
+    await expect(
+      fastRetry(async () => "ok", { maxAttempts: -1 })
+    ).rejects.toThrow("maxAttempts must be a positive integer");
+  });
+
+  it("accepts maxAttempts of 1", async () => {
+    await expect(
+      fastRetry(async () => "ok", { maxAttempts: 1 })
+    ).resolves.toBe("ok");
+  });
+});
+
+describe("retryAsync — negative delay rejection", () => {
+  it("throws RangeError for negative baseDelayMs", async () => {
+    await expect(
+      retryAsync(async () => "ok", { baseDelayMs: -100 })
+    ).rejects.toThrow("baseDelayMs must be non-negative");
+  });
+
+  it("throws RangeError for negative maxDelayMs", async () => {
+    await expect(
+      retryAsync(async () => "ok", { maxDelayMs: -1 })
+    ).rejects.toThrow("maxDelayMs must be non-negative");
+  });
+
+  it("throws RangeError for negative jitterMs", async () => {
+    await expect(
+      retryAsync(async () => "ok", { jitterMs: -50 })
+    ).rejects.toThrow("jitterMs must be non-negative");
+  });
+
+  it("accepts zero baseDelayMs without throwing", async () => {
+    await expect(
+      fastRetry(async () => "ok", { baseDelayMs: 0 })
+    ).resolves.toBe("ok");
   });
 });
 

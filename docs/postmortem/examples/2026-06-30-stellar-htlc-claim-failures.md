@@ -185,5 +185,5 @@ The HTLC trust model performed exactly as designed — no funds were ever at ris
 - [GitHub issue #186 — Diverse Soroban RPC fallback](https://github.com/Waffle-finance/waffle-finance-core/issues/186)
 - [GitHub issue #187 — OPERATIONS.md runbook: Stellar RPC stale state](https://github.com/Waffle-finance/waffle-finance-core/issues/187)
 - [Stellar Expert testnet explorer — ledger gap](https://stellar.expert/explorer/testnet)
-- [HTLC refund layers — README](../../README.md#refund-layers)
-- [Incident response runbooks — OPERATIONS.md](../../docs/OPERATIONS.md#incident-response)
+- [HTLC refund layers — README](../../../README.md#refund-layers)
+- [Incident response runbooks — OPERATIONS.md](../../../docs/OPERATIONS.md#incident-response)

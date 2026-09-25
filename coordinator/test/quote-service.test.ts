@@ -343,6 +343,33 @@ describe("QuoteService — SWR caching", () => {
     expect(solSnap.dstUsd).toBe(160);
   });
 
+  // ── TTL validation ────────────────────────────────────────────────────────
+
+  it("rejects zero freshTtlMs", () => {
+    expect(() => new QuoteService(NOOP_LOGGER, { freshTtlMs: 0 })).toThrow(
+      "freshTtlMs must be a positive number"
+    );
+  });
+
+  it("rejects negative staleTtlMs", () => {
+    expect(() => new QuoteService(NOOP_LOGGER, { staleTtlMs: -1 })).toThrow(
+      "staleTtlMs must be a positive number"
+    );
+  });
+
+  it("rejects zero maxStaleTtlMs", () => {
+    expect(() => new QuoteService(NOOP_LOGGER, { maxStaleTtlMs: 0 })).toThrow(
+      "maxStaleTtlMs must be a positive number"
+    );
+  });
+
+  it("accepts positive TTL values", async () => {
+    fetchMock.mockResolvedValueOnce(cgResponse(3000, 0.10));
+    const svc = new QuoteService(NOOP_LOGGER, { freshTtlMs: 1, staleTtlMs: 2, maxStaleTtlMs: 3 });
+    const snap = await svc.getQuote("ETH-XLM");
+    expect(snap.srcUsd).toBe(3000);
+  });
+
   // ── #285: getCacheStats ───────────────────────────────────────────────────
 
   it("getCacheStats() returns empty object when cache is cold", () => {

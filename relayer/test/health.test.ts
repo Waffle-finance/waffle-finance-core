@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import supertest from 'supertest';
-import { healthRouter, type HealthStatus } from '../src/routes/health.js';
+import { healthRouter, validateProbeTimeout, type HealthStatus } from '../src/routes/health.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -391,5 +391,67 @@ describe('GET /health — basic contract', () => {
       expect(typeof svc.status).toBe('string');
       expect(typeof svc.lastCheck).toBe('number');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateProbeTimeout — issue 588: nonpositive timeout guard
+// ---------------------------------------------------------------------------
+
+describe('validateProbeTimeout — timeout configuration guard', () => {
+  it('throws RangeError for a zero timeout', () => {
+    expect(() => validateProbeTimeout(0)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for a negative timeout', () => {
+    expect(() => validateProbeTimeout(-1)).toThrow(RangeError);
+    expect(() => validateProbeTimeout(-9999)).toThrow(RangeError);
+  });
+
+  it('error message mentions the bad value for zero', () => {
+    expect(() => validateProbeTimeout(0)).toThrow(/got 0/);
+  });
+
+  it('error message mentions the bad value for a negative number', () => {
+    expect(() => validateProbeTimeout(-500)).toThrow(/got -500/);
+  });
+
+  it('returns the value unchanged for a valid positive timeout', () => {
+    expect(validateProbeTimeout(1)).toBe(1);
+    expect(validateProbeTimeout(5000)).toBe(5000);
+    expect(validateProbeTimeout(30000)).toBe(30000);
+  });
+
+  it('accepts 1 ms as the minimum valid value', () => {
+    expect(validateProbeTimeout(1)).toBe(1);
+  });
+
+  it('normal health response payloads are unchanged when timeout is valid', async () => {
+    // This guards the acceptance criterion: valid config → same payload shape.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => '{}',
+    } as unknown as Response));
+
+    const savedEth = process.env.ETHEREUM_RPC_URL;
+    const savedHorizon = process.env.STELLAR_HORIZON_URL;
+    process.env.ETHEREUM_RPC_URL = 'https://eth.internal/rpc';
+    process.env.STELLAR_HORIZON_URL = 'https://horizon.internal';
+
+    const app = express();
+    app.use(healthRouter());
+    const res = await supertest(app).get('/readyz');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(Array.isArray(res.body.checks)).toBe(true);
+
+    vi.restoreAllMocks();
+    if (savedEth === undefined) delete process.env.ETHEREUM_RPC_URL;
+    else process.env.ETHEREUM_RPC_URL = savedEth;
+    if (savedHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
+    else process.env.STELLAR_HORIZON_URL = savedHorizon;
   });
 });

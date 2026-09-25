@@ -72,6 +72,7 @@ export class SolanaListener {
   private readonly connection: Connection;
   private readonly log: Logger;
   private stopped = false;
+  private timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   /** Last confirmed slot we observed — used to detect regressions. */
   private lastSlot = 0;
@@ -120,6 +121,10 @@ export class SolanaListener {
 
   stop(): void {
     this.stopped = true;
+    if (this.timeoutId !== undefined) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
   }
 
   /** Returns the number of slot buckets currently waiting for finalization. */
@@ -141,7 +146,9 @@ export class SolanaListener {
         this.log.warn({ err }, "Solana poll failed");
       }
 
-      await new Promise<void>((r) => setTimeout(r, this.cfg.pollIntervalMs));
+      await new Promise<void>((r) => {
+        this.timeoutId = setTimeout(r, this.cfg.pollIntervalMs);
+      });
     }
   }
 

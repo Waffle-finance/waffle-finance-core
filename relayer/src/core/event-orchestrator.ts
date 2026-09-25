@@ -169,7 +169,7 @@ export function createEventOrchestrator(
 
       const orderAmountBigInt = BigInt(orderData.amount as string);
       const orderNetworkMode = (orderData.networkMode as string) || defaultNetworkMode;
-      const actualSafetyDeposit = calculateDynamicSafetyDeposit(
+      const actualSafetyDeposit = await calculateDynamicSafetyDeposit(
         orderData.amount as string,
         orderNetworkMode,
         defaultNetworkMode,

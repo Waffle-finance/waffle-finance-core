@@ -7,6 +7,7 @@ import { ethers, Contract, EventLog } from 'ethers';
 import { RELAYER_CONFIG } from '../index.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from '../utils/adaptive-poll.js';
 import { sanitizeForLog } from '../utils/sanitize-for-log.js';
+import { getLogger } from '../logger.js';
 import {
   createEthOrderCreatedEvent,
   createEthOrderClaimedEvent,
@@ -116,7 +117,7 @@ export class EthereumEventListener {
 
     // Initialize Ethereum provider
     this.provider = new ethers.JsonRpcProvider(RELAYER_CONFIG.ethereum.rpcUrl);
-    
+
     // Initialize contract
     this.contract = new Contract(
       RELAYER_CONFIG.ethereum.contractAddress,
@@ -132,27 +133,22 @@ export class EthereumEventListener {
    */
   async startListening(): Promise<void> {
     if (this.isListening) {
-      console.log('⚠️  Event listener is already running');
+      getLogger().warn('[eth-listener] event listener is already running');
       return;
     }
 
     try {
-      // Initialize components first
       this.initializeComponents();
 
       logger.info('Starting Ethereum event listener');
       logger.info({ contractAddress: RELAYER_CONFIG.ethereum.contractAddress }, 'Contract address');
       logger.info({ network: RELAYER_CONFIG.ethereum.network }, 'Network');
 
-      // Validate configuration
       await this.validateConfiguration();
 
-      // Set up event listener for OrderCreated events
       if (RELAYER_CONFIG.enableMockMode) {
         logger.info('Mock mode: Simulating event listener (no real blockchain connection)');
       } else {
-        // Start from the current head — we only care about NEW orders,
-        // not history. Historical orders are surfaced via /api/orders.
         this.lastProcessedBlock = await this.provider!.getBlockNumber();
         logger.info(
           { fromBlock: this.lastProcessedBlock, activeIntervalMs: RELAYER_CONFIG.activePollIntervalMs, idleIntervalMs: RELAYER_CONFIG.idlePollIntervalMs },
@@ -280,8 +276,6 @@ export class EthereumEventListener {
       });
 
       this.dispatchRelayEvent(normalizedEvent);
-
-      // v1 Stellar HTLC path is disabled — see processCrossChainOrder comment.
       this.processCrossChainOrder({ orderId: orderIdStr, hashLock });
 
     } catch (error) {
@@ -320,17 +314,14 @@ export class EthereumEventListener {
       return;
     }
 
-    // Check if RPC URL is valid
     if (RELAYER_CONFIG.ethereum.rpcUrl.includes('YOUR_')) {
       throw new Error('Ethereum RPC URL contains placeholder values');
     }
 
     try {
-      // Test provider connection
       const network = await this.provider!.getNetwork();
       logger.info({ networkName: network.name, chainId: network.chainId.toString() }, 'Connected to Ethereum network');
 
-      // Test contract deployment
       const code = await this.provider!.getCode(RELAYER_CONFIG.ethereum.contractAddress);
       if (code === '0x') {
         throw new Error(`No contract deployed at address: ${RELAYER_CONFIG.ethereum.contractAddress}`);

@@ -70,7 +70,6 @@ export class GasPriceTracker {
       this.updateGasPrices();
     }, intervalMs);
 
-    // Initial update
     this.updateGasPrices();
     logger.info('Gas price monitoring started');
   }
@@ -116,7 +115,9 @@ export class GasPriceTracker {
     
     // Apply congestion adjustments
     const congestionMultiplier = this.getCongestionMultiplier();
-    const basePrice = BigInt(gasPrice[transactionType]);
+    // Use default 'standard' price if the requested type is missing (legacy response)
+    const priceStr = gasPrice[transactionType] ?? gasPrice.standard;
+    const basePrice = BigInt(priceStr);
     const adjustedPrice = (basePrice * BigInt(Math.floor(congestionMultiplier * 1000))) / BigInt(1000);
     
     return adjustedPrice.toString();
@@ -205,16 +206,14 @@ export class GasPriceTracker {
       this.currentGasPrice = mockGasPrice;
       this.congestionData = mockCongestion;
 
-      // Add to history
       this.priceHistory.push({
         timestamp: getCurrentTimestamp(),
         price: mockGasPrice.standard,
         baseFee: mockGasPrice.baseFee,
         priorityFee: mockGasPrice.priorityFee,
-        blockNumber: Math.floor(Math.random() * 1000000) + 17000000 // Mock block number
+        blockNumber: Math.floor(Math.random() * 1000000) + 17000000
       });
 
-      // Trim history if needed
       if (this.priceHistory.length > this.MAX_HISTORY_SIZE) {
         this.priceHistory = this.priceHistory.slice(-this.MAX_HISTORY_SIZE);
       }

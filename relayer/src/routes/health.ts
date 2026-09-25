@@ -84,6 +84,34 @@ const PLACEHOLDER_PATTERNS = [
 
 const RPC_PROBE_TIMEOUT_MS = 5_000;
 
+/**
+ * The minimum meaningful timeout for an RPC probe (1 ms).
+ * A zero or negative value passed to setTimeout fires immediately, which
+ * would abort every probe before it has a chance to respond and classify
+ * every healthy dependency as failed.  We reject such values here so the
+ * misconfiguration is surfaced as a clear error rather than a silent
+ * false-negative.
+ */
+const MIN_PROBE_TIMEOUT_MS = 1;
+
+/**
+ * Validate and return a safe probe timeout.
+ *
+ * Throws a RangeError for values ≤ 0 so the caller (or a test) can
+ * detect the misconfiguration immediately rather than observing
+ * phantom timeouts.
+ *
+ * Exported for unit testing.
+ */
+export function validateProbeTimeout(timeoutMs: number): number {
+  if (timeoutMs <= 0) {
+    throw new RangeError(
+      `RPC probe timeout must be a positive number of milliseconds (got ${timeoutMs})`,
+    );
+  }
+  return Math.max(timeoutMs, MIN_PROBE_TIMEOUT_MS);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -124,8 +152,9 @@ async function probeJsonRpc(
   method: string,
   timeoutMs = RPC_PROBE_TIMEOUT_MS,
 ): Promise<{ ok: boolean; latencyMs: number; detail?: string }> {
+  const safeTimeout = validateProbeTimeout(timeoutMs);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), safeTimeout);
   const startedAt = Date.now();
 
   try {
@@ -162,8 +191,9 @@ async function probeHorizon(
   horizonUrl: string,
   timeoutMs = RPC_PROBE_TIMEOUT_MS,
 ): Promise<{ ok: boolean; latencyMs: number; detail?: string }> {
+  const safeTimeout = validateProbeTimeout(timeoutMs);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), safeTimeout);
   const startedAt = Date.now();
 
   try {

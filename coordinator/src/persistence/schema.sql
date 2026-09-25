@@ -52,9 +52,19 @@ CREATE TABLE IF NOT EXISTS orders (
     -- Resolver that filled the destination side (if any).
     resolver_address      TEXT,
 
+    -- Per-order reconciler high-water marks (see 011_order_ledger_cursors.sql).
+    last_eth_block        INTEGER,
+    last_soroban_ledger   INTEGER,
+    last_solana_slot      INTEGER,
+
     created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    archived_at           INTEGER
+    archived_at           INTEGER,
+
+    -- Per-order high-water marks for reconciler (see TD-043).
+    last_eth_block        INTEGER,
+    last_soroban_ledger   INTEGER,
+    last_solana_slot      INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_hashlock         ON orders (hashlock);
@@ -72,6 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_orders_dst_address_created_at ON orders (dst_addr
 CREATE INDEX IF NOT EXISTS idx_orders_cursor_pagination ON orders (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_src_cursor ON orders (src_address, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_dst_cursor ON orders (dst_address, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_last_eth_block ON orders (last_eth_block) WHERE last_eth_block IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_last_soroban_ledger ON orders (last_soroban_ledger) WHERE last_soroban_ledger IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_last_solana_slot ON orders (last_solana_slot) WHERE last_solana_slot IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS order_events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

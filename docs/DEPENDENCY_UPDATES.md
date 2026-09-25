@@ -69,15 +69,20 @@ Reviewer for a security PR: the same person who reviews the package it touches (
 
 ## What CI runs on every Renovate PR
 
-Every Renovate PR goes through the existing [`ci.yml`](../.github/workflows/ci.yml) and, when relevant, [`contracts.yml`](../.github/workflows/contracts.yml):
+> **Note:** There is no `ci.yml` or `contracts.yml` workflow in this repository.
+> The following checks are what *should* run and what `verify-release-locally.sh`
+> covers locally. See [docs/DOC_MAP.md](DOC_MAP.md) for the four workflows
+> that actually execute automatically.
+
+Every Renovate PR goes through the existing CI and, when relevant, contract checks:
 
 - TypeScript build + tests across all packages
 - Hardhat compile + Hardhat tests (`HTLCEscrow`, `ResolverRegistry`)
 - Foundry fuzz + invariant tests (`contracts/test/foundry/*`)
 - Slither static analysis on v2 contracts
-- Soroban `cargo build` (workspace)
-- Manifest validation (`pnpm run validate:manifests`)
-- Deployment-artifact validation (`pnpm run validate:deployments`)
+- Soroban `cargo build` (workspace) — via [`soroban-contracts.yml`](../.github/workflows/soroban-contracts.yml)
+- Manifest validation (`pnpm validate:manifests`)
+- Deployment-artifact validation (`pnpm validate:deployments`)
 
 A Renovate PR is mergeable only when **all** of the above are green. There is no fast lane for Renovate.
 

@@ -78,6 +78,22 @@ export async function retryAsync<T>(
     onRetry,
   } = opts;
 
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new RangeError(`maxAttempts must be a positive integer, got ${maxAttempts}`);
+  }
+
+  if (baseDelayMs < 0) {
+    throw new RangeError(`baseDelayMs must be non-negative, got ${baseDelayMs}`);
+  }
+
+  if (maxDelayMs < 0) {
+    throw new RangeError(`maxDelayMs must be non-negative, got ${maxDelayMs}`);
+  }
+
+  if (jitterMs < 0) {
+    throw new RangeError(`jitterMs must be non-negative, got ${jitterMs}`);
+  }
+
   let attempt = 0;
 
   while (true) {

@@ -91,6 +91,20 @@ export interface QuoteServiceOptions {
   maxStaleTtlMs?: number;
 }
 
+function assertPositiveTtl(name: string, value: number | undefined): number {
+  const resolved = value ?? {
+    freshTtlMs: DEFAULT_FRESH_TTL_MS,
+    staleTtlMs: DEFAULT_STALE_TTL_MS,
+    maxStaleTtlMs: DEFAULT_MAX_STALE_TTL_MS,
+  }[name];
+
+  if (!Number.isFinite(resolved) || resolved <= 0) {
+    throw new RangeError(`${name} must be a positive number, got ${resolved}`);
+  }
+
+  return resolved;
+}
+
 const DEFAULT_FRESH_TTL_MS = 15_000;
 const DEFAULT_STALE_TTL_MS = 60_000;
 const DEFAULT_MAX_STALE_TTL_MS = 5 * 60_000;
@@ -130,9 +144,9 @@ export class QuoteService {
 
   constructor(log: Logger, opts: QuoteServiceOptions = {}) {
     this.log = log;
-    this.freshTtlMs = opts.freshTtlMs ?? DEFAULT_FRESH_TTL_MS;
-    this.staleTtlMs = opts.staleTtlMs ?? DEFAULT_STALE_TTL_MS;
-    this.maxStaleTtlMs = opts.maxStaleTtlMs ?? DEFAULT_MAX_STALE_TTL_MS;
+    this.freshTtlMs = assertPositiveTtl("freshTtlMs", opts.freshTtlMs);
+    this.staleTtlMs = assertPositiveTtl("staleTtlMs", opts.staleTtlMs);
+    this.maxStaleTtlMs = assertPositiveTtl("maxStaleTtlMs", opts.maxStaleTtlMs);
   }
 
   // -------------------------------------------------------------------------

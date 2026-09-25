@@ -62,8 +62,8 @@ export interface CreatedEvent {
   readonly kind: "created";
   /** Soroban numeric order id (u64 decoded as bigint). */
   readonly orderId: bigint;
-  /** 0x-prefixed 32-byte hex hashlock (sha256 of preimage). */
-  readonly hashlock: `0x${string}`;
+  /** 32-byte hex hashlock (sha256 of preimage). */
+  readonly hashlock: string;
   /** Absolute unix-second timelock. */
   readonly timelock: number;
   /** Stellar G-address of the order creator (resolver). */
@@ -82,10 +82,10 @@ export interface ClaimedEvent {
   readonly kind: "claimed";
   /** Soroban numeric order id. */
   readonly orderId: bigint;
-  /** 0x-prefixed 32-byte hex hashlock (from topics). */
-  readonly hashlock: `0x${string}`;
-  /** 0x-prefixed hex preimage (from data). */
-  readonly preimage: `0x${string}`;
+  /** 32-byte hex hashlock (from topics). */
+  readonly hashlock: string;
+  /** hex preimage (from data). */
+  readonly preimage: string;
   /** Stellar G-address of the beneficiary (from topics). */
   readonly beneficiary: string;
 }
@@ -96,8 +96,8 @@ export interface RefundedEvent {
   readonly kind: "refunded";
   /** Soroban numeric order id. */
   readonly orderId: bigint;
-  /** 0x-prefixed 32-byte hex hashlock (from topics). */
-  readonly hashlock: `0x${string}`;
+  /** 32-byte hex hashlock (from topics). */
+  readonly hashlock: string;
   /** Stellar G-address that received the refunded funds. */
   readonly refundAddress: string;
 }
@@ -139,8 +139,15 @@ function malformed(
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-function bytesToHex(bytes: Uint8Array | Buffer): `0x${string}` {
-  return ("0x" + Buffer.from(bytes).toString("hex")) as `0x${string}`;
+function bytesToHex(value: Uint8Array | Buffer | string): string {
+  if (typeof value === "string") {
+    const hex = value.replace(/^0x/i, "");
+    if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
+      throw new Error("Invalid hex string");
+    }
+    return hex.toLowerCase();
+  }
+  return Buffer.from(value).toString("hex");
 }
 
 function isBytes(v: unknown): v is Uint8Array | Buffer {

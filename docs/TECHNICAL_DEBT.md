@@ -283,20 +283,14 @@ In a fresh deployment with no traffic, events that occur before the first `wake`
 
 ---
 
-### TD-043 · Reconciler does not track last-processed ledger per order 🟢
+### TD-043 · Reconciler per-order ledger cursor tracking (RESOLVED) ✅
 
 **Discovered:** 2026-06-30  
-**Location:** `coordinator/src/reconciliation/reconciler.ts` line ~117 — comment: "We don't track last processed ledger per order, so this is a simplified check"
+**Resolved:** 2026-08-24 (Migration 011 added `last_eth_block`, `last_soroban_ledger`, `last_solana_slot` columns to orders table and updated reconciler to skip already-processed events and track per-order cursors).  
+**Location:** `coordinator/src/reconciliation/reconciler.ts`, `coordinator/src/persistence/orders-repo.ts`
 
 **Context:**  
-The reconciler re-scans a fixed lookback window (48 h) on every run and relies on idempotent event processing to skip already-handled events. It does not store a per-order high-water mark. For a high-volume deployment this means re-processing the same events on every reconciliation cycle, which is wasteful and can produce noisy logs.
-
-**Impact:**  
-Increased RPC call volume and log noise in high-throughput scenarios. No correctness issue because event processing is idempotent.
-
-**Next steps:**
-1. Add a `last_eth_block` / `last_soroban_ledger` / `last_solana_slot` column per order in the DB schema.
-2. Update the reconciler to use those cursors as the lower bound instead of the fixed lookback window.
+The reconciler previously re-scanned a fixed lookback window on every run. With TD-043, per-order high-water marks track the highest processed block/ledger/slot per order across Ethereum, Soroban, and Solana, preventing redundant processing and lowering RPC overhead.
 
 ---
 

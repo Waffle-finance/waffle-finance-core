@@ -14,8 +14,11 @@
 
 import type { JsonRpcProvider, TransactionResponse } from 'ethers';
 import { withRetry, type RetryOptions } from '../utils/retry-policy.js';
+import { getLogger } from '../logger.js';
 
 const DEFAULT_MAX_BLOCK_WINDOW = 50; // tightened from 500 — keeps worst-case RPC calls low
+
+const logger = getLogger();
 
 export interface IncomingEthPayment {
   hash: string;
@@ -54,6 +57,10 @@ export async function fetchIncomingEthPayments(
       const tx = entry as TransactionResponse;
       if (!tx.to || tx.to.toLowerCase() !== relayerLower) continue;
       if (!tx.value || tx.value <= 0n) continue;
+      if (!tx.hash) {
+        logger.warn({ blockNumber: block.number, from: tx.from }, 'Skipping transaction with missing hash');
+        continue;
+      }
       payments.push({
         hash: tx.hash,
         from: tx.from,

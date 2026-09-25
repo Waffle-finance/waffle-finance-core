@@ -10,6 +10,7 @@ import { xdr, nativeToScVal, StrKey } from "@stellar/stellar-sdk";
 import {
   decodeSorobanHtlcEvent,
   SorobanEventDecodeError,
+  toBigInt,
 } from "../src/listeners/soroban-events.js";
 
 // ── Fixture addresses ────────────────────────────────────────────────────────
@@ -376,5 +377,34 @@ describe("SorobanEventDecodeError", () => {
     expect(() =>
       decodeSorobanHtlcEvent(createdTopics(), scalarValue, META),
     ).toThrow(Error);
+  });
+});
+
+// ── toBigInt — safe number validation ─────────────────────────────────────────
+describe("toBigInt — safe number validation", () => {
+  it("accepts safe boundary integer Number.MAX_SAFE_INTEGER (9007199254740991)", () => {
+    expect(toBigInt(Number.MAX_SAFE_INTEGER, "amount")).toBe(9007199254740991n);
+  });
+
+  it("accepts safe boundary negative integer Number.MIN_SAFE_INTEGER (-9007199254740991)", () => {
+    expect(toBigInt(Number.MIN_SAFE_INTEGER, "amount")).toBe(-9007199254740991n);
+  });
+
+  it("throws RangeError for unsafe integer beyond Number.MAX_SAFE_INTEGER", () => {
+    expect(() => toBigInt(Number.MAX_SAFE_INTEGER + 1, "amount")).toThrow(RangeError);
+  });
+
+  it("throws RangeError for non-finite numbers (Infinity, NaN)", () => {
+    expect(() => toBigInt(Infinity, "amount")).toThrow(RangeError);
+    expect(() => toBigInt(-Infinity, "amount")).toThrow(RangeError);
+    expect(() => toBigInt(NaN, "amount")).toThrow(RangeError);
+  });
+
+  it("preserves exact handling for existing bigint inputs", () => {
+    expect(toBigInt(100n, "amount")).toBe(100n);
+  });
+
+  it("preserves exact handling for existing string inputs (throws TypeError)", () => {
+    expect(() => toBigInt("100", "amount")).toThrow(TypeError);
   });
 });

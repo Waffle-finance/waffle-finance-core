@@ -25,15 +25,23 @@ interface AuditDbRow {
   created_at: number;
 }
 
+function assertFiniteInteger(value: unknown, field: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n !== Math.trunc(n)) {
+    throw new Error(`Malformed audit row: ${field} is not a finite integer (got ${String(value)})`);
+  }
+  return n;
+}
+
 function rowToEntry(r: AuditDbRow): AuditEntry {
   return {
-    id: Number(r.id),
+    id: assertFiniteInteger(r.id, 'id'),
     schemaVersion: r.schema_version as typeof AUDIT_SCHEMA_VERSION,
     eventType: r.event_type as AuditEntry['eventType'],
     orderId: r.order_id,
     requestId: r.request_id,
     payloadJson: r.payload_json,
-    createdAt: Number(r.created_at),
+    createdAt: assertFiniteInteger(r.created_at, 'created_at'),
   };
 }
 
@@ -121,6 +129,15 @@ export class AuditRepository {
    * This is the only write path — entries are never updated or deleted.
    */
   async append(input: AuditEntryInput): Promise<number> {
+    // Validate that payloadJson is parseable JSON before hitting the database.
+    // Malformed JSON stored in the audit table would cause downstream export
+    // and replay code to fail far from the original write.
+    try {
+      JSON.parse(input.payloadJson);
+    } catch {
+      throw new SyntaxError(`AuditRepository.append: payloadJson is not valid JSON: ${input.payloadJson}`);
+    }
+
     const result = await stmtRun(this.insertStmt, {
       schemaVersion: AUDIT_SCHEMA_VERSION,
       eventType: input.eventType,
@@ -154,6 +171,14 @@ export class AuditRepository {
     } catch (err) {
       await stmtRun(rollbackStmt).catch(() => {/* swallow rollback error */});
       throw err;
+    } finally {
+      // Release temporary statements so adapter resources are not held
+      // across repeated batch writes. SQLite's DatabaseSync requires
+      // explicit finalization; Postgres statements are stateless and
+      // safe to skip.
+      for (const s of [txStmt, commitStmt, rollbackStmt]) {
+        if (typeof (s as any).finalize === 'function') (s as any).finalize();
+      }
     }
 
     return ids;
@@ -166,6 +191,9 @@ export class AuditRepository {
    * stable even if new entries are appended while a consumer is paginating.
    */
   async query(opts: AuditQueryOptions = {}): Promise<AuditPage> {
+    if (opts.limit !== undefined && opts.limit <= 0) {
+      throw new RangeError(`AuditRepository.query: limit must be a positive integer, got ${opts.limit}`);
+    }
     const limit = Math.min(opts.limit ?? 100, 1000);
     const fetchLimit = limit + 1; // fetch one extra to detect hasMore
 

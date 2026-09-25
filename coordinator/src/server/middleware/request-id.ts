@@ -5,6 +5,36 @@ import { runWithContext, type OperationClass } from "../../request-context.js";
 export const REQUEST_ID_HEADER = "x-request-id";
 export const CORRELATION_ID_HEADER = "x-correlation-id";
 
+/**
+ * Maximum accepted byte length for an incoming request/correlation ID.
+ * Values exceeding this are replaced with a freshly generated UUID.
+ */
+export const REQUEST_ID_MAX_LENGTH = 128;
+
+/**
+ * Allowed character set for incoming request/correlation IDs.
+ *
+ * Accepts alphanumerics, hyphens, underscores, and dots — the characters
+ * used by UUID v4, OpenTelemetry trace IDs, and common APM platforms.
+ * Control characters, whitespace, and other special characters are rejected
+ * to prevent log injection, header pollution, and tracing label corruption.
+ */
+const SAFE_ID_RE = /^[A-Za-z0-9\-_.]+$/;
+
+/**
+ * Return `true` when `value` is a safe, bounded request/correlation ID
+ * that can be forwarded to logs, response headers, and tracing labels.
+ *
+ * Exported for unit testing.
+ */
+export function isSafeId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= REQUEST_ID_MAX_LENGTH &&
+    SAFE_ID_RE.test(value)
+  );
+}
+
 /** Infer a coarse operation class from the request path and method. */
 function inferOperationClass(req: Request): OperationClass {
   const path = req.path;
@@ -51,13 +81,13 @@ function inferOperationClass(req: Request): OperationClass {
 export function requestIdMiddleware(req: Request, res: Response, next: NextFunction): void {
   const incoming = req.headers[REQUEST_ID_HEADER];
   const requestId =
-    typeof incoming === "string" && incoming.length > 0 && incoming.length <= 128
+    typeof incoming === "string" && isSafeId(incoming)
       ? incoming
       : randomUUID();
 
   const incomingCorrelation = req.headers[CORRELATION_ID_HEADER];
   const correlationId =
-    typeof incomingCorrelation === "string" && incomingCorrelation.length > 0 && incomingCorrelation.length <= 128
+    typeof incomingCorrelation === "string" && isSafeId(incomingCorrelation)
       ? incomingCorrelation
       : requestId;
 

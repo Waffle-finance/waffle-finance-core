@@ -451,6 +451,40 @@ describe("AuditExporter.validateOrderSequences", () => {
     expect(issues).toHaveLength(1);
     expect(issues[0]!.issue).toMatch(/no audit entries/i);
   });
+
+  it("reports malformed entry when toStatus field is missing", async () => {
+    const { auditRepo, exporter } = await freshSetup();
+    const oid = "wf_malformed_to";
+    // Manually insert a raw entry with no toStatus
+    await auditRepo.append({
+      eventType: "order.announced",
+      orderId: oid,
+      requestId: null,
+      payloadJson: JSON.stringify({ fromStatus: null }),  // toStatus missing
+    });
+    const issues = await exporter.validateOrderSequences([oid]);
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues[0]!.issue).toMatch(/malformed/i);
+  });
+
+  it("validates a legitimate expired lifecycle without discrepancies", async () => {
+    const { auditRepo, exporter } = await freshSetup();
+    const oid = "wf_expired";
+    const transitions = [
+      { event: "order.announced" as const, from: null,        to: "announced" },
+      { event: "order.src_locked" as const, from: "announced", to: "src_locked" },
+      { event: "order.expired"    as const, from: "src_locked", to: "expired"   },
+    ];
+    for (const t of transitions) {
+      await auditRepo.append(buildOrderAuditEntry(t.event as any, {
+        orderId: oid, hashlock: HASHLOCK, direction: "eth_to_xlm",
+        fromStatus: t.from, toStatus: t.to,
+        srcChain: "ethereum", dstChain: "stellar",
+      }));
+    }
+    const issues = await exporter.validateOrderSequences([oid]);
+    expect(issues).toHaveLength(0);
+  });
 });
 
 
@@ -693,6 +727,7 @@ describe("Replay fidelity — audit stream matches actual repo transitions", () 
 
     // Second batch — new transitions happen after the first replay
     await orders.recordDstLock({ publicId: order.publicId, ...DST_LOCK });
+    await orders.recordSecret(order.publicId, "0xpreimage", "0xsecrettx");
     await orders.markStatus(order.publicId, "completed");
     await new Promise((r) => setTimeout(r, 20));
 
@@ -711,5 +746,69 @@ describe("Replay fidelity — audit stream matches actual repo transitions", () 
     const all = await auditRepo.query({});
     const newIds = all.entries.filter((e) => e.id > r1.finalCursor!.afterId).map((e) => e.id);
     expect(run2.sort()).toEqual(newIds.sort());
+  });
+});
+
+
+// ─── Boundary / validation tests added for bug fixes ─────────────────────────
+
+// ── (b) + (c): zero and negative limit in AuditRepository.query ──────────────
+
+describe("AuditRepository.query — limit boundary validation", () => {
+  it("throws RangeError for a zero limit", async () => {
+    const { auditRepo } = await freshSetup();
+    await expect(auditRepo.query({ limit: 0 })).rejects.toThrow(RangeError);
+    await expect(auditRepo.query({ limit: 0 })).rejects.toThrow(/limit must be a positive integer/i);
+  });
+
+  it("throws RangeError for a negative limit", async () => {
+    const { auditRepo } = await freshSetup();
+    await expect(auditRepo.query({ limit: -1 })).rejects.toThrow(RangeError);
+    await expect(auditRepo.query({ limit: -1 })).rejects.toThrow(/limit must be a positive integer/i);
+  });
+
+  it("accepts a positive limit without throwing", async () => {
+    const { auditRepo } = await freshSetup();
+    for (let i = 0; i < 3; i++) {
+      await auditRepo.append(buildSystemAuditEntry("system.startup", `e${i}`));
+    }
+    // Should resolve normally and return at most 2 entries
+    const page = await auditRepo.query({ limit: 2 });
+    expect(page.entries).toHaveLength(2);
+    expect(page.nextCursor).not.toBeNull();
+  });
+});
+
+// ── (d): malformed JSON payload in AuditRepository.append ────────────────────
+
+describe("AuditRepository.append — payload JSON validation", () => {
+  it("throws SyntaxError for malformed JSON and does not insert a row", async () => {
+    const { auditRepo } = await freshSetup();
+
+    const badEntry = {
+      eventType: "system.startup" as const,
+      orderId: null,
+      requestId: null,
+      payloadJson: "{not valid json",
+    };
+
+    await expect(auditRepo.append(badEntry)).rejects.toThrow(SyntaxError);
+    await expect(auditRepo.append(badEntry)).rejects.toThrow(/payloadJson is not valid JSON/i);
+
+    // Confirm nothing was written to the table
+    const page = await auditRepo.query({});
+    expect(page.entries).toHaveLength(0);
+  });
+
+  it("accepts a valid JSON payload and inserts the row", async () => {
+    const { auditRepo } = await freshSetup();
+    const id = await auditRepo.append(
+      buildSystemAuditEntry("system.startup", "valid entry"),
+    );
+    expect(typeof id).toBe("number");
+    expect(id).toBeGreaterThan(0);
+
+    const page = await auditRepo.query({});
+    expect(page.entries).toHaveLength(1);
   });
 });

@@ -20,6 +20,9 @@ import type { AuditRepository, AuditCursor, AuditQueryOptions } from './audit-re
 import type { AuditEntry, AuditEventType } from './audit-log.js';
 import { parseAuditPayload } from './audit-log.js';
 
+/** Maximum page size the repository accepts (mirrors AuditRepository limit). */
+const MAX_PAGE_SIZE = 1000;
+
 // ─── Export options ───────────────────────────────────────────────────────────
 
 export interface ExportOptions {
@@ -100,7 +103,7 @@ export class AuditExporter {
    * console.log(`Replayed ${result.entriesProcessed} entries`);
    */
   async replay(handler: ReplayHandler, opts: ExportOptions = {}): Promise<ExportResult> {
-    const pageSize = opts.pageSize ?? 500;
+    const pageSize = Math.min(opts.pageSize ?? 500, MAX_PAGE_SIZE);
     let cursor: AuditCursor | undefined = opts.resumeCursor;
     let entriesProcessed = 0;
     let finalCursor: AuditCursor | null = null;
@@ -156,7 +159,10 @@ export class AuditExporter {
           createdAt: entry.createdAt,
           payload: parseAuditPayload(entry) ?? entry.payloadJson,
         };
-        dest.write(JSON.stringify(record) + '\n');
+        const ok = dest.write(JSON.stringify(record) + '\n');
+        if (!ok) {
+          return new Promise<void>((resolve) => dest.once('drain', resolve));
+        }
       },
       opts,
     );
@@ -187,7 +193,7 @@ export class AuditExporter {
   async validateOrderSequences(
     orderIds: string[],
   ): Promise<{ orderId: string; issue: string }[]> {
-    const TERMINAL = new Set(['completed', 'refunded', 'failed']);
+    const TERMINAL = new Set(['completed', 'refunded', 'failed', 'expired']);
     const discrepancies: { orderId: string; issue: string }[] = [];
 
     for (const orderId of orderIds) {
@@ -218,7 +224,27 @@ export class AuditExporter {
           continue;
         }
 
-        if (!payload || !payload.toStatus) continue;
+        // Guard: payload must be a non-null object with a string toStatus
+        if (!payload || typeof payload.toStatus !== 'string') {
+          discrepancies.push({
+            orderId,
+            issue: `Entry id=${entry.id} is malformed: missing or invalid toStatus`,
+          });
+          continue;
+        }
+
+        // Guard: if fromStatus is present it must be a string or null/undefined
+        if (
+          payload.fromStatus !== null &&
+          payload.fromStatus !== undefined &&
+          typeof payload.fromStatus !== 'string'
+        ) {
+          discrepancies.push({
+            orderId,
+            issue: `Entry id=${entry.id} is malformed: invalid fromStatus type`,
+          });
+          continue;
+        }
 
         // Check: first entry must be announced
         if (lastStatus === null && payload.toStatus !== 'announced') {

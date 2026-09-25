@@ -11,6 +11,22 @@ import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, notFoundError, invalidCursorError } from "../errors.js";
 
+/// Strictly parse a query-string integer parameter. Returns `undefined` when
+/// `raw` is omitted so the caller can fall back to a default, but rejects any
+/// value that isn't a plain finite integer — `NaN`, decimals, and text with a
+/// numeric prefix/suffix ("12junk") all fail rather than silently coercing
+/// (e.g. via `Number(...)`) into `NaN` or a truncated value that could reach
+/// persistence.
+function parseStrictQueryInt(raw: unknown): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const str = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof str !== "string" || str.trim() === "") return undefined;
+  if (!/^-?\d+$/.test(str.trim())) return null;
+  const n = Number(str.trim());
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  return n;
+}
+
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
   // `expired` is a soft, non-terminal state: the timelock has passed but no
@@ -106,12 +122,24 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
       return;
     }
     const address = parsedAddress.data;
-    const rawLimit = Number(req.query.limit ?? 50);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 200) : 50;
+
+    const rawLimit = parseStrictQueryInt(req.query.limit);
+    if (rawLimit === null) {
+      res.status(400).json(validationError([], "limit must be a valid integer"));
+      return;
+    }
+    const limit = rawLimit !== undefined ? Math.min(Math.max(rawLimit, 1), 200) : 50;
 
     // Support both cursor-based (preferred) and offset-based (legacy) pagination
     const cursorParam = req.query.cursor as string | undefined;
     const cursor = cursorParam && cursorParam.trim() !== '' ? cursorParam : undefined;
+    if (cursor !== undefined) {
+      const cursorNum = Number(cursor);
+      if (Number.isFinite(cursorNum) && cursorNum < 0) {
+        res.status(400).json(invalidCursorError());
+        return;
+      }
+    }
     const offset = req.query.offset !== undefined ? Math.max(Number(req.query.offset), 0) : undefined;
 
     try {

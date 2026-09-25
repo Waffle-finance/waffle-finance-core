@@ -263,6 +263,34 @@ describe('FeeModel', () => {
       expect(() => model.computeRelayDecision(profitableInput())).toThrow(FeeModelConfigError);
     });
 
+    it('throws FeeModelConfigError when gasPriceGwei is negative', () => {
+      const model = makeModel({ gasPriceGwei: -5 });
+      expect(() => model.computeRelayDecision(profitableInput())).toThrow(FeeModelConfigError);
+    });
+
+    it('throws FeeModelConfigError when minProfitThresholdUsd is negative', () => {
+      const model = makeModel({ minProfitThresholdUsd: -0.1 });
+      expect(() => model.computeRelayDecision(profitableInput())).toThrow(FeeModelConfigError);
+    });
+
+    it('throws FeeModelConfigError when orderAmountNative is negative', () => {
+      const model = makeModel();
+      const input = { ...profitableInput(), orderAmountNative: -1n };
+      expect(() => model.computeRelayDecision(input)).toThrow(FeeModelConfigError);
+    });
+
+    it('throws FeeModelConfigError when safetyDepositWei is negative', () => {
+      const model = makeModel();
+      const input = { ...profitableInput(), safetyDepositWei: -100n };
+      expect(() => model.computeRelayDecision(input)).toThrow(FeeModelConfigError);
+    });
+
+    it('throws FeeModelConfigError when expectedPayoutNative is negative', () => {
+      const model = makeModel();
+      const input = { ...profitableInput(), expectedPayoutNative: -10n };
+      expect(() => model.computeRelayDecision(input)).toThrow(FeeModelConfigError);
+    });
+
     it('does not throw for gasPriceGwei = 0 (free gas scenario)', () => {
       const model = makeModel({ gasPriceGwei: 0 });
       const dec = model.computeRelayDecision(profitableInput());

@@ -1,3 +1,17 @@
+> **ARCHIVAL NOTICE — one-time implementation record**
+>
+> This file is an initial implementation guide written when the gas regression
+> harness was first created (June 2026). The live reference for the test file
+> is `contracts/test/gas-regression.test.ts` itself; consult that file and
+> `contracts/README.md` for up-to-date usage. The command examples in this
+> guide use `npm test` — the repo uses **pnpm**; run
+> `pnpm --filter @wafflefinance/contracts test` instead. The GitHub Actions
+> snippet at the bottom references `.github/workflows/ci.yml`, which does not
+> exist; see [docs/DOC_MAP.md](docs/DOC_MAP.md) for the workflows that
+> actually run.
+>
+> This file is retained for historical context only.
+
 # Gas Regression Test Harness - Implementation Guide
 
 ## Overview

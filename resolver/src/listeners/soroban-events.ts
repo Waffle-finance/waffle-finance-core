@@ -169,9 +169,14 @@ function toNonEmptyHex(raw: unknown, field: string): string {
  * Ensure a native value is BigInt; coerce from number for robustness.
  * Soroban u64 / i128 both decode to BigInt with scValToNative.
  */
-function toBigInt(v: unknown, field: string): bigint {
+export function toBigInt(v: unknown, field: string): bigint {
   if (typeof v === "bigint") return v;
-  if (typeof v === "number") return BigInt(v);
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || !Number.isSafeInteger(v)) {
+      throw new RangeError(`Unsafe number: ${v} cannot be safely converted to bigint`);
+    }
+    return BigInt(v);
+  }
   throw new TypeError(`${field}: expected bigint, got ${typeof v}`);
 }
 

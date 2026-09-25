@@ -1,3 +1,20 @@
+> **ARCHIVAL NOTICE — design reference only, not current operating procedure**
+>
+> This document describes a `.github/workflows/release.yml` that **does not
+> exist** in this repository. The workflow was designed but never committed.
+> As a result, the automated tag-triggered verification pipeline described
+> here (the `verify-artifacts` job, gated Docker publish, artifact uploads,
+> etc.) does not run.
+>
+> **Current release gate:** run `scripts/verify-release-locally.sh` (or
+> `.ps1` on Windows) by hand before pushing a release tag. The four CI
+> workflows that actually exist are listed in
+> [docs/DOC_MAP.md](../docs/DOC_MAP.md). The current canonical release
+> checklist is [.github/RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+>
+> This file is preserved as a design reference for anyone who wants to
+> implement the automated release pipeline in the future.
+
 # Release Process Documentation
 
 ## Overview

@@ -57,6 +57,9 @@ import {
   HorizonTransientError,
 } from '../src/services/xlm-refund.js';
 import { RetryEngine, RetryExhaustedError } from '../src/utils/retry-engine.js';
+import { RecoveryService, RecoveryStatus, RecoveryType, type RecoveryConfig } from '../src/services/recovery-service.js';
+import { OrdersService } from '../src/services/orders.js';
+import FusionEventManager from '../src/events/event-handlers.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -868,5 +871,396 @@ describe('settlement failure Prometheus metrics', () => {
     const after = await cVal(settlementTerminalTotal as any, { direction: 'xlm_to_eth', category: 'rpc_rate_limit' });
     // rpc_rate_limit is recoverable — terminal counter must NOT increment.
     expect(after).toBe(before);
+  });
+});
+
+// ===========================================================================
+// SettlementFailureStore — malformed persisted records
+// ===========================================================================
+
+describe('SettlementFailureStore — malformed persisted records', () => {
+  /**
+   * Write a raw JSON file to the storage directory and boot a fresh store
+   * from it, returning the store and a spy on its internal _log method so
+   * we can verify the warn path was hit.
+   */
+  function bootWithFile(dir: string, filename: string, content: unknown) {
+    fs.writeFileSync(
+      pathMod.join(dir, filename),
+      typeof content === 'string' ? content : JSON.stringify(content),
+      'utf-8',
+    );
+  }
+
+  it('skips a record whose JSON is not parseable', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'bad-json.json', '{not valid json}}}');
+      const s = new SettlementFailureStore({ storageDir: dir });
+      // File existed but parse failed — store must remain empty, no throw.
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record missing orderId', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'no-orderid.json', {
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record with an empty-string orderId', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'empty-orderid.json', {
+        orderId: '',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record with an invalid recoveryStatus value', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'bad-status.json', {
+        orderId: 'bad-status-1',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'unknown_status',  // not in the valid set
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record where failureCount is not a number', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'bad-count.json', {
+        orderId: 'bad-count-1',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 'one',   // wrong type
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record where events is not an array', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'bad-events.json', {
+        orderId: 'bad-events-1',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: null,   // should be an array
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record missing the direction field', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      bootWithFile(dir, 'no-direction.json', {
+        orderId: 'no-dir-1',
+        // direction intentionally omitted
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads a valid record alongside a malformed one, keeping only the valid one', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-mal-'));
+    try {
+      // Valid record
+      bootWithFile(dir, 'good.json', {
+        orderId: 'good-order',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      // Malformed record in the same directory
+      bootWithFile(dir, 'bad.json', {
+        orderId: 42,               // orderId must be a string
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(1);
+      expect(s.get('good-order')).toBeDefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a duplicate orderId in a second file, keeping the first', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-dup-'));
+    try {
+      const base = {
+        orderId: 'dup-order',
+        direction: 'xlm_to_eth',
+        recoveryStatus: 'pending',
+        failureCount: 1,
+        recoveryAttempts: 0,
+        firstFailedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+        events: [],
+      };
+      // Write two files for the same orderId
+      bootWithFile(dir, 'dup_order_a.json', base);
+      bootWithFile(dir, 'dup_order_b.json', { ...base, failureCount: 99 });
+      const s = new SettlementFailureStore({ storageDir: dir });
+      // Only one record loaded; whichever came first wins (alphabetical dir order)
+      expect(s.size()).toBe(1);
+      // The failureCount from the first-loaded file should be present
+      const r = s.get('dup-order');
+      expect(r).toBeDefined();
+      expect([1, 99]).toContain(r!.failureCount); // either is acceptable — just not both
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('all valid recovery statuses are accepted', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'sfstore-statuses-'));
+    try {
+      const validStatuses = ['pending', 'recovering', 'recovered', 'failed', 'requires_review'];
+      for (const status of validStatuses) {
+        bootWithFile(dir, `${status}.json`, {
+          orderId: `order-${status}`,
+          direction: 'xlm_to_eth',
+          recoveryStatus: status,
+          failureCount: 1,
+          recoveryAttempts: 0,
+          firstFailedAt: Date.now(),
+          lastUpdatedAt: Date.now(),
+          events: [],
+        });
+      }
+      const s = new SettlementFailureStore({ storageDir: dir });
+      expect(s.size()).toBe(validStatuses.length);
+      for (const status of validStatuses) {
+        expect(s.get(`order-${status}`)?.recoveryStatus).toBe(status);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// RecoveryService — retryRecovery guards against completed / cancelled
+// ===========================================================================
+
+function makeRecoveryService(overrides: Partial<RecoveryConfig> = {}): {
+  service: RecoveryService;
+  ordersService: any;
+  eventManager: any;
+} {
+  const ordersService = {
+    getActiveOrders: vi.fn().mockReturnValue({ items: [] }),
+  };
+  const eventManager = {
+    on: vi.fn(),
+    emitEvent: vi.fn(),
+  };
+  const config: RecoveryConfig = {
+    monitoringInterval: 60_000,   // won't fire during tests
+    autoRefundEnabled: false,
+    emergencyEnabled: false,
+    maxRetries: 3,
+    retryDelay: 0,
+    gracePeriod: 0,
+    ...overrides,
+  };
+  const service = new RecoveryService(
+    ordersService as unknown as OrdersService,
+    eventManager as unknown as FusionEventManager,
+    config,
+  );
+  return { service, ordersService, eventManager };
+}
+
+describe('RecoveryService — retryRecovery skips completed / cancelled', () => {
+  it('does not re-execute a recovery that is already Completed', async () => {
+    const { service, ordersService } = makeRecoveryService();
+
+    const orderHash = '0xabc';
+    ordersService.getActiveOrders.mockReturnValue({
+      items: [{
+        orderHash,
+        srcChainId: 1,
+        dstChainId: 999,
+        order: { makingAmount: '100', makerAsset: 'ETH', takingAmount: '200', takerAsset: 'XLM' },
+        deadline: Math.floor(Date.now() / 1000) - 100,
+      }],
+    });
+
+    // Spy on executeTimeoutRefund so we can count executions
+    const execSpy = vi.spyOn(service as any, 'executeTimeoutRefund').mockResolvedValue(undefined);
+
+    // Run a successful manual recovery
+    const recoveryId = await service.initiateManualRecovery(
+      orderHash, RecoveryType.TimeoutRefund, 'test', 'initial run',
+    );
+
+    const request = service.getRecoveryRequest(recoveryId);
+    expect(request?.status).toBe(RecoveryStatus.Completed);
+    expect(execSpy).toHaveBeenCalledTimes(1);
+
+    // Directly invoke the private retryRecovery — simulates a scheduled retry
+    // firing after the recovery has already completed.
+    await (service as any).retryRecovery(recoveryId);
+
+    // executeTimeoutRefund must still be 1 — no second execution.
+    expect(execSpy).toHaveBeenCalledTimes(1);
+    expect(request?.status).toBe(RecoveryStatus.Completed);
+
+    execSpy.mockRestore();
+    service.cleanup();
+  });
+
+  it('does not re-execute a recovery that is Cancelled', async () => {
+    const { service, ordersService } = makeRecoveryService();
+
+    const orderHash = '0xdef';
+    ordersService.getActiveOrders.mockReturnValue({
+      items: [{
+        orderHash,
+        srcChainId: 1,
+        dstChainId: 999,
+        order: { makingAmount: '50', makerAsset: 'ETH', takingAmount: '100', takerAsset: 'XLM' },
+        deadline: Math.floor(Date.now() / 1000) - 100,
+      }],
+    });
+
+    const execSpy = vi.spyOn(service as any, 'executeTimeoutRefund').mockResolvedValue(undefined);
+
+    const recoveryId = await service.initiateManualRecovery(
+      orderHash, RecoveryType.TimeoutRefund, 'test', 'to be cancelled',
+    );
+
+    // Force the recovery into Cancelled state (e.g. via external admin action)
+    const request = service.getRecoveryRequest(recoveryId)!;
+    request.status = RecoveryStatus.Cancelled;
+
+    execSpy.mockClear();
+
+    // Fire retryRecovery — must be a no-op for Cancelled
+    await (service as any).retryRecovery(recoveryId);
+
+    expect(execSpy).not.toHaveBeenCalled();
+    expect(request.status).toBe(RecoveryStatus.Cancelled);
+
+    execSpy.mockRestore();
+    service.cleanup();
+  });
+
+  it('does re-execute a recovery that is Failed (still retryable)', async () => {
+    const { service, ordersService } = makeRecoveryService({ maxRetries: 1 });
+
+    const orderHash = '0xfed';
+    ordersService.getActiveOrders.mockReturnValue({
+      items: [{
+        orderHash,
+        srcChainId: 1,
+        dstChainId: 999,
+        order: { makingAmount: '75', makerAsset: 'ETH', takingAmount: '150', takerAsset: 'XLM' },
+        deadline: Math.floor(Date.now() / 1000) - 100,
+      }],
+    });
+
+    // Make the execution succeed this time so we can verify retry ran
+    const execSpy = vi.spyOn(service as any, 'executeTimeoutRefund').mockResolvedValue(undefined);
+
+    const recoveryId = await service.initiateManualRecovery(
+      orderHash, RecoveryType.TimeoutRefund, 'test', 'will be retried',
+    );
+
+    // Force into Failed to simulate the in-flight failure scenario
+    const request = service.getRecoveryRequest(recoveryId)!;
+    request.status = RecoveryStatus.Failed;
+
+    execSpy.mockClear();
+
+    await (service as any).retryRecovery(recoveryId);
+
+    // Should have been called — Failed is still retryable via retryRecovery
+    expect(execSpy).toHaveBeenCalledTimes(1);
+
+    execSpy.mockRestore();
+    service.cleanup();
+  });
+
+  it('is a no-op when the recoveryId does not exist', async () => {
+    const { service } = makeRecoveryService();
+    // Should not throw
+    await expect(
+      (service as any).retryRecovery('nonexistent-id'),
+    ).resolves.toBeUndefined();
+    service.cleanup();
   });
 });

@@ -61,6 +61,34 @@ export type AuditEventType =
   | 'system.listener_error'
   | 'system.db_migration';
 
+/**
+ * Exhaustive runtime list of every `AuditEventType` value, kept in sync with
+ * the union above. Used to validate untrusted input (e.g. query params)
+ * against the known event taxonomy without duplicating the list elsewhere.
+ */
+export const AUDIT_EVENT_TYPES: readonly AuditEventType[] = [
+  'order.announced',
+  'order.src_locked',
+  'order.dst_locked',
+  'order.secret_revealed',
+  'order.completed',
+  'order.refunded',
+  'order.failed',
+  'order.expired',
+  'order.src_lock_rolled_back',
+  'order.dst_lock_rolled_back',
+  'order.secret_recovered',
+  'order.stale_archived',
+  'reconciliation.started',
+  'reconciliation.completed',
+  'reconciliation.gap_detected',
+  'reconciliation.order_repaired',
+  'system.startup',
+  'system.shutdown',
+  'system.listener_error',
+  'system.db_migration',
+] as const;
+
 // ─── Payload shapes ───────────────────────────────────────────────────────────
 
 /** Payload attached to every order.* event. */

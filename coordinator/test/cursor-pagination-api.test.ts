@@ -214,6 +214,46 @@ describe("Cursor Pagination API", () => {
       });
     });
 
+    it("rejects a malformed limit value instead of silently coercing it", async () => {
+      const response = await request(app)
+        .get("/api/orders/history")
+        .query({
+          address: VALID_ETH_ADDR,
+          limit: "12junk"
+        })
+        .expect(400);
+
+      expect(response.body.error).toBe("validation_error");
+    });
+
+    it("rejects a malformed offset value instead of silently coercing it", async () => {
+      const response = await request(app)
+        .get("/api/orders/history")
+        .query({
+          address: VALID_ETH_ADDR,
+          offset: "5abc"
+        })
+        .expect(400);
+
+      expect(response.body.error).toBe("validation_error");
+    });
+
+    it("accepts valid numeric limit and offset values", async () => {
+      await createTestOrders(service, 3, VALID_ETH_ADDR);
+
+      const response = await request(app)
+        .get("/api/orders/history")
+        .query({
+          address: VALID_ETH_ADDR,
+          limit: "2",
+          offset: "1"
+        })
+        .expect(200);
+
+      expect(response.body.pagination.limit).toBe(2);
+      expect(response.body.pagination.offset).toBe(1);
+    });
+
     it("requires address parameter", async () => {
       const response = await request(app)
         .get("/api/orders/history")

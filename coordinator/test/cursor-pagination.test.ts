@@ -211,6 +211,69 @@ describe("Cursor-based Pagination", () => {
     });
   });
 
+  // ── #569 cursor + address-filter combined ─────────────────────────────────
+  // Seeds a mixed set where some orders match the target address (src OR dst)
+  // and others don't.  Fetches two pages with a small limit and asserts all
+  // matching orders appear exactly once across both pages — no skips, no dupes.
+  describe("cursor pagination with address filter (#569)", () => {
+    it("returns all matching rows exactly once when cursor and address filter are combined", async () => {
+      const ADDR_A = VALID_ETH_ADDR;
+      const ADDR_B = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF";
+      const STELLAR = VALID_STELLAR_ADDR;
+
+      // Build 6 orders: 4 involving ADDR_A (as src or dst), 2 only ADDR_B
+      const orders: Array<{ publicId: string }> = [];
+      let counter = 0;
+
+      async function seedOrder(src: string, dst: string) {
+        const hl = VALID_HASHLOCK_BASE.slice(0, -4) + (counter++).toString(16).padStart(4, "0");
+        const o = await repo.announce({
+          direction: "eth_to_xlm",
+          hashlock: hl,
+          srcChain: "ethereum",
+          srcAddress: src,
+          srcAsset: "native",
+          srcAmount: "1000000000000000000",
+          srcSafetyDeposit: "1000000000000000",
+          dstChain: "stellar",
+          dstAddress: dst,
+          dstAsset: "native",
+          dstAmount: "100000000",
+        });
+        await new Promise((r) => setTimeout(r, 1)); // distinct created_at
+        return o;
+      }
+
+      // 4 orders where ADDR_A appears (2 as src, 2 as dst)
+      orders.push(await seedOrder(ADDR_A, STELLAR));
+      orders.push(await seedOrder(ADDR_A, STELLAR));
+      orders.push(await seedOrder(ADDR_B, ADDR_A)); // ADDR_A is dst
+      orders.push(await seedOrder(ADDR_B, ADDR_A)); // ADDR_A is dst
+      // 2 orders not involving ADDR_A
+      await seedOrder(ADDR_B, STELLAR);
+      await seedOrder(ADDR_B, STELLAR);
+
+      const expectedIds = orders.map((o) => o.publicId).sort();
+
+      // Paginate with pageSize=2 — should need 2 pages to get all 4 ADDR_A rows
+      const page1 = await repo.findByAddressWithCursor(ADDR_A, 2);
+      expect(page1.orders).toHaveLength(2);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const page2 = await repo.findByAddressWithCursor(ADDR_A, 2, page1.nextCursor!);
+      expect(page2.orders).toHaveLength(2);
+      expect(page2.nextCursor).toBeNull(); // no third page
+
+      const combinedIds = [...page1.orders, ...page2.orders]
+        .map((o) => o.publicId)
+        .sort();
+
+      // Every matching order returned exactly once — no skips, no duplicates
+      expect(combinedIds).toEqual(expectedIds);
+      expect(new Set(combinedIds).size).toBe(4);
+    });
+  });
+
   describe("performance comparison", () => {
     it("cursor pagination should be faster than deep offset", { timeout: 30_000 }, async () => {
       await createTestOrders(repo, 1000, VALID_ETH_ADDR);

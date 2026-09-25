@@ -150,6 +150,56 @@ describe('contract-event-poller (integration)', () => {
     handle.stop();
   });
 
+  it('returns empty poll for inverted range without querying provider', async () => {
+    const handler = vi.fn();
+    const bindings: ContractEventBinding[] = [
+      { eventName: 'OrderCreated', handler },
+    ];
+
+    // Persist cursor AHEAD of current head to simulate a rollback.
+    cursorStore.save('test-inverted', 100);
+
+    const mockContract = {
+      filters: {
+        OrderCreated: () => ({}),
+      },
+      queryFilter: vi.fn().mockResolvedValue([]),
+    } as unknown as Contract;
+
+    const mockProvider = {
+      // Head is behind the persisted cursor → inverted range
+      getBlockNumber: vi.fn().mockResolvedValue(90),
+    } as unknown as JsonRpcProvider;
+
+    const { startContractEventPoller } = await import(
+      '../src/listeners/contract-event-poller.js'
+    );
+
+    const handle = await startContractEventPoller(
+      mockContract,
+      mockProvider,
+      bindings,
+      {
+        label: 'test-inverted',
+        cursorStore,
+        intervalMs: 10_000,
+        idleIntervalMs: 10_000,
+      },
+    );
+
+    // Wait for at least one tick
+    await new Promise((r) => setTimeout(r, 50));
+
+    // queryFilter should NOT have been called — range is inverted
+    expect(mockContract.queryFilter).not.toHaveBeenCalled();
+    // Handler should NOT have been called
+    expect(handler).not.toHaveBeenCalled();
+    // Cursor should remain unchanged at 100
+    expect(handle.cursor()).toBe(100);
+
+    handle.stop();
+  });
+
   it('does not advance cursor when RPC fails', async () => {
     const handler = vi.fn();
     const bindings: ContractEventBinding[] = [

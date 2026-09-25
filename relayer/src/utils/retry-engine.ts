@@ -94,6 +94,7 @@ import {
   retryEngineBackoffSeconds,
 } from '../metrics.js';
 import { getCorrelation } from '../correlation/correlation-context.js';
+import { getLogger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Fault classification
@@ -624,7 +625,5 @@ function _log(
   msg: string,
   extra: Record<string, unknown> = {},
 ): void {
-  const line = JSON.stringify({ level, msg, ts: new Date().toISOString(), ...extra }) + '\n';
-  if (level === 'error') process.stderr.write(line);
-  else process.stdout.write(line);
+  getLogger()[level](extra, msg);
 }

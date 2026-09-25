@@ -40,7 +40,8 @@
     "validate:manifests": "node scripts/validate-workspace.mjs",
     "validate:deployments": "node scripts/validate-deployments.mjs",
     "validate:deps": "node scripts/check-dep-versions.mjs",
-    "validate": "pnpm validate:manifests && pnpm validate:deps"
+    "validate:docs": "node scripts/check-docs-drift.mjs",
+    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

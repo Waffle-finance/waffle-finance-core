@@ -165,6 +165,32 @@ export function validateRelayerStartup(
     });
   }
 
+  // ── Polling intervals ────────────────────────────────────────────────────
+
+  const activePollEnv = env["RELAYER_ACTIVE_POLL_INTERVAL_MS"];
+  if (activePollEnv !== undefined) {
+    const parsed = Number(activePollEnv);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      errors.push({
+        field: "RELAYER_ACTIVE_POLL_INTERVAL_MS",
+        code: "invalid_value",
+        message: `RELAYER_ACTIVE_POLL_INTERVAL_MS must be a non-negative number, got: ${activePollEnv}`,
+      });
+    }
+  }
+
+  const idlePollEnv = env["RELAYER_IDLE_POLL_INTERVAL_MS"];
+  if (idlePollEnv !== undefined) {
+    const parsed = Number(idlePollEnv);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      errors.push({
+        field: "RELAYER_IDLE_POLL_INTERVAL_MS",
+        code: "invalid_value",
+        message: `RELAYER_IDLE_POLL_INTERVAL_MS must be a non-negative number, got: ${idlePollEnv}`,
+      });
+    }
+  }
+
   return errors;
 }
 

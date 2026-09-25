@@ -335,6 +335,7 @@ async function main(): Promise<void> {
     },
     runStaleCleanup: () => staleCleanup.run(),
     runExpiry: runExpiryTrigger,
+    getReconciliationCursors: () => orders.getReconciliationCursorState(),
   });
 
   const server = app.listen(cfg.port, () => {

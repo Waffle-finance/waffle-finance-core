@@ -1068,6 +1068,84 @@ describe('stroop math: round-trip and fee deduction', () => {
 });
 
 // ===========================================================================
+// refundXlmToUser — feeBumpCapStroops validation (issue #612)
+// ===========================================================================
+
+describe('refundXlmToUser: feeBumpCapStroops validation', () => {
+  it('throws TypeError synchronously for a zero cap', async () => {
+    const server = makeHorizonServer({ submitResponse: { hash: '0xnoop' } });
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    await expect(
+      fn({
+        orderId: 'order-zero-cap',
+        stellarAddress: 'GDEST',
+        networkMode: 'testnet',
+        horizonUrl: 'https://horizon-testnet.stellar.org',
+        refundSecret: 'SRELAYER',
+        fallbackStroops: '10000000',
+        maxRetries: 0,
+        feeBumpCapStroops: 0n,
+      })
+    ).rejects.toThrow(TypeError);
+
+    // Horizon must never be contacted for an invalid cap.
+    expect(server.submitTransaction).not.toHaveBeenCalled();
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+
+  it('throws TypeError synchronously for a negative cap', async () => {
+    const server = makeHorizonServer({ submitResponse: { hash: '0xnoop' } });
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    await expect(
+      fn({
+        orderId: 'order-neg-cap',
+        stellarAddress: 'GDEST',
+        networkMode: 'testnet',
+        horizonUrl: 'https://horizon-testnet.stellar.org',
+        refundSecret: 'SRELAYER',
+        fallbackStroops: '10000000',
+        maxRetries: 0,
+        feeBumpCapStroops: -1n,
+      })
+    ).rejects.toThrow(TypeError);
+
+    expect(server.submitTransaction).not.toHaveBeenCalled();
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+
+  it('accepts a valid positive cap and proceeds normally', async () => {
+    const server = makeHorizonServer({
+      submitResponse: { hash: '0xvalid-cap', ledger: 50 },
+      paymentAmount: '5.0000000',
+    });
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const result = await fn({
+      orderId: 'order-valid-cap',
+      stellarAddress: 'GDEST',
+      stellarTxHash: '0xoriginal',
+      networkMode: 'testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 0,
+      feeBumpCapStroops: 10_000n, // valid positive cap
+    });
+
+    expect(result.hash).toBe('0xvalid-cap');
+    expect(server.submitTransaction).toHaveBeenCalledOnce();
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+});
+
+// ===========================================================================
 // refundXlmToUser — maxRetries = 0 semantics
 //
 // Zero retries means "no second chances" — but the function must still make

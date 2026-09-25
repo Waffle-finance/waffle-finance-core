@@ -83,6 +83,38 @@ describe('requireAdminAuth — missing token', () => {
       .set('Authorization', TEST_KEY); // missing "Bearer " prefix
     expect(res.status).toBe(401);
   });
+
+  it('returns 401 when Authorization header is present but empty string', async () => {
+    const app = makeProtectedApp(TEST_KEY);
+    const res = await supertest(app)
+      .get('/protected')
+      .set('Authorization', '');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('returns 401 when Authorization header is "Bearer " with no token (whitespace only)', async () => {
+    const app = makeProtectedApp(TEST_KEY);
+    const res = await supertest(app)
+      .get('/protected')
+      .set('Authorization', 'Bearer    ');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('missing and empty Authorization produce identical 401 response shapes', async () => {
+    const app = makeProtectedApp(TEST_KEY);
+
+    const missingRes = await supertest(app).get('/protected');
+    const emptyRes = await supertest(app)
+      .get('/protected')
+      .set('Authorization', '');
+
+    // Both must be 401 with the same body — no code-path divergence
+    expect(missingRes.status).toBe(401);
+    expect(emptyRes.status).toBe(401);
+    expect(missingRes.body).toEqual(emptyRes.body);
+  });
 });
 
 describe('requireAdminAuth — wrong token', () => {

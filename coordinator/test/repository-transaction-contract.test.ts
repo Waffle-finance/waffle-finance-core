@@ -56,4 +56,56 @@ describe("repository transaction contract", () => {
     expect(events).toContain("begin:status-update");
     expect(events).toContain("commit:status-update");
   });
+
+  it("retries on SQLITE_BUSY: database is locked (node:sqlite format)", async () => {
+    const attempts: string[] = [];
+    const tx = new InMemoryRepositoryTransaction({
+      maxAttempts: 3,
+      run: async (op) => {
+        attempts.push(op);
+        if (attempts.length === 1) {
+          throw new Error("SQLITE_BUSY: database is locked");
+        }
+        return { ok: true };
+      },
+    });
+
+    const result = await tx.runWithRetry("status-update", async () => ({ ok: true }));
+    expect(result).toEqual({ ok: true });
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("retries on SQLITE_LOCKED", async () => {
+    const attempts: string[] = [];
+    const tx = new InMemoryRepositoryTransaction({
+      maxAttempts: 3,
+      run: async (op) => {
+        attempts.push(op);
+        if (attempts.length === 1) {
+          throw new Error("SQLITE_LOCKED");
+        }
+        return { ok: true };
+      },
+    });
+
+    const result = await tx.runWithRetry("status-update", async () => ({ ok: true }));
+    expect(result).toEqual({ ok: true });
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("does not retry on unrelated errors", async () => {
+    const attempts: string[] = [];
+    const tx = new InMemoryRepositoryTransaction({
+      maxAttempts: 3,
+      run: async (op) => {
+        attempts.push(op);
+        throw new Error("constraint violation");
+      },
+    });
+
+    await expect(
+      tx.runWithRetry("status-update", async () => ({ ok: true }))
+    ).rejects.toThrow("constraint violation");
+    expect(attempts).toHaveLength(1);
+  });
 });

@@ -4,7 +4,14 @@
 
 This document defines the release process, versioning policy, and package conventions for the WaffleFinance monorepo.
 
-For the per-package build target, artifact, and environment contract — including the relayer and Soroban contracts, which this document's versioning policy covers but whose build steps aren't detailed here — see [docs/RELEASE_CONTRACT.md](docs/RELEASE_CONTRACT.md).
+**Companion documents — read these alongside this policy:**
+
+| Document | What it covers |
+|---|---|
+| [docs/RELEASE_CONTRACT.md](docs/RELEASE_CONTRACT.md) | Per-package build target, artifact, environment assumptions, and known verification gaps |
+| [docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md](docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md) | Cross-package impact matrix, per-package verification steps, risk scoring — the operational gate before tagging |
+| [.github/RELEASE_CHECKLIST.md](.github/RELEASE_CHECKLIST.md) | Step-by-step operational checklist (CI, local verification, tagging, post-release) |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | Canonical command map — which `pnpm` command belongs to which package |
 
 ## Versioning Policy
 
@@ -33,42 +40,57 @@ All packages currently at `1.0.0`:
 
 **Rationale**: The SDK, frontend, and coordinator are tightly coupled. Version drift can create surprising integration issues.
 
-**Exception**: Private packages (coordinator) may have independent versions.
+**Exception**: Private packages (coordinator) and the Soroban Rust workspace (`soroban/Cargo.toml`) may have independent versions.
+
+For the definitive per-package publish-target breakdown (npm vs Vercel vs Docker vs private), and the version sync table that must be satisfied before tagging, see
+[docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md — Part 3](docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md#part-3--shared-release-gates-all-packages).
 
 ## Release Process
 
 ### Pre-Release Checklist
 
-1. **Update all package versions**
+Before tagging a release, work through
+[docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md](docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md),
+which covers the cross-package impact matrix and per-package verification steps.
+The short form is listed here for reference:
+
+1. **Assess cross-package impact** — see the impact matrix in
+   `docs/RELEASE_CHECKLIST_MULTI_PACKAGE.md` and verify every affected package.
+
+2. **Update all package versions**
    ```bash
    # Update all packages to X.Y.Z
    pnpm version X.Y.Z -ws
    ```
 
-2. **Run full test suite**
+3. **Run full test suite**
    ```bash
    pnpm test
    ```
 
-3. **Build all packages**
+4. **Build all packages**
    ```bash
    pnpm build
    ```
 
-4. **Verify release locally**
+5. **Verify release locally** (Linux/macOS)
    ```bash
    ./scripts/verify-release-locally.sh
    ```
+   Or on Windows:
+   ```powershell
+   .\scripts\verify-release-locally.ps1
+   ```
 
-5. **Update CHANGELOG.md** with release notes
+6. **Update CHANGELOG.md** with release notes
 
-6. **Commit version changes**
+7. **Commit version changes**
    ```bash
    git add package.json packages/*/package.json
    git commit -m "chore: release v1.0.1"
    ```
 
-7. **Tag release**
+8. **Tag release**
    ```bash
    git tag -a v1.0.1 -m "Release v1.0.1"
    git push origin v1.0.1
@@ -76,39 +98,45 @@ All packages currently at `1.0.0`:
 
 ### Publishing Packages
 
-**Published Packages**:
+**npm-published packages** (consumed by external code):
 - `@wafflefinance/sdk`
-- `@wafflefinance/frontend`
 - `@wafflefinance/contracts`
-- `@wafflefinance/relayer`
-- `@wafflefinance/resolver`
 
-**Private Packages** (not published):
-- `@wafflefinance/coordinator`
+**Deployed but not npm-published**:
+- `@wafflefinance/frontend` — deployed to Vercel as a static site (see
+  `vercel.json`); not published to the npm registry
+- `@wafflefinance/relayer` — Docker image pushed to GHCR; not published to npm
+- `@wafflefinance/resolver` — Docker image pushed to GHCR; not published to npm
 
-**Publish Command**:
+**Private packages** (not published, not deployed via npm):
+- `@wafflefinance/coordinator` — compiled JS artifact deployed directly;
+  marked `"private": true`
+
+**Publish Command** (npm-published packages only):
 ```bash
-# Publish all packages in workspace
-pnpm -r publish --access public
+# Publish SDK and contracts
+pnpm --filter @wafflefinance/sdk publish --access public
+pnpm --filter @wafflefinance/contracts publish --access public
 ```
 
-**Individual Package Publish**:
-```bash
-cd packages/sdk
-pnpm publish --access public
-```
+Running `pnpm -r publish --access public` will attempt to publish every
+non-private package including `frontend`, `relayer`, and `resolver`, which
+is usually not what you want. Use per-package `--filter` flags instead.
 
 ### Post-Release
 
-1. **Verify packages on npm**
+1. **Verify npm-published packages**
    ```bash
    npm view @wafflefinance/sdk
-   npm view @wafflefinance/frontend
+   npm view @wafflefinance/contracts
    ```
 
-2. **Update deployment configurations** if needed
+2. **Verify Vercel deployment** — confirm the frontend build succeeded in the
+   Vercel dashboard after the tag is pushed.
 
-3. **Announce release** to stakeholders
+3. **Update deployment configurations** if needed
+
+4. **Announce release** to stakeholders
 
 ## Package Metadata
 
@@ -254,29 +282,33 @@ If a release causes critical issues:
 
 ## CI/CD Integration
 
-### GitHub Actions Workflow
+### Workflows that actually exist
 
-```yaml
-name: Release
+There is **no automated release workflow** (`release.yml`) in this repository.
+Publishing is a manual step performed after local verification passes. The four
+workflows that do run automatically are:
 
-on:
-  push:
-    tags:
-      - 'v*'
+| Workflow file | Triggers | What it checks |
+|---|---|---|
+| `command-contract.yml` | push to `main`, all PRs | `scripts/validate-commands.mjs` — enforces `docs/COMMANDS.md` |
+| `dep-review.yml` | PRs touching `pnpm-lock.yaml` or any `package.json` | CVE/licence scan, dep-version alignment, critical-deps labelling |
+| `frontend.yml` | push/PR touching `frontend/`, `packages/sdk/`, `packages/config/` | Vitest (testnet + mainnet matrix), TypeScript typecheck, ESLint |
+| `soroban-contracts.yml` | push/PR touching `soroban/` | `cargo test` — unit, state-machine harness, property fuzz |
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: pnpm/action-setup@v2
-      - run: pnpm install
-      - run: pnpm test
-      - run: pnpm build
-      - run: pnpm -r publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+None of these workflows publish packages. Publication is gated on all four
+passing (for any changed package area) **plus** a green run of
+`scripts/verify-release-locally.sh` (or `.ps1` on Windows) locally before
+the release tag is pushed.
+
+### Publish step (manual)
+
+```bash
+# After verify-release-locally.sh passes and all CI is green on main:
+pnpm -r publish --access public
 ```
+
+Supply `NODE_AUTH_TOKEN` in your shell environment (or `.npmrc`) before
+running this command. Do not publish from a dirty working tree.
 
 ## Troubleshooting
 

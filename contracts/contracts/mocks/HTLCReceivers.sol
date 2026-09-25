@@ -54,6 +54,20 @@ contract HTLCReceiverMock {
     }
 }
 
+/// @title RecordingReceiverMock
+/// @notice Minimal payable receiver that accepts every native-ETH transfer
+///         and records the total amount received in a public counter. Used
+///         to assert exact payout amounts without relying on balance diffs
+///         that can be muddied by gas accounting in the calling test.
+contract RecordingReceiverMock {
+    /// @notice Cumulative amount of native ETH received across all transfers.
+    uint256 public totalReceived;
+
+    receive() external payable {
+        totalReceived += msg.value;
+    }
+}
+
 /// @title NoFallbackReceiver
 /// @notice A contract with neither a `receive` nor a payable `fallback`, so
 ///         any plain native-ETH transfer reverts. Models the classic

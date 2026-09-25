@@ -1,4 +1,29 @@
-# Release Workflow Enhancement - Change Log
+# Change Log
+
+## Operational Docs: Drift Detection, Maintenance Calendar, Backlog Hygiene, Release Notes — 2026-09-23
+
+Added four operational documents to address recurring drift, scheduled maintenance,
+backlog quality, and release communication gaps.
+
+**Files created:**
+
+- `docs/DRIFT_DETECTION_RUNBOOK.md` — runbook for detecting and correcting drift
+  between deployed contract addresses, config values, docs, and runtime code;
+  includes environment-specific examples for testnet, devnet, and local dev
+- `docs/MAINTENANCE_CALENDAR.md` — scheduled operational tasks (weekly through
+  quarterly) with owners, expected outputs, and escalation paths
+- `docs/BACKLOG_HYGIENE.md` — issue quality standards, templates (bug / ops task /
+  feature / debt / security), ownership rules, prioritisation framework, and stale-issue handling
+- `docs/RELEASE_NOTES_PROCESS.md` — process for writing release notes, required
+  categories, risk classification, validation records, and deployment/rollback guidance
+- `.github/RELEASE_NOTES_TEMPLATE.md` — fill-in template covering all eight
+  required categories, validation table, deployment guide, and rollback plan
+
+See each document for details. No code was changed.
+
+---
+
+## Release Workflow Enhancement - Change Log
 
 ## Summary
 Enhanced the GitHub Actions release workflow to verify compiled contract artifacts and package builds before publishing, improving release quality, reliability, and supply chain security.

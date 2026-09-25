@@ -7,6 +7,8 @@ import {IHTLCEscrow} from "../../contracts/interfaces/IHTLCEscrow.sol";
 import {IResolverRegistry} from "../../contracts/interfaces/IResolverRegistry.sol";
 import {TestERC20} from "../../contracts/mocks/TestERC20.sol";
 import {HTLCReceiverMock} from "../../contracts/mocks/HTLCReceivers.sol";
+import {ResolverRegistry} from "../../contracts/ResolverRegistry.sol";
+import {ReentrantActor} from "../../contracts/mocks/ReentrantActor.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Registry stubs
@@ -354,13 +356,14 @@ contract HTLCEscrowSecurityTest is Test {
         assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Refunded));
     }
 
-    // 3f. Claim boundary: at exactly timelock → claim still valid (not yet expired).
-    function test_claimOrder_atExactTimelock_succeeds() public {
+    // 3f. Claim boundary: at exactly timelock → Expired (>= semantics; equality is expired).
+    function test_claimOrder_atExactTimelock_reverts() public {
         bytes memory pre = _preimage(205);
         uint256 id = _createNative(htlcOpen, resolver, beneficiary, refundAddr, pre);
         vm.warp(htlcOpen.getOrder(id).timelock);
+        vm.expectRevert(HTLCEscrow.Expired.selector);
         htlcOpen.claimOrder(id, pre);
-        assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Claimed));
+        assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Funded));
     }
 
     // 3g. Claim boundary: one second after timelock → Expired.
@@ -797,15 +800,16 @@ contract HTLCEscrowSecurityTest is Test {
         assertFalse(ok, "receive() should reject stray ETH");
     }
 
-    // 7c. No admin escape hatches exist on the contract.
+    // 7c. No dangerous admin escape hatches exist on the contract.
+    //     emergencyWithdraw and pause must not exist; transferOwnership and
+    //     setResolverRegistry are intentional owner-only admin functions that
+    //     cannot move locked order funds.
     function test_nonCustodial_noAdminEscapeHatchSelectors() public {
         // emergencyWithdraw(): 0xdb2e21bc
         // pause():             0x8456cb59
-        // transferOwnership(): 0xf2fde38b
-        bytes4[3] memory forbidden = [
+        bytes4[2] memory forbidden = [
             bytes4(0xdb2e21bc),
-            bytes4(0x8456cb59),
-            bytes4(0xf2fde38b)
+            bytes4(0x8456cb59)
         ];
         for (uint256 i = 0; i < forbidden.length; i++) {
             (bool ok, ) = address(htlcOpen).staticcall(
@@ -1041,5 +1045,222 @@ contract HTLCEscrowSecurityTest is Test {
         vm.warp(uint256(absoluteTl) + uint256(bound(warpDelta, 1, 365 days)));
         htlcOpen.refundOrder(id);
         assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Refunded));
+    }
+
+    // Section 11: Reentrancy resistance
+    // Test reentrancy resistance when claiming an order with a malicious beneficiary
+    function test_reentrancy_claimOrder_reentrantBeneficiary() public {
+        ReentrantActor actor = new ReentrantActor(htlcOpen);
+        bytes memory pre = _preimage(1101);
+        bytes32 hl = _sha256Lock(pre);
+
+        // Create order with the reentrant actor as beneficiary
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        uint256 id = htlcOpen.createOrder{value: AMT + SD}(
+            address(actor), refundAddr, address(0), AMT, SD, hl, TL
+        );
+
+        // Configure actor to reenter claimOrder
+        actor.setPreimageAndOrder(pre, id);
+        actor.setReenterClaim(true);
+
+        // Perform claim. The claim should succeed but the reentrant call should fail
+        htlcOpen.claimOrder(id, pre);
+
+        assertTrue(actor.reentrancyAttempted());
+        assertFalse(actor.reentrancySucceeded());
+        // Verify balance and status
+        assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Claimed));
+    }
+
+    function test_reentrancy_claimOrder_reentrantWithdraw() public {
+        ReentrantActor actor = new ReentrantActor(htlcOpen);
+        bytes memory pre = _preimage(1102);
+        bytes32 hl = _sha256Lock(pre);
+
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        uint256 id = htlcOpen.createOrder{value: AMT + SD}(
+            address(actor), refundAddr, address(0), AMT, SD, hl, TL
+        );
+
+        actor.setPreimageAndOrder(pre, id);
+        actor.setReenterWithdraw(true);
+
+        htlcOpen.claimOrder(id, pre);
+
+        assertTrue(actor.reentrancyAttempted());
+        assertFalse(actor.reentrancySucceeded());
+    }
+
+    // Test reentrancy resistance when refunding an order with a malicious refundAddress
+    function test_reentrancy_refundOrder_reentrantRefund() public {
+        ReentrantActor actor = new ReentrantActor(htlcOpen);
+        bytes memory pre = _preimage(1103);
+        bytes32 hl = _sha256Lock(pre);
+
+        // Create order with the reentrant actor as refund address
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        uint256 id = htlcOpen.createOrder{value: AMT + SD}(
+            beneficiary, address(actor), address(0), AMT, SD, hl, TL
+        );
+
+        actor.setPreimageAndOrder(pre, id);
+        actor.setReenterRefund(true);
+
+        vm.warp(block.timestamp + TL + 1);
+        htlcOpen.refundOrder(id);
+
+        assertTrue(actor.reentrancyAttempted());
+        assertFalse(actor.reentrancySucceeded());
+        assertEq(uint8(htlcOpen.getOrder(id).status), uint8(IHTLCEscrow.OrderStatus.Refunded));
+    }
+
+    // Section 12: Safety deposit accountability
+    // Test that the safety deposit is correctly handled and accounted for in balance
+    function test_safetyDeposit_accountability_claim() public {
+        bytes memory pre = _preimage(1201);
+        uint256 id = _createNative(htlcOpen, resolver, beneficiary, refundAddr, pre);
+
+        uint256 balanceBeforeClaim = address(htlcOpen).balance;
+        assertEq(balanceBeforeClaim, AMT + SD);
+
+        // Claim by relayer (EOA)
+        uint256 relayerBalanceBefore = relayer.balance;
+        vm.prank(relayer);
+        htlcOpen.claimOrder(id, pre);
+
+        // Safety deposit paid to relayer, amount paid to beneficiary
+        assertEq(address(htlcOpen).balance, 0);
+        assertEq(relayer.balance, relayerBalanceBefore + SD);
+        assertEq(beneficiary.balance, AMT);
+    }
+
+    function test_safetyDeposit_accountability_refund() public {
+        bytes memory pre = _preimage(1202);
+        uint256 id = _createNative(htlcOpen, resolver, beneficiary, refundAddr, pre);
+
+        vm.warp(block.timestamp + TL + 1);
+
+        uint256 relayerBalanceBefore = relayer.balance;
+        vm.prank(relayer);
+        htlcOpen.refundOrder(id);
+
+        // Safety deposit paid to relayer, amount paid to refundAddr
+        assertEq(address(htlcOpen).balance, 0);
+        assertEq(relayer.balance, relayerBalanceBefore + SD);
+        assertEq(refundAddr.balance, AMT);
+    }
+
+    // Section 13: Preimage validation & collision
+    // Test collision resistance between orders
+    function test_preimage_noCollision() public {
+        bytes memory preA = _preimage(1301);
+        bytes memory preB = _preimage(1302);
+        bytes32 hlA = _sha256Lock(preA);
+        bytes32 hlB = _sha256Lock(preB);
+
+        uint256 idA = _setupOrder(hlA);
+        
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        uint256 idB = htlcOpen.createOrder{value: AMT + SD}(
+            beneficiary, refundAddr, address(0), AMT, SD, hlB, TL
+        );
+
+        // Claiming idA with preB must revert
+        vm.expectRevert(HTLCEscrow.InvalidPreimage.selector);
+        htlcOpen.claimOrder(idA, preB);
+
+        // Claiming idB with preA must revert
+        vm.expectRevert(HTLCEscrow.InvalidPreimage.selector);
+        htlcOpen.claimOrder(idB, preA);
+    }
+
+    // Section 14: Registry integration tests (Slashing, Activation, Stake changes)
+    // Test real ResolverRegistry integration
+    function test_registry_integration_flow() public {
+        // Deploy staking token
+        TestERC20 token = _deployToken();
+        
+        // Deploy registry
+        uint256 minStakeAmt = 100 ether;
+        address registryOwner = makeAddr("registryOwner");
+        address slashBen = makeAddr("slashBeneficiary");
+        
+        ResolverRegistry registry = new ResolverRegistry(
+            token,
+            minStakeAmt,
+            slashBen,
+            registryOwner
+        );
+
+        // Deploy new HTLCEscrow gated by this registry
+        HTLCEscrow gatedEscrow = new HTLCEscrow(registry, SD);
+
+        // Resolver attempts to create order before registering -> reverts
+        bytes32 hl = _sha256Lock(_preimage(1401));
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        vm.expectRevert(HTLCEscrow.ResolverNotAuthorised.selector);
+        gatedEscrow.createOrder{value: AMT + SD}(
+            beneficiary, refundAddr, address(0), AMT, SD, hl, TL
+        );
+
+        // Resolver registers with enough stake
+        token.transfer(resolver, minStakeAmt);
+        vm.startPrank(resolver);
+        token.approve(address(registry), minStakeAmt);
+        registry.register(minStakeAmt);
+        vm.stopPrank();
+
+        // Resolver is now active, should be able to create order
+        vm.prank(resolver);
+        uint256 id = gatedEscrow.createOrder{value: AMT + SD}(
+            beneficiary, refundAddr, address(0), AMT, SD, hl, TL
+        );
+        assertEq(id, 1);
+
+        // Owner slashes the resolver, bringing their stake below minimum
+        vm.prank(registryOwner);
+        registry.slash(resolver, 10 ether);
+
+        // Resolver is no longer active
+        assertFalse(registry.isActive(resolver));
+
+        // Resolver tries to create another order -> reverts
+        bytes32 hl2 = _sha256Lock(_preimage(1402));
+        vm.deal(resolver, AMT + SD);
+        vm.prank(resolver);
+        vm.expectRevert(HTLCEscrow.ResolverNotAuthorised.selector);
+        gatedEscrow.createOrder{value: AMT + SD}(
+            beneficiary, refundAddr, address(0), AMT, SD, hl2, TL
+        );
+
+        // Resolver increases stake to meet minimum again
+        token.transfer(resolver, 10 ether);
+        vm.startPrank(resolver);
+        token.approve(address(registry), 10 ether);
+        registry.increaseStake(10 ether);
+        vm.stopPrank();
+
+        // Resolver is active again
+        assertTrue(registry.isActive(resolver));
+
+        // Resolver can create order again
+        vm.prank(resolver);
+        uint256 id2 = gatedEscrow.createOrder{value: AMT + SD}(
+            beneficiary, refundAddr, address(0), AMT, SD, hl2, TL
+        );
+        assertEq(id2, 2);
+
+        // Resolver unregisters
+        vm.prank(resolver);
+        registry.unregister();
+
+        // Resolver is inactive again
+        assertFalse(registry.isActive(resolver));
     }
 }

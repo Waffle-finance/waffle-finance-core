@@ -140,7 +140,13 @@ const exportFiltersSchema = z.object({
   updatedBefore: z.coerce.number().int().nonnegative().optional(),
   includeArchived: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(1000).optional(),
-});
+}).refine(
+  (data) => data.createdAfter === undefined || data.createdBefore === undefined || data.createdAfter <= data.createdBefore,
+  {
+    message: "createdAfter must not be later than createdBefore",
+    path: ["createdBefore"],
+  }
+);
 
 /**
  * Validation schema for the user-facing download endpoint.
@@ -156,18 +162,26 @@ const downloadQuerySchema = z.object({
   startDate: z
     .string()
     .optional()
-    .transform((v) => {
+    .transform((v, ctx) => {
       if (!v || v === "all") return undefined;
       const ts = Number.isFinite(Number(v)) ? Number(v) : Math.floor(new Date(v).getTime() / 1000);
-      return Number.isNaN(ts) ? undefined : ts;
+      if (!Number.isFinite(ts)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Invalid startDate: "${v}" is not a valid date or unix timestamp` });
+        return z.NEVER;
+      }
+      return ts;
     }),
   endDate: z
     .string()
     .optional()
-    .transform((v) => {
+    .transform((v, ctx) => {
       if (!v || v === "all") return undefined;
       const ts = Number.isFinite(Number(v)) ? Number(v) : Math.floor(new Date(v).getTime() / 1000);
-      return Number.isNaN(ts) ? undefined : ts;
+      if (!Number.isFinite(ts)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Invalid endDate: "${v}" is not a valid date or unix timestamp` });
+        return z.NEVER;
+      }
+      return ts;
     }),
   status: z
     .enum([
@@ -192,7 +206,13 @@ const downloadQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(1000).optional(),
   /** Optional address to scope the download to a specific wallet */
   address: z.string().optional(),
-});
+}).refine(
+  (data) => data.startDate === undefined || data.endDate === undefined || data.startDate <= data.endDate,
+  {
+    message: "startDate must not be later than endDate",
+    path: ["endDate"],
+  }
+);
 
 /**
  * Create the export router with the given export service.

@@ -23,7 +23,13 @@ export class InMemoryRepositoryTransaction implements RepositoryTransaction {
 
   constructor(options: RepositoryTransactionOptions = {}) {
     this.maxAttempts = options.maxAttempts ?? 3;
-    this.retryableErrors = options.retryableErrors ?? ["SQLITE_BUSY", "deadlock", "lock timeout"];
+    this.retryableErrors = options.retryableErrors ?? [
+      "SQLITE_BUSY",
+      "SQLITE_LOCKED",
+      "database is locked",
+      "deadlock",
+      "lock timeout",
+    ];
     this.runImpl = options.run ?? ((operation, fn) => fn());
   }
 
@@ -51,6 +57,18 @@ export class InMemoryRepositoryTransaction implements RepositoryTransaction {
 
   private shouldRetry(message: string): boolean {
     const lowered = message.toLowerCase();
+
+    const explicitTokens = [
+      "sqlite_busy",
+      "sqlite_locked",
+      "database is locked",
+      "deadlock",
+      "lock timeout",
+    ];
+    if (explicitTokens.some((token) => lowered.includes(token))) {
+      return true;
+    }
+
     return this.retryableErrors.some((token) => lowered.includes(token.toLowerCase()));
   }
 

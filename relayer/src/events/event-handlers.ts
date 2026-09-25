@@ -272,6 +272,10 @@ export class FusionEventManager extends EventEmitter {
    * Register event listener
    */
   addEventListener(listener: Omit<EventListener, 'id' | 'lastNotified'>): string {
+    if (listener.eventTypes.size === 0) {
+      throw new Error('At least one event type is required');
+    }
+
     const id = this.generateId();
     const fullListener: EventListener = {
       ...listener,

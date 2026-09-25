@@ -93,10 +93,11 @@ interface IHTLCEscrow {
     function getOrder(uint256 orderId) external view returns (Order memory);
 
     /// @notice Withdraw any native ETH credited to the caller after a payout
-    ///         could not be pushed during a claim/refund. Reverts if the
-    ///         caller has no pending balance, or if the transfer to the
-    ///         caller fails (in which case the balance is preserved for a
-    ///         later retry — funds are never stranded).
+    ///         could not be pushed during a claim/refund. Reverts with
+    ///         `NoPendingWithdrawal` if the caller has no pending balance, or
+    ///         with `NativeTransferFailed` if the transfer to the caller
+    ///         fails (in which case the balance is preserved for a later
+    ///         retry — funds are never stranded).
     /// @return amount The amount of wei withdrawn.
     function withdraw() external returns (uint256 amount);
 

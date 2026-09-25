@@ -189,6 +189,14 @@ See [`docs/RPC_DEGRADATION_TEST_MATRIX.md`](docs/RPC_DEGRADATION_TEST_MATRIX.md)
 
 See [`docs/PERFORMANCE_BASELINE.md`](docs/PERFORMANCE_BASELINE.md) for the measurable performance baseline covering order lookup, announcement, event replay, and stale-order cleanup.
 
+See [`docs/DRIFT_DETECTION_RUNBOOK.md`](docs/DRIFT_DETECTION_RUNBOOK.md) for the runbook that catches drift between deployed contract addresses, config values, runtime code, and docs before it reaches production.
+
+See [`docs/MAINTENANCE_CALENDAR.md`](docs/MAINTENANCE_CALENDAR.md) for the scheduled operational task calendar — health checks, dependency reviews, environment parity, and release validation tasks with owners and cadences.
+
+See [`docs/BACKLOG_HYGIENE.md`](docs/BACKLOG_HYGIENE.md) for issue quality standards, templates, ownership rules, and the triage and stale-issue process that keeps the backlog actionable.
+
+See [`docs/RELEASE_NOTES_PROCESS.md`](docs/RELEASE_NOTES_PROCESS.md) for how to write release notes, what categories to cover, and how to record validation and rollback guidance. The fill-in template is at [`.github/RELEASE_NOTES_TEMPLATE.md`](.github/RELEASE_NOTES_TEMPLATE.md).
+
 ---
 
 ## Wallet support
@@ -288,4 +296,4 @@ Full reference in [`env.example`](env.example).
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See `LICENSE` (file not yet committed to the repository).

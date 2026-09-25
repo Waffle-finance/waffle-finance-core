@@ -136,6 +136,59 @@ describe("ResolverRegistry", () => {
       await assertInvariants(registry, [resolver.address]);
     });
 
+    it("rejects registration from the zero address with no stake movement or list entry", async () => {
+      const { token, registry } = await deploy();
+
+      await ethers.provider.send("hardhat_impersonateAccount", [ethers.ZeroAddress]);
+      await ethers.provider.send("hardhat_setBalance", [
+        ethers.ZeroAddress,
+        ethers.toBeHex(ethers.parseEther("1")),
+      ]);
+      const zeroSigner = await ethers.getImpersonatedSigner(ethers.ZeroAddress);
+
+      // Guard fires before any token interaction.
+      await expect(
+        registry.connect(zeroSigner).register(MIN_STAKE)
+      ).to.be.revertedWithCustomError(registry, "InvalidAddress");
+
+      // No side effects: list is empty, count is zero.
+      await assertInvariants(registry, []);
+
+      await ethers.provider.send("hardhat_stopImpersonatingAccount", [ethers.ZeroAddress]);
+    });
+
+    it("duplicate registration reverts with AlreadyRegistered and leaves stake, list length, and index unchanged", async () => {
+      const [, , , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE * 2n);
+
+      await registry.connect(resolver).register(MIN_STAKE);
+
+      // Snapshot state before the attempted duplicate.
+      const registryBalanceBefore = await token.balanceOf(await registry.getAddress());
+      const listLengthBefore = await registry.getResolverCount();
+      const infoBefore = await registry.get(resolver.address);
+
+      await expect(
+        registry.connect(resolver).register(MIN_STAKE)
+      ).to.be.revertedWithCustomError(registry, "AlreadyRegistered");
+
+      // Stake must be unchanged — no second token pull.
+      expect(await token.balanceOf(await registry.getAddress())).to.equal(registryBalanceBefore);
+
+      // List length must be unchanged — no duplicate entry.
+      expect(await registry.getResolverCount()).to.equal(listLengthBefore);
+
+      // Resolver info must be unchanged.
+      const infoAfter = await registry.get(resolver.address);
+      expect(infoAfter.stake).to.equal(infoBefore.stake);
+      expect(infoAfter.active).to.equal(infoBefore.active);
+
+      // Index is valid: the resolver can still be unregistered correctly.
+      await registry.connect(resolver).unregister();
+      await assertInvariants(registry, []);
+    });
+
     it("allows re-registration after a clean unregister", async () => {
       const [, , , resolver] = await ethers.getSigners();
       const { token, registry } = await deploy();
@@ -184,15 +237,23 @@ describe("ResolverRegistry", () => {
       expect(info.stake).to.equal(MIN_STAKE * 2n);
     });
 
-    it("rejects zero additional amount", async () => {
+    it("rejects zero additional amount and leaves stake and token balances unchanged", async () => {
       const [, , , resolver] = await ethers.getSigners();
       const { token, registry } = await deploy();
       await fundAndApprove(token, registry, resolver, MIN_STAKE);
       await registry.connect(resolver).register(MIN_STAKE);
 
+      const stakeBefore = (await registry.get(resolver.address)).stake;
+      const resolverBalanceBefore = await token.balanceOf(resolver.address);
+      const registryBalanceBefore = await token.balanceOf(await registry.getAddress());
+
       await expect(
         registry.connect(resolver).increaseStake(0n)
       ).to.be.revertedWithCustomError(registry, "InvalidAmount");
+
+      expect((await registry.get(resolver.address)).stake).to.equal(stakeBefore);
+      expect(await token.balanceOf(resolver.address)).to.equal(resolverBalanceBefore);
+      expect(await token.balanceOf(await registry.getAddress())).to.equal(registryBalanceBefore);
     });
 
     it("rejects call from an unregistered address", async () => {
@@ -351,7 +412,36 @@ describe("ResolverRegistry", () => {
       expect(await registry.isActive(r3.address)).to.be.true;
     });
 
-    //  sequential unregisters 
+    //  middle removal index synchronization
+
+    it("middle removal: moved resolver index is updated and can be subsequently unregistered", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, r2, r3] = signers;
+      const { token, registry } = await deploy();
+
+      for (const r of [r1, r2, r3]) {
+        await fundAndApprove(token, registry, r, MIN_STAKE);
+        await registry.connect(r).register(MIN_STAKE);
+      }
+      await assertInvariants(registry, [r1.address, r2.address, r3.address]);
+
+      // Remove the middle resolver; r3 is swapped into r2's slot.
+      await registry.connect(r2).unregister();
+
+      // Remaining list: exactly r1 and r3, no duplicates, no missing entries.
+      await assertInvariants(registry, [r1.address, r3.address]);
+
+      // Prove r3's index was updated: a subsequent unregister must succeed and
+      // remove only r3, leaving r1 intact. A stale index would target the wrong
+      // slot and either panic or corrupt the list.
+      await registry.connect(r3).unregister();
+      await assertInvariants(registry, [r1.address]);
+
+      expect(await registry.isActive(r1.address)).to.be.true;
+      expect(await registry.getResolverCount()).to.equal(1n);
+    });
+
+    //  sequential unregisters
 
     it("list stays consistent through multiple sequential unregisters", async () => {
       const signers = await ethers.getSigners();
@@ -424,23 +514,23 @@ describe("ResolverRegistry", () => {
       expect(await registry.isActive(r1.address)).to.be.false;
     });
 
-    it("caps slash at the resolver's current stake (no underflow)", async () => {
+    it("rejects slash amount larger than the resolver's current stake with no state mutation", async () => {
       const [, beneficiary, , resolver] = await ethers.getSigners();
       const { token, registry } = await deploy();
       await fundAndApprove(token, registry, resolver, MIN_STAKE);
       await registry.connect(resolver).register(MIN_STAKE);
 
-      const benBefore = await token.balanceOf(beneficiary.address);
-      // Request more than the available stake.
-      await registry.slash(resolver.address, MIN_STAKE * 10n);
-      // Only MIN_STAKE transferred  no overflow.
-      expect(await token.balanceOf(beneficiary.address)).to.equal(
-        benBefore + MIN_STAKE
-      );
+      const beneficiaryBalanceBefore = await token.balanceOf(beneficiary.address);
 
+      await expect(
+        registry.slash(resolver.address, MIN_STAKE + 1n)
+      ).to.be.revertedWithCustomError(registry, "InvalidAmount");
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(beneficiaryBalanceBefore);
       const info = await registry.get(resolver.address);
-      expect(info.stake).to.equal(0n);
-      expect(info.totalSlashed).to.equal(MIN_STAKE);
+      expect(info.stake).to.equal(MIN_STAKE);
+      expect(info.active).to.be.true;
+      await assertInvariants(registry, [resolver.address]);
     });
 
     it("accumulates totalSlashed across multiple slashes", async () => {
@@ -466,15 +556,24 @@ describe("ResolverRegistry", () => {
       ).to.be.revertedWithCustomError(registry, "NotRegistered");
     });
 
-    it("rejects slash with zero amount", async () => {
-      const [, , , resolver] = await ethers.getSigners();
+    it("rejects slash with zero amount and leaves stake, status, and beneficiary balance unchanged", async () => {
+      const [, beneficiary, , resolver] = await ethers.getSigners();
       const { token, registry } = await deploy();
       await fundAndApprove(token, registry, resolver, MIN_STAKE);
       await registry.connect(resolver).register(MIN_STAKE);
 
+      const stakeBefore = (await registry.get(resolver.address)).stake;
+      const activeBefore = (await registry.get(resolver.address)).active;
+      const beneficiaryBalanceBefore = await token.balanceOf(beneficiary.address);
+
       await expect(
         registry.slash(resolver.address, 0n)
       ).to.be.revertedWithCustomError(registry, "InvalidAmount");
+
+      const infoAfter = await registry.get(resolver.address);
+      expect(infoAfter.stake).to.equal(stakeBefore);
+      expect(infoAfter.active).to.equal(activeBefore);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(beneficiaryBalanceBefore);
     });
 
     it("only owner can slash", async () => {
@@ -486,6 +585,28 @@ describe("ResolverRegistry", () => {
       await expect(
         registry.connect(resolver).slash(resolver.address, 1n)
       ).to.be.revertedWithCustomError(registry, "OwnableUnauthorizedAccount");
+    });
+
+    it("slashes exactly the current stake leaving zero stake, inactive status, and full beneficiary payout", async () => {
+      const [, beneficiary, , resolver] = await ethers.getSigners();
+      const { token, registry } = await deploy();
+      await fundAndApprove(token, registry, resolver, MIN_STAKE);
+      await registry.connect(resolver).register(MIN_STAKE);
+
+      const beneficiaryBalanceBefore = await token.balanceOf(beneficiary.address);
+
+      await expect(registry.slash(resolver.address, MIN_STAKE))
+        .to.emit(registry, "Slashed")
+        .withArgs(resolver.address, MIN_STAKE, beneficiary.address);
+
+      const info = await registry.get(resolver.address);
+      expect(info.stake).to.equal(0n);
+      expect(info.active).to.be.false;
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        beneficiaryBalanceBefore + MIN_STAKE
+      );
+      // Slash does not remove the resolver from the list.
+      await assertInvariants(registry, [resolver.address]);
     });
   });
 
@@ -588,16 +709,20 @@ describe("ResolverRegistry", () => {
       expect(await registry.minStake()).to.equal(newMin);
     });
 
-    it("setSlashBeneficiary emits and updates the beneficiary", async () => {
+    it("setSlashBeneficiary emits SlashBeneficiaryUpdated with old and new addresses in correct order", async () => {
       const [, , newBen] = await ethers.getSigners();
       const { owner, beneficiary, registry } = await deploy();
 
+      // Both indexed args must be present and in documented order:
+      // (oldBeneficiary, newBeneficiary).  A swap would make the old
+      // address appear as the new one, breaking off-chain indexers.
       await expect(
         registry.connect(owner).setSlashBeneficiary(newBen.address)
       )
         .to.emit(registry, "SlashBeneficiaryUpdated")
         .withArgs(beneficiary.address, newBen.address);
 
+      // Storage reflects the replacement (not the old value).
       expect(await registry.slashBeneficiary()).to.equal(newBen.address);
     });
 
@@ -619,6 +744,52 @@ describe("ResolverRegistry", () => {
       await expect(
         registry.connect(resolver).setSlashBeneficiary(resolver.address)
       ).to.be.revertedWithCustomError(registry, "OwnableUnauthorizedAccount");
+    });
+
+    it("rejects a zero pending administrator and leaves owner/pendingOwner unchanged", async () => {
+      const { owner, registry } = await deploy();
+
+      const ownerBefore = await registry.owner();
+      const pendingBefore = await registry.pendingOwner();
+
+      await expect(
+        registry.connect(owner).transferOwnership(ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(registry, "InvalidAddress");
+
+      expect(await registry.owner()).to.equal(ownerBefore);
+      expect(await registry.pendingOwner()).to.equal(pendingBefore);
+    });
+
+    it("still allows a valid two-step ownership transfer to a non-zero address", async () => {
+      const [, , newOwner] = await ethers.getSigners();
+      const { owner, registry } = await deploy();
+
+      await expect(registry.connect(owner).transferOwnership(newOwner.address))
+        .to.emit(registry, "OwnershipTransferStarted")
+        .withArgs(owner.address, newOwner.address);
+
+      expect(await registry.pendingOwner()).to.equal(newOwner.address);
+
+      await registry.connect(newOwner).acceptOwnership();
+      expect(await registry.owner()).to.equal(newOwner.address);
+    });
+
+    it("rejects acceptOwnership from an account that is not the pending administrator", async () => {
+      const [, , newOwner, stranger] = await ethers.getSigners();
+      const { owner, registry } = await deploy();
+
+      await registry.connect(owner).transferOwnership(newOwner.address);
+
+      const ownerBefore = await registry.owner();
+      const pendingBefore = await registry.pendingOwner();
+
+      await expect(
+        registry.connect(stranger).acceptOwnership()
+      ).to.be.revertedWithCustomError(registry, "OwnableUnauthorizedAccount");
+
+      // Neither current nor pending admin changed.
+      expect(await registry.owner()).to.equal(ownerBefore);
+      expect(await registry.pendingOwner()).to.equal(pendingBefore);
     });
   });
 
@@ -820,6 +991,57 @@ describe("ResolverRegistry", () => {
           ethers.ZeroAddress
         )
       ).to.be.revertedWithCustomError(Registry, "OwnableInvalidOwner");
+    });
+  });
+
+  //  list/mapping invariant sequence
+
+  describe("list/mapping invariant sequence", () => {
+    it("keeps list() and the index mapping synchronized across a mixed sequence of registrations and removals", async () => {
+      const signers = await ethers.getSigners();
+      const [, , , r1, r2, r3, r4] = signers;
+      const { token, registry } = await deploy();
+
+      for (const r of [r1, r2, r3, r4]) {
+        await fundAndApprove(token, registry, r, MIN_STAKE);
+      }
+
+      // Build up a list of four, then remove a middle entry (forces
+      // swap-and-pop compaction), then remove the newly-swapped-in last
+      // entry, then register a fresh resolver to confirm the freed slot
+      // is reused correctly.
+      await registry.connect(r1).register(MIN_STAKE);
+      await assertInvariants(registry, [r1.address]);
+
+      await registry.connect(r2).register(MIN_STAKE);
+      await assertInvariants(registry, [r1.address, r2.address]);
+
+      await registry.connect(r3).register(MIN_STAKE);
+      await assertInvariants(registry, [r1.address, r2.address, r3.address]);
+
+      // Remove r1 (first element): triggers swap-and-pop, moving r3 into
+      // r1's old slot.
+      await registry.connect(r1).unregister();
+      await assertInvariants(registry, [r2.address, r3.address]);
+
+      await registry.connect(r4).register(MIN_STAKE);
+      await assertInvariants(registry, [r2.address, r3.address, r4.address]);
+
+      // Remove r3, now in a middle slot after the earlier compaction.
+      await registry.connect(r3).unregister();
+      await assertInvariants(registry, [r2.address, r4.address]);
+
+      // Every resolver still listed must independently report itself
+      // active and resolvable, and each address appears exactly once.
+      const listed = await registry.list();
+      expect(listed.length).to.equal(2);
+      const seen = new Set<string>();
+      for (const addr of listed) {
+        const lower = addr.toLowerCase();
+        expect(seen.has(lower), `duplicate entry for ${addr}`).to.be.false;
+        seen.add(lower);
+        expect(await registry.isActive(addr)).to.be.true;
+      }
     });
   });
 });

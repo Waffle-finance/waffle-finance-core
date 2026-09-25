@@ -15,6 +15,7 @@ import { describe, it, expect } from "vitest";
 import { xdr, nativeToScVal, scValToNative } from "@stellar/stellar-sdk";
 import {
   decodeHtlcEvent,
+  toHex,
   isMalformedEvent,
   HTLC_EVENT_SCHEMA_VERSION,
   type CreatedEvent,
@@ -50,6 +51,26 @@ function decodeFixture(ev: ReturnType<typeof makeCreatedEvent>) {
   return decodeHtlcEvent(topics, value);
 }
 
+// ─── toHex normalization ─────────────────────────────────────────────────────
+
+describe("toHex", () => {
+  it("normalizes string hex to lowercase without a 0x prefix", () => {
+    expect(toHex("0xABCDEF")).toBe("abcdef");
+    expect(toHex("ABCDEF")).toBe("abcdef");
+    expect(toHex("0X00aBcD")).toBe("00abcd");
+  });
+
+  it("normalizes byte input to lowercase hex without a 0x prefix", () => {
+    expect(toHex(Buffer.from([0xab, 0xcd, 0xef]))).toBe("abcdef");
+    expect(toHex(Buffer.from([0x00, 0xab]))).toBe("00ab");
+  });
+
+  it("rejects invalid hex strings", () => {
+    expect(() => toHex("0xzz")).toThrow();
+    expect(() => toHex("abcg")).toThrow();
+  });
+});
+
 // ─── Happy-path: created ─────────────────────────────────────────────────────
 
 describe("decodeHtlcEvent — created", () => {
@@ -67,10 +88,10 @@ describe("decodeHtlcEvent — created", () => {
     expect(ev.orderId).toBe(BigInt(ORDER_ID));
   });
 
-  it("decodes hashlock as 0x-prefixed 64-char hex string", () => {
+  it("decodes hashlock as lowercase 64-char hex without 0x prefix", () => {
     const ev = decodeFixture(makeCreatedEvent()) as CreatedEvent;
-    expect(ev.hashlock).toBe(HASHLOCK);
-    expect(/^0x[0-9a-f]{64}$/.test(ev.hashlock)).toBe(true);
+    expect(ev.hashlock).toBe(HASHLOCK.replace(/^0x/i, "").toLowerCase());
+    expect(/^[0-9a-f]{64}$/.test(ev.hashlock)).toBe(true);
   });
 
   it("decodes timelock as the absolute unix timestamp from the fixture", () => {
@@ -120,15 +141,15 @@ describe("decodeHtlcEvent — claimed", () => {
     expect(ev.orderId).toBe(BigInt(ORDER_ID));
   });
 
-  it("decodes hashlock from topics[2] as 0x-prefixed hex", () => {
+  it("decodes hashlock from topics[2] as lowercase hex without 0x prefix", () => {
     const ev = decodeFixture(makeClaimedEvent()) as ClaimedEvent;
-    expect(ev.hashlock).toBe(HASHLOCK);
+    expect(ev.hashlock).toBe(HASHLOCK.replace(/^0x/i, "").toLowerCase());
   });
 
-  it("decodes preimage from data[2] as 0x-prefixed hex", () => {
+  it("decodes preimage from data[2] as lowercase hex without 0x prefix", () => {
     const ev = decodeFixture(makeClaimedEvent()) as ClaimedEvent;
-    expect(ev.preimage).toBe(PREIMAGE);
-    expect(/^0x[0-9a-f]+$/.test(ev.preimage)).toBe(true);
+    expect(ev.preimage).toBe(PREIMAGE.replace(/^0x/i, "").toLowerCase());
+    expect(/^[0-9a-f]+$/.test(ev.preimage)).toBe(true);
   });
 
   it("decodes beneficiary address from topics[1]", () => {
@@ -156,7 +177,7 @@ describe("decodeHtlcEvent — refunded", () => {
 
   it("decodes hashlock from topics[2]", () => {
     const ev = decodeFixture(makeRefundedEvent()) as RefundedEvent;
-    expect(ev.hashlock).toBe(HASHLOCK);
+    expect(ev.hashlock).toBe(HASHLOCK.replace(/^0x/i, "").toLowerCase());
   });
 
   it("decodes refundAddress from topics[1]", () => {

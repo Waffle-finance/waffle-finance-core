@@ -147,7 +147,7 @@ describe("HistoryCache", () => {
   });
 
   describe("cache eviction", () => {
-    it("does not cache when at max size", () => {
+    it("evicts the oldest entry when at max size to make room for new entry", () => {
       // Fill cache to max size
       for (let i = 0; i < 10; i++) {
         const address = `0x${i.toString(16).padStart(3, '0')}`;
@@ -157,14 +157,17 @@ describe("HistoryCache", () => {
       
       expect(cache.getStats().size).toBe(10);
       
-      // Try to add another entry
+      // Try to add another entry — oldest should be evicted, new entry should be inserted
       const newAddress = "0xaaa";
       const newResult = createMockResult([999]);
       cache.set(newAddress, 50, undefined, newResult);
       
-      // Should not be added
+      // Size stays at maxSize (10) because oldest was evicted
       expect(cache.getStats().size).toBe(10);
-      expect(cache.get(newAddress, 50)).toBeNull();
+      // New entry IS retrievable (eviction-then-insert, not rejection)
+      expect(cache.get(newAddress, 50)).toEqual(newResult);
+      // The very first inserted entry (0x000) should have been evicted
+      expect(cache.get("0x000", 50)).toBeNull();
     });
   });
 
@@ -280,6 +283,35 @@ describe("HistoryCache", () => {
       expect(disabledCache.get(address, 50)).toBeNull();
       
       disabledCache.destroy();
+    });
+  });
+
+  describe("address normalization", () => {
+    it("treats uppercase and lowercase address as the same cache key", () => {
+      const lower = "0xabcdef1234567890abcdef1234567890abcdef12";
+      const upper = lower.toUpperCase();
+      const mixed = "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12";
+      const result = createMockResult([1, 2, 3]);
+
+      cache.set(lower, 50, undefined, result);
+
+      expect(cache.get(upper, 50)).toEqual(result);
+      expect(cache.get(mixed, 50)).toEqual(result);
+      expect(cache.getStats().size).toBe(1);
+    });
+
+    it("invalidateAddress removes entries regardless of casing", () => {
+      const lower = "0xabcdef1234567890abcdef1234567890abcdef12";
+      const upper = lower.toUpperCase();
+
+      cache.set(lower, 25, undefined, createMockResult([1]));
+      cache.set(lower, 50, undefined, createMockResult([2]));
+
+      cache.invalidateAddress(upper);
+
+      expect(cache.get(lower, 25)).toBeNull();
+      expect(cache.get(lower, 50)).toBeNull();
+      expect(cache.getStats().size).toBe(0);
     });
   });
 });

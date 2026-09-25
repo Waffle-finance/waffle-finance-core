@@ -165,8 +165,8 @@ Ensure your local environment matches CI:
 
 ## Related Documentation
 
-- [Release Process Documentation](../.github/RELEASE_PROCESS.md) - Complete release workflow documentation
-- [Contributing Guide](../CONTRIBUTING.md) - Guidelines for contributing to the project
+- [Release Process Documentation](../.github/RELEASE_PROCESS.md) - Complete release workflow documentation (archival — describes a planned workflow)
+- [Release Checklist](../.github/RELEASE_CHECKLIST.md) - Current operational release checklist
 
 ## Questions?
 

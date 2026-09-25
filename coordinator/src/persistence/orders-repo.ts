@@ -91,6 +91,9 @@ export interface OrderRow {
   preimageEncVersion: number | null;
   secretRevealedTx: string | null;
   resolverAddress: string | null;
+  lastEthBlock: number | null;
+  lastSorobanLedger: number | null;
+  lastSolanaSlot: number | null;
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
@@ -147,6 +150,9 @@ interface OrderDbRow {
   preimage_enc_version: number | null;
   secret_revealed_tx: string | null;
   resolver_address: string | null;
+  last_eth_block: number | null;
+  last_soroban_ledger: number | null;
+  last_solana_slot: number | null;
   created_at: number;
   updated_at: number;
   archived_at: number | null;
@@ -180,9 +186,12 @@ function rowToOrder(r: OrderDbRow): OrderRow {
     preimageEncVersion: r.preimage_enc_version ?? null,
     secretRevealedTx: r.secret_revealed_tx,
     resolverAddress: r.resolver_address,
+    lastEthBlock: r.last_eth_block ?? null,
+    lastSorobanLedger: r.last_soroban_ledger ?? null,
+    lastSolanaSlot: r.last_solana_slot ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    archivedAt: r.archived_at ?? null
+    archivedAt: r.archived_at ?? null,
   };
 }
 
@@ -492,10 +501,64 @@ export class OrdersRepository {
     }
   }
 
-  async setStatus(publicId: string, status: OrderStatus, actor = "system"): Promise<void> {
+  /**
+   * Update the status of an order identified by `publicId`.
+   *
+   * When `expectedStatus` is provided the update is conditional: it only
+   * applies when the current DB status matches `expectedStatus`.  This
+   * enables optimistic-concurrency-style updates.
+   *
+   * After a zero-row result a narrow SELECT is performed to distinguish:
+   *   - `NOT_FOUND`    — no row with this public_id exists
+   *   - `STALE_STATUS` — row exists but its current status did not match
+   *                      `expectedStatus` (only reachable when expectedStatus
+   *                      is supplied)
+   *
+   * When `expectedStatus` is omitted the underlying SQL has no prior-status
+   * guard so a zero-row result can only mean NOT_FOUND.
+   */
+  async setStatus(
+    publicId: string,
+    status: OrderStatus,
+    actor?: string,
+    expectedStatus?: OrderStatus
+  ): Promise<void>;
+  async setStatus(publicId: string, status: OrderStatus, actor = "system", expectedStatus?: OrderStatus): Promise<void> {
     await this.transactionManager.runWithRetry("status-update", async () => {
+      // Fetch the current row first so we can record a transition event and
+      // also use it for the zero-row disambiguation below.
       const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
-      await this.run(this.updateStatus, { publicId, status });
+
+      let result: StatementResult;
+      if (expectedStatus !== undefined) {
+        // Conditional UPDATE — only succeeds when the current status matches.
+        result = await this.run(
+          this.db.prepare(`
+            UPDATE orders
+            SET status = :status, updated_at = CAST(strftime('%s','now') AS INTEGER)
+            WHERE public_id = :publicId AND status = :expectedStatus
+          `),
+          { publicId, status, expectedStatus }
+        );
+      } else {
+        result = await this.run(this.updateStatus, { publicId, status });
+      }
+
+      if (result.changes === 0) {
+        if (!order) {
+          const err = new Error(`Order not found: ${publicId}`);
+          (err as any).code = "NOT_FOUND";
+          throw err;
+        }
+        // Row exists but the conditional WHERE status = :expectedStatus failed.
+        const err = new Error(
+          `Status update conflict for ${publicId}: current status "${order.status}" does not match expected "${expectedStatus}"`
+        );
+        (err as any).code = "STALE_STATUS";
+        (err as any).currentStatus = order.status;
+        throw err;
+      }
+
       if (order) {
         await this.appendTransitionEvent(order.id, "status.transitioned", {
           actor,
@@ -821,6 +884,54 @@ export class OrdersRepository {
     );
   }
 
+  /**
+   * Update the per-order high-water mark cursor (last_eth_block, last_soroban_ledger,
+   * or last_solana_slot) for a given order and chain. Advances forward only.
+   */
+  async updateOrderCursor(publicId: string, chain: Chain, position: number): Promise<void> {
+    let col: string;
+    if (chain === "ethereum") col = "last_eth_block";
+    else if (chain === "stellar") col = "last_soroban_ledger";
+    else if (chain === "solana") col = "last_solana_slot";
+    else return;
+
+    await this.run(
+      this.db.prepare(`
+        UPDATE orders
+        SET ${col} = MAX(COALESCE(${col}, 0), ?),
+            updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = ?
+      `),
+      position,
+      publicId
+    );
+  }
+
+  /**
+   * Return the minimum per-order cursor position across active (non-terminal)
+   * orders for `chain`, or `null` if no active orders have recorded a cursor.
+   */
+  async getMinActiveOrderCursor(chain: Chain): Promise<number | null> {
+    let col: string;
+    if (chain === "ethereum") col = "last_eth_block";
+    else if (chain === "stellar") col = "last_soroban_ledger";
+    else if (chain === "solana") col = "last_solana_slot";
+    else return null;
+
+    const row = await this.get<{ min_cursor: number | null }>(
+      this.db.prepare(`
+        SELECT MIN(${col}) AS min_cursor
+        FROM orders
+        WHERE (src_chain = ? OR dst_chain = ?)
+          AND status NOT IN ('completed', 'refunded', 'failed', 'expired')
+          AND ${col} IS NOT NULL AND ${col} > 0
+      `),
+      chain,
+      chain
+    );
+    return row?.min_cursor ?? null;
+  }
+
   // ── Soroban listener checkpoints ──────────────────────────────────────────
   //
   // These three methods are the durable persistence adapter for the Soroban
@@ -973,6 +1084,162 @@ export class OrdersRepository {
       srcOrderId: r.src_order_id,
       hashlock: r.hashlock,
       status: r.status,
+    }));
+  }
+
+  // ── Per-order ledger cursors ──────────────────────────────────────────────
+
+  async getOrderLedgerCursor(publicId: string): Promise<{
+    lastEthBlock: number | null;
+    lastSorobanLedger: number | null;
+    lastSolanaSlot: number | null;
+  } | null> {
+    const row = await this.get<{
+      last_eth_block: number | null;
+      last_soroban_ledger: number | null;
+      last_solana_slot: number | null;
+    }>(
+      this.db.prepare(`
+        SELECT last_eth_block, last_soroban_ledger, last_solana_slot
+        FROM orders WHERE public_id = ?
+      `),
+      publicId
+    );
+    if (!row) return null;
+    return {
+      lastEthBlock: row.last_eth_block ?? null,
+      lastSorobanLedger: row.last_soroban_ledger ?? null,
+      lastSolanaSlot: row.last_solana_slot ?? null,
+    };
+  }
+
+  /**
+   * Advance one or more per-order ledger cursors forward-only.
+   * Positions less than or equal to the stored value are ignored.
+   */
+  async advanceOrderLedgerCursor(
+    publicId: string,
+    update: {
+      lastEthBlock?: number;
+      lastSorobanLedger?: number;
+      lastSolanaSlot?: number;
+    }
+  ): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+
+    if (update.lastEthBlock != null && update.lastEthBlock > 0) {
+      sets.push(
+        "last_eth_block = CASE WHEN last_eth_block IS NULL THEN ? ELSE MAX(last_eth_block, ?) END"
+      );
+      params.push(update.lastEthBlock, update.lastEthBlock);
+    }
+    if (update.lastSorobanLedger != null && update.lastSorobanLedger > 0) {
+      sets.push(
+        "last_soroban_ledger = CASE WHEN last_soroban_ledger IS NULL THEN ? ELSE MAX(last_soroban_ledger, ?) END"
+      );
+      params.push(update.lastSorobanLedger, update.lastSorobanLedger);
+    }
+    if (update.lastSolanaSlot != null && update.lastSolanaSlot > 0) {
+      sets.push(
+        "last_solana_slot = CASE WHEN last_solana_slot IS NULL THEN ? ELSE MAX(last_solana_slot, ?) END"
+      );
+      params.push(update.lastSolanaSlot, update.lastSolanaSlot);
+    }
+
+    if (sets.length === 0) return;
+
+    sets.push("updated_at = CAST(strftime('%s','now') AS INTEGER)");
+    params.push(publicId);
+
+    await this.run(
+      this.db.prepare(`
+        UPDATE orders SET ${sets.join(", ")}
+        WHERE public_id = ?
+      `),
+      ...params
+    );
+  }
+
+  async listOrderLedgerCursors(limit = 200): Promise<
+    Array<{
+      publicId: string;
+      status: OrderStatus;
+      lastEthBlock: number | null;
+      lastSorobanLedger: number | null;
+      lastSolanaSlot: number | null;
+      updatedAt: number;
+    }>
+  > {
+    const rows = await this.all<{
+      public_id: string;
+      status: OrderStatus;
+      last_eth_block: number | null;
+      last_soroban_ledger: number | null;
+      last_solana_slot: number | null;
+      updated_at: number;
+    }>(
+      this.db.prepare(`
+        SELECT public_id, status, last_eth_block, last_soroban_ledger, last_solana_slot, updated_at
+        FROM orders
+        WHERE archived_at IS NULL
+          AND (
+            last_eth_block IS NOT NULL
+            OR last_soroban_ledger IS NOT NULL
+            OR last_solana_slot IS NOT NULL
+          )
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `),
+      Math.min(Math.max(limit, 1), 1000)
+    );
+
+    return rows.map((r) => ({
+      publicId: r.public_id,
+      status: r.status,
+      lastEthBlock: r.last_eth_block ?? null,
+      lastSorobanLedger: r.last_soroban_ledger ?? null,
+      lastSolanaSlot: r.last_solana_slot ?? null,
+      updatedAt: r.updated_at,
+    }));
+  }
+
+  /**
+   * Return up to `limit` non-terminal, non-archived orders ordered by most
+   * recently updated.  Used by `CacheVerifier` to select a representative
+   * sample for on-chain spot-checking.
+   *
+   * Terminal statuses (completed, refunded, failed) are excluded.  `expired`
+   * is intentionally included — an expired order can still be reconciled.
+   */
+  async findNonTerminalSample(limit: number): Promise<OrderRow[]> {
+    const rows = await this.all<OrderDbRow>(
+      this.db.prepare(`
+        SELECT * FROM orders
+        WHERE status NOT IN ('completed', 'refunded', 'failed')
+          AND archived_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `),
+      Math.min(Math.max(limit, 1), 1000)
+    );
+    return rows.map(rowToOrder);
+  }
+
+  async listChainCursors(): Promise<
+    Array<{ chain: Chain; position: number; updatedAt: number }>
+  > {
+    const rows = await this.all<{
+      chain: Chain;
+      position: number;
+      updated_at: number;
+    }>(
+      this.db.prepare("SELECT chain, position, updated_at FROM chain_cursors ORDER BY chain")
+    );
+    return rows.map((r) => ({
+      chain: r.chain,
+      position: Number(r.position),
+      updatedAt: Number(r.updated_at),
     }));
   }
 }

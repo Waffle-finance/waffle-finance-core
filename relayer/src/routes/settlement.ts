@@ -79,7 +79,8 @@ export function settlementRouter(
   // Conditionally gated behind admin auth in production.
   const recoverHandler = async (req: Request, res: Response) => {
     const { orderId } = req.params;
-    const { coordinatorRef } = req.body ?? {};
+    const { coordinatorRef: rawCoordinatorRef } = req.body ?? {};
+    const coordinatorRef = typeof rawCoordinatorRef === 'string' ? rawCoordinatorRef.trim() : rawCoordinatorRef;
 
     const record = service.getStatus(orderId);
     if (!record) {

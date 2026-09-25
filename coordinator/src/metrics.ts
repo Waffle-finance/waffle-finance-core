@@ -767,6 +767,21 @@ export const orderPhaseRatio = new Gauge({
   name: 'coordinator_order_phase_ratio',
   help: 'Fraction of active (non-terminal) orders currently in each phase, by direction (0–1)',
   labelNames: ['direction', 'phase'] as const,
+// ── Reconciliation replay / recovery metrics ─────────────────────────────────
+// These metrics expose the internals of the formal replay pipeline so operators
+// can detect silent event loss, cursor staleness, and forced re-syncs without
+// reconstructing event streams manually.
+
+/**
+ * Current replay window size (in blocks / ledgers / slots) per chain.
+ * Set on every reconciler run.  A value of 0 means the chain is up to date.
+ * A persistently large value indicates the HWM is not advancing (RPC outage
+ * or events are not being found in the window).
+ */
+export const reconciliationWindowSize = new Gauge({
+  name: "coordinator_reconciliation_window_size",
+  help: "Current replay scan window size in chain-native units (blocks/ledgers/slots) per chain",
+  labelNames: ["chain"] as const,
   registers: [registry],
 });
 
@@ -792,6 +807,15 @@ export const orderPhaseDwellSeconds = new Histogram({
   // Buckets cover 5 s → 2 h, with fine resolution in the 30 s–15 min window
   // where most healthy swaps complete, and coarse resolution beyond that.
   buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
+ * Cursor lag per chain: the distance between the cursor HWM and the current
+ * chain tip in chain-native units.  Identical to `reconciliationWindowSize`
+ * today but kept as a separate metric so dashboards can alert on lag vs window
+ * independently once they diverge (e.g. when partial-page replays are added).
+ */
+export const reconciliationCursorLag = new Gauge({
+  name: "coordinator_reconciliation_cursor_lag",
+  help: "Distance between the reconciler cursor HWM and the current chain tip",
+  labelNames: ["chain"] as const,
   registers: [registry],
 });
 
@@ -812,6 +836,15 @@ export const orderPhaseTransitionSeconds = new Histogram({
   help: 'Wall-clock seconds between consecutive phase milestones (e.g. src_locked→dst_locked), by direction',
   labelNames: ['direction', 'transition'] as const,
   buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
+ * Cumulative count of times the configured lookback window was exceeded,
+ * forcing the reconciler to fall back to `tip - lookback` as the start block.
+ * A non-zero rate means events before the fallback point may have been missed.
+ * Operators should investigate whether a manual historical re-scan is required.
+ */
+export const reconciliationGapExceedances = new Counter({
+  name: "coordinator_reconciliation_gap_exceedances_total",
+  help: "Total times the reconciler cursor gap exceeded the configured lookback window",
+  labelNames: ["chain"] as const,
   registers: [registry],
 });
 
@@ -831,6 +864,18 @@ export const orderPhaseBacklogCount = new Gauge({
   name: 'coordinator_order_phase_backlog_count',
   help: 'Number of orders in a non-terminal phase longer than the warn/critical dwell threshold',
   labelNames: ['direction', 'phase', 'threshold'] as const,
+ * Conflicts classified during event replay, by type.
+ *
+ * conflict_type label values:
+ *   - already_applied      — event targets a status the order already has (benign)
+ *   - status_ahead         — order is past the event's target status (benign)
+ *   - state_contradiction  — event contradicts persisted state (investigate)
+ *   - unknown_order        — event references an order not in the DB (gap signal)
+ */
+export const reconciliationConflicts = new Counter({
+  name: "coordinator_reconciliation_conflicts_total",
+  help: "Total event-vs-state conflicts classified during reconciler replay, by type",
+  labelNames: ["conflict_type"] as const,
   registers: [registry],
 });
 
@@ -845,6 +890,14 @@ export const orderPhaseMaxStuckAgeSeconds = new Gauge({
   name: 'coordinator_order_phase_max_stuck_age_seconds',
   help: 'Age in seconds of the oldest order currently in each non-terminal phase',
   labelNames: ['direction', 'phase'] as const,
+ * Cumulative count of forced historical re-sync decisions: gaps that exceeded
+ * 3× the lookback window, requiring operator action to ensure no events were
+ * permanently missed.
+ */
+export const reconciliationForcedResyncs = new Counter({
+  name: "coordinator_reconciliation_forced_resyncs_total",
+  help: "Total forced historical re-sync decisions (gap > 3× lookback window)",
+  labelNames: ["chain"] as const,
   registers: [registry],
 });
 
@@ -936,3 +989,24 @@ export const phaseDistributionMetrics = {
   phaseBacklog: orderPhaseBacklogCount,
   phaseMaxStuckAge: orderPhaseMaxStuckAgeSeconds,
 } as const;
+ * Per-chain errors during a reconciler run.  Incremented when a single
+ * chain's RPC call fails and that chain is skipped for the run.  A non-zero
+ * rate for a chain means its cursor is not advancing and the window is growing.
+ */
+export const reconciliationChainErrors = new Counter({
+  name: "coordinator_reconciliation_chain_errors_total",
+  help: "Total per-chain errors that caused a chain to be skipped in a reconciler run",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Total events skipped by the per-run deduplication set.  A non-zero count is
+ * expected (overlapping windows are intentional); a very high count relative to
+ * `eventsReplayed` may indicate the cursor is not advancing.
+ */
+export const reconciliationDuplicatesSkipped = new Counter({
+  name: "coordinator_reconciliation_duplicates_skipped_total",
+  help: "Total on-chain events skipped by the per-run deduplication filter",
+  registers: [registry],
+});

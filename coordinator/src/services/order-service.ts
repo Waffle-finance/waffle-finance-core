@@ -117,14 +117,15 @@ function recordTransition(
 export class OrderService {
   private readonly historyCache: HistoryCache;
   private readonly sseBroker?: SseBroker;
+  private readonly auditRepo?: AuditRepository;
 
   constructor(
     private readonly repo: OrdersRepository,
     private readonly log: Logger,
     options: { enableCache?: boolean; cacheTtlMs?: number; auditRepo?: AuditRepository; sseBroker?: SseBroker } = {},
-    private readonly auditRepo?: AuditRepository
+    auditRepo?: AuditRepository
   ) {
-    this.auditRepo = options.auditRepo;
+    this.auditRepo = options.auditRepo ?? auditRepo;
     this.sseBroker = options.sseBroker;
     // Initialize cache if enabled (default: enabled)
     if (options.enableCache !== false) {
@@ -182,7 +183,20 @@ export class OrderService {
     // Invalidate cache for both source and destination addresses
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
-    
+
+    this.audit(
+      buildOrderAuditEntry("order.announced", {
+        orderId: order.publicId,
+        hashlock: order.hashlock,
+        direction: order.direction,
+        fromStatus: null,
+        toStatus: "announced",
+        srcChain: order.srcChain,
+        dstChain: order.dstChain,
+        requestId: getRequestId()
+      })
+    );
+
     return order;
   }
 
@@ -282,6 +296,9 @@ export class OrderService {
       throw new OrderValidationError(`cannot record src lock from status ${order.status}`);
     }
     await this.repo.recordSrcLock(input);
+    if (input.blockNumber > 0) {
+      await this.repo.updateOrderCursor(input.publicId, order.srcChain, input.blockNumber);
+    }
     this.log.info({ publicId: input.publicId, srcOrderId: input.orderId }, "src lock recorded");
 
     // ── Observability ───────────────────────────────────────────────────
@@ -297,6 +314,21 @@ export class OrderService {
     // Invalidate cache for both addresses since order status changed
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
+
+    this.audit(
+      buildOrderAuditEntry("order.src_locked", {
+        orderId: input.publicId,
+        hashlock: order.hashlock,
+        direction: order.direction,
+        fromStatus: order.status,
+        toStatus: "src_locked",
+        srcChain: order.srcChain,
+        dstChain: order.dstChain,
+        txHash: input.txHash,
+        blockNumber: input.blockNumber,
+        requestId: getRequestId()
+      })
+    );
   }
 
   async recordDstLock(input: {
@@ -341,6 +373,9 @@ export class OrderService {
       throw new OrderValidationError(`cannot record dst lock from status ${order.status}`);
     }
     await this.repo.recordDstLock(input);
+    if (input.blockNumber > 0) {
+      await this.repo.updateOrderCursor(input.publicId, order.dstChain, input.blockNumber);
+    }
     this.log.info({ publicId: input.publicId, dstOrderId: input.orderId, resolver: input.resolver }, "dst lock recorded");
 
     // ── Observability ───────────────────────────────────────────────────
@@ -367,6 +402,22 @@ export class OrderService {
     if (input.resolver) {
       resolverLockActionsTotal.inc({ resolver_address: input.resolver, action: "dst_lock" });
     }
+
+    this.audit(
+      buildOrderAuditEntry("order.dst_locked", {
+        orderId: input.publicId,
+        hashlock: order.hashlock,
+        direction: order.direction,
+        fromStatus: order.status,
+        toStatus: "dst_locked",
+        srcChain: order.srcChain,
+        dstChain: order.dstChain,
+        txHash: input.txHash,
+        blockNumber: input.blockNumber,
+        resolverAddress: input.resolver ?? undefined,
+        requestId: getRequestId()
+      })
+    );
   }
 
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
@@ -411,6 +462,20 @@ export class OrderService {
     // Invalidate cache for both addresses since order status changed
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
+
+    this.audit(
+      buildOrderAuditEntry("order.secret_revealed", {
+        orderId: publicId,
+        hashlock: order.hashlock,
+        direction: order.direction,
+        fromStatus: order.status,
+        toStatus: "secret_revealed",
+        srcChain: order.srcChain,
+        dstChain: order.dstChain,
+        txHash,
+        requestId: getRequestId()
+      })
+    );
   }
 
   async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
@@ -462,6 +527,20 @@ export class OrderService {
     // Invalidate cache for both addresses since order status changed
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
+
+    const eventType = status === "refunded" ? "order.refunded" : status === "completed" ? "order.completed" : status === "expired" ? "order.expired" : "order.status_changed";
+    this.audit(
+      buildOrderAuditEntry(eventType, {
+        orderId: publicId,
+        hashlock: order.hashlock,
+        direction: order.direction,
+        fromStatus: order.status,
+        toStatus: status,
+        srcChain: order.srcChain,
+        dstChain: order.dstChain,
+        requestId: getRequestId()
+      })
+    );
   }
 
   async rollbackSrcLock(publicId: string): Promise<void> {
@@ -506,6 +585,43 @@ export class OrderService {
 
   async setChainCursor(chain: Chain, position: number): Promise<void> {
     return this.repo.setChainCursor(chain, position);
+  }
+
+  async advanceOrderLedgerCursor(
+    publicId: string,
+    update: {
+      lastEthBlock?: number;
+      lastSorobanLedger?: number;
+      lastSolanaSlot?: number;
+    }
+  ): Promise<void> {
+    return this.repo.advanceOrderLedgerCursor(publicId, update);
+  }
+
+  async getReconciliationCursorState(limit = 200): Promise<{
+    chainCursors: Array<{ chain: Chain; position: number; updatedAt: number }>;
+    orderCursors: Array<{
+      publicId: string;
+      status: string;
+      lastEthBlock: number | null;
+      lastSorobanLedger: number | null;
+      lastSolanaSlot: number | null;
+      updatedAt: number;
+    }>;
+  }> {
+    const [chainCursors, orderCursors] = await Promise.all([
+      this.repo.listChainCursors(),
+      this.repo.listOrderLedgerCursors(limit),
+    ]);
+    return { chainCursors, orderCursors };
+  }
+
+  async updateOrderCursor(publicId: string, chain: Chain, position: number): Promise<void> {
+    return this.repo.updateOrderCursor(publicId, chain, position);
+  }
+
+  async getMinActiveOrderCursor(chain: Chain): Promise<number | null> {
+    return this.repo.getMinActiveOrderCursor(chain);
   }
 
   // ── Soroban listener checkpoints ──────────────────────────────────────────

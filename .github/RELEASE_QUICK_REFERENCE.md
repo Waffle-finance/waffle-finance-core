@@ -1,3 +1,19 @@
+> **ARCHIVAL NOTICE — design reference only, not current operating procedure**
+>
+> This document is a quick-reference guide for a `.github/workflows/release.yml`
+> that **does not exist** in this repository. The CI steps, job monitoring
+> instructions, and artifact download commands here will not work because the
+> workflow was never committed.
+>
+> **Current release gate:** run `scripts/verify-release-locally.sh` (or
+> `.ps1` on Windows) manually before tagging. The four workflows that
+> actually run automatically are listed in
+> [docs/DOC_MAP.md](../docs/DOC_MAP.md). Use
+> [.github/RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) as your operational
+> checklist.
+>
+> This file is preserved as a design reference.
+
 # Release Workflow - Quick Reference
 
 A condensed guide for quick reference during releases.
@@ -39,23 +55,20 @@ git push origin v1.0.0
 
 ## During Release
 
-### Monitor Workflow
-1. Go to [Actions](../../actions) tab
-2. Find your release workflow run
-3. Watch the `verify-artifacts` job (takes ~20-30 minutes)
+### Monitor CI
 
-### Expected Steps
-```
-verify-artifacts (30 steps)
-├── Setup environment (4 steps)
-├── Contract verification (6 steps)
-├── SDK verification (6 steps)
-├── Workspace verification (2 steps)
-└── Report generation (2 steps)
+> **Note:** There is no automated `release.yml` workflow. After pushing the
+> tag, verify manually:
 
-resolver-docker (7 steps)
-└── Build and push Docker image
-```
+1. Confirm the four existing workflows are green on `main` before tagging:
+   - [Actions tab](../../actions) → `Command Contract` (last push)
+   - `Dependency Review` (last relevant PR)
+   - `Frontend` (last push touching frontend/sdk/config)
+   - `Soroban Contracts` (last push touching soroban/)
+2. Confirm `scripts/verify-release-locally.sh` (or `.ps1`) passed locally
+   before you ran `git push origin <tag>`.
+3. If you have a Docker build configured outside this repo, verify the
+   resolver image is published after the tag is pushed.
 
 ## If Something Fails
 
@@ -105,23 +118,15 @@ ls packages/sdk/dist/
 
 ## After Release
 
-### 1. Verify Release Artifacts
+### 1. Verify npm-published packages
 ```bash
-# Go to Actions → Select workflow run → Artifacts section
-# Download and inspect:
-# - contract-artifacts
-# - sdk-build-artifacts  
-# - release-verification-report
+npm view @wafflefinance/sdk
+npm view @wafflefinance/contracts
 ```
 
-### 2. Verify Docker Image
-```bash
-# Check image was published
-docker pull ghcr.io/OWNER/wafflefinance-resolver:v1.0.0
-
-# Verify image works
-docker run ghcr.io/OWNER/wafflefinance-resolver:v1.0.0 --version
-```
+### 2. Verify Vercel deployment
+Check the Vercel dashboard to confirm the frontend build completed for the
+tagged commit.
 
 ### 3. Create GitHub Release (Optional)
 1. Go to [Releases](../../releases)
@@ -163,26 +168,38 @@ docker run ghcr.io/OWNER/wafflefinance-resolver:v1.0.0 --version
 
 ## Emergency Contacts
 
-- **CI Issues:** Check [workflow file](.github/workflows/release.yml)
+- **CI Issues:** Check the `workflows/` directory alongside this file for the four real workflows
 - **Documentation:** See [RELEASE_PROCESS.md](RELEASE_PROCESS.md)
 - **Scripts:** See [scripts/README.md](../scripts/README.md)
 - **Support:** Open GitHub issue with `release` label
 
 ## Workflow File Locations
 
+> **Note:** The workflow files listed in the original design below (`release.yml`,
+> `ci.yml`, `contracts.yml`) do not exist. The actual workflows are listed in
+> [docs/DOC_MAP.md](../docs/DOC_MAP.md).
+
 ```
 .github/
 ├── workflows/
-│   ├── release.yml          ← Main release workflow
-│   ├── ci.yml               ← Continuous integration
-│   └── contracts.yml        ← Contract-specific checks
-├── RELEASE_PROCESS.md       ← Detailed documentation
-├── RELEASE_QUICK_REFERENCE.md ← This file
-└── RELEASE_ENHANCEMENTS.md  ← Implementation details
+│   ├── command-contract.yml   ← REAL: validates docs/COMMANDS.md on every push/PR
+│   ├── dep-review.yml         ← REAL: CVE/licence scan on dependency changes
+│   ├── frontend.yml           ← REAL: Vitest + typecheck + lint for frontend
+│   └── soroban-contracts.yml  ← REAL: cargo test for Soroban contracts
+│
+│   (the following do NOT exist — design reference only)
+│   ├── release.yml            ← NOT COMMITTED
+│   ├── ci.yml                 ← NOT COMMITTED
+│   └── contracts.yml          ← NOT COMMITTED
+│
+├── RELEASE_PROCESS.md         ← Archival: describes release.yml design
+├── RELEASE_QUICK_REFERENCE.md ← Archival: this file
+├── RELEASE_ENHANCEMENTS.md    ← Archival: describes release.yml design
+└── RELEASE_CHECKLIST.md       ← CURRENT: use this for actual releases
 
 scripts/
-├── verify-release-locally.sh  ← Bash verification script
-├── verify-release-locally.ps1 ← PowerShell verification script
+├── verify-release-locally.sh  ← CURRENT: bash verification script
+├── verify-release-locally.ps1 ← CURRENT: PowerShell verification script
 └── README.md                  ← Scripts documentation
 ```
 

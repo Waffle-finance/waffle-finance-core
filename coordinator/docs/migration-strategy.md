@@ -212,6 +212,10 @@ INSERT INTO … ON CONFLICT DO NOTHING;
 | 005b    | `005_schema_migrations.sql`    | Creates `schema_migrations` audit table                      |
 | 006     | `006_stale_cleanup.sql`        | Adds `archived_at` column for soft-delete of stale orders    |
 | 007     | `007_audit_log.sql`            | Creates append-only `audit_log` table for lifecycle forensics |
+| 008     | `008_query_optimizations_advanced.sql` | Advanced composite indexes and query optimizations |
+| 009     | `009_chain_cursors.sql`        | Adds dedicated per-chain cursor table                        |
+| 010     | `010_soroban_checkpoints.sql`  | Adds durable checkpoints for Soroban listener                |
+| 011     | `011_order_ledger_cursors.sql` | Per-order reconciler ledger cursors on `orders`               |
 
 ---
 

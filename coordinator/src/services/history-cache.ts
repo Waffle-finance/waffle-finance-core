@@ -48,7 +48,7 @@ export class HistoryCache {
    * Generate cache key from request parameters
    */
   private makeCacheKey(address: string, limit: number, cursor?: string): string {
-    return `${address}:${limit}:${cursor || 'first'}`;
+    return `${address.toLowerCase()}:${limit}:${cursor || 'first'}`;
   }
 
   /**
@@ -101,10 +101,11 @@ export class HistoryCache {
    * Call this when new orders are created for the address.
    */
   invalidateAddress(address: string): void {
+    const normalizedAddress = address.toLowerCase();
     let deletedCount = 0;
     
     for (const [key, _] of this.cache.entries()) {
-      if (key.startsWith(`${address}:`)) {
+      if (key.startsWith(`${normalizedAddress}:`)) {
         this.cache.delete(key);
         deletedCount++;
       }

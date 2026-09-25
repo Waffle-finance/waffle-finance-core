@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 import {IHTLCEscrow} from "./interfaces/IHTLCEscrow.sol";
@@ -38,7 +40,7 @@ import {IResolverRegistry} from "./interfaces/IResolverRegistry.sol";
 ///      matches it. This lets a single Soroban / Ethereum cross-chain
 ///      swap use one hashlock end-to-end while keeping the contract
 ///      compatible with EVM tooling that expects keccak.
-contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
+contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------
@@ -70,12 +72,13 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // ---------------------------------------------------------------
 
     /// @notice Optional resolver registry. When non-zero, only an
-    ///         active resolver can call `createOrder`. The registry
-    ///         can be cleared by setting this to address(0). Once
-    ///         cleared, `createOrder` is permissionless.
-    /// @dev The registry pointer is immutable after construction. To
-    ///      update it deploy a new HTLCEscrow and migrate.
-    IResolverRegistry public immutable resolverRegistry;
+    ///         active resolver can call `createOrder`. Set to address(0)
+    ///         at construction to make `createOrder` permissionless; use
+    ///         {setResolverRegistry} to point to a real registry after
+    ///         deployment. The registry can only be replaced with a
+    ///         non-zero address via {setResolverRegistry} — accidental
+    ///         clearing is rejected.
+    IResolverRegistry public resolverRegistry;
 
     /// @notice The minimum safety deposit accepted by the contract.
     ///         The safety deposit incentivises whoever submits the
@@ -106,6 +109,7 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     error InvalidHashlock();
     error InvalidPreimage();
     error InvalidValue();
+    error InvalidAddress();
     error OrderNotFound();
     error OrderNotClaimable();
     error OrderNotRefundable();
@@ -125,15 +129,49 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     error InsufficientBalance(uint256 balance, uint256 required);
 
     // ---------------------------------------------------------------
+    // Events
+    // ---------------------------------------------------------------
+
+    /// @notice Emitted when the resolver registry is replaced via
+    ///         {setResolverRegistry}. Both the previous and new registry
+    ///         addresses are reported so off-chain indexers can track
+    ///         the full history of registry pointers.
+    event ResolverRegistryUpdated(address indexed previousRegistry, address indexed newRegistry);
+
+    // ---------------------------------------------------------------
     // Construction
     // ---------------------------------------------------------------
 
     /// @param _resolverRegistry Resolver registry to query when creating
-    ///        orders. Pass `address(0)` to disable the gate entirely.
+    ///        orders. Pass `address(0)` to disable the gate entirely and
+    ///        make `createOrder` permissionless. Can be updated later via
+    ///        {setResolverRegistry}.
     /// @param _minSafetyDeposit Minimum safety deposit in wei.
-    constructor(IResolverRegistry _resolverRegistry, uint256 _minSafetyDeposit) {
+    constructor(IResolverRegistry _resolverRegistry, uint256 _minSafetyDeposit)
+        Ownable(msg.sender)
+    {
         resolverRegistry = _resolverRegistry;
         minSafetyDeposit = _minSafetyDeposit;
+    }
+
+    // ---------------------------------------------------------------
+    // Admin — resolver registry management
+    // ---------------------------------------------------------------
+
+    /// @notice Replace the resolver registry used to gate `createOrder`.
+    ///         The new registry must be a non-zero address; call sites
+    ///         that need to disable the gate should deploy a new escrow
+    ///         with `address(0)` at construction rather than clearing it
+    ///         at runtime, which is an accident-prone footgun.
+    ///
+    /// @dev Access control: `onlyOwner`.  Emits {ResolverRegistryUpdated}
+    ///      with both the old and new addresses so off-chain indexers can
+    ///      detect stale or swapped arguments.
+    function setResolverRegistry(IResolverRegistry newRegistry) external onlyOwner {
+        if (address(newRegistry) == address(0)) revert InvalidAddress();
+        address previous = address(resolverRegistry);
+        resolverRegistry = newRegistry;
+        emit ResolverRegistryUpdated(previous, address(newRegistry));
     }
 
     // ---------------------------------------------------------------
@@ -146,8 +184,9 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     ///      The registry check (`isActive(msg.sender)`) is a SOFT sybil gate —
     ///      it restricts who may *create* orders but has no effect on the claim
     ///      or refund paths, which remain permissionless regardless of registry
-    ///      state. Clearing the registry (deploy a new escrow with address(0))
-    ///      makes order creation open to everyone.
+    ///      state. The registry can be updated to a new non-zero address via
+    ///      {setResolverRegistry} (owner-only). To make order creation fully
+    ///      permissionless, deploy with `address(0)` at construction.
     ///
     ///      Non-custodial guarantee: funds pulled here cannot be moved by any
     ///      privileged actor. The only exits are `claimOrder` (preimage reveal)
@@ -245,7 +284,7 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
             if (order.amount == 0) revert OrderNotFound();
             revert OrderNotClaimable();
         }
-        if (block.timestamp > order.timelock) revert Expired();
+        if (block.timestamp >= order.timelock) revert Expired();
 
         // Verify hashlock. We accept both sha256 and keccak256 digests
         // so that a Soroban-side counterpart (sha256) and a classic EVM

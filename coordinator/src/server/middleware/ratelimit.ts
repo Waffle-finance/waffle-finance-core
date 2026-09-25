@@ -129,8 +129,10 @@ export function resolveClientIp(req: Request, trustedProxies?: ReadonlySet<strin
 /**
  * Extract a bearer token from `Authorization: Bearer <token>`.
  * Returns `null` when the header is absent or malformed.
+ *
+ * Exported for unit testing.
  */
-function extractBearerToken(req: Request): string | null {
+export function extractBearerToken(req: Request): string | null {
   const auth = req.headers["authorization"];
   if (!auth || !auth.startsWith("Bearer ")) return null;
   const token = auth.slice("Bearer ".length).trim();

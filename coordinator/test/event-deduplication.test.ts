@@ -16,6 +16,7 @@ import { OrderService } from "../src/services/order-service.js";
 import { EthereumListener } from "../src/listeners/ethereum-listener.js";
 import { SorobanListener } from "../src/listeners/soroban-listener.js";
 import { SolanaListener } from "../src/listeners/solana-listener.js";
+import { nativeToScVal } from "@stellar/stellar-sdk";
 import type { CoordinatorConfig } from "../src/config.js";
 import {
   makeCreatedEvent,
@@ -120,16 +121,16 @@ async function makeServices() {
 async function announceOrder(svc: OrderService, hashlock = HASHLOCK) {
   return svc.announce({
     direction: "eth_to_xlm",
-    srcAddress: VALID_ETH_ADDR,
-    dstAddress: VALID_STELLAR_ADDR,
-    srcAsset: "ETH",
-    dstAsset: "XLM",
-    srcAmount: "1000000000000000000",
-    dstAmount: "1000000",
     hashlock,
-    timelockSeconds: 86400,
-    resolverAddress: null,
-    networkMode: "testnet",
+    srcChain: "ethereum",
+    srcAddress: VALID_ETH_ADDR,
+    srcAsset: "native",
+    srcAmount: "1000000000000000000",
+    srcSafetyDeposit: "1000000000000000",
+    dstChain: "stellar",
+    dstAddress: VALID_STELLAR_ADDR,
+    dstAsset: "native",
+    dstAmount: "100000000",
   });
 }
 
@@ -235,12 +236,65 @@ describe("SorobanListener — in-process deduplication (issue #281)", () => {
     const listener = new SorobanListener(BASE_CFG, svc, log);
 
     const ev1 = { ledger: 5000, txHash: "tx1", ...makeCreatedEvent() };
-    const ev2 = { ledger: 5001, txHash: "tx2", ...makeCreatedEvent() };
+    const base2 = makeCreatedEvent(5001, "tx2");
+    const topic2 = [...base2.topic];
+    topic2[3] = nativeToScVal(Buffer.from("b".repeat(64), "hex"));
+    const ev2 = { ...base2, topic: topic2 };
 
     await (listener as any).processSorobanEvent(ev1);
     await (listener as any).processSorobanEvent(ev2);
     await (listener as any).processSorobanEvent(ev1); // dup
 
+    expect(recordSrcLock).toHaveBeenCalledTimes(2);
+  });
+
+  it("processes two events with the same topic in the same transaction when they have distinct eventIndexes", async () => {
+    const { svc } = await makeServices();
+    const HASHLOCK2 = "0x" + "b".repeat(64);
+    await announceOrder(svc, HASHLOCK);
+    await announceOrder(svc, HASHLOCK2);
+
+    const recordSrcLock = vi.spyOn(svc, "recordSrcLock");
+    const listener = new SorobanListener(BASE_CFG, svc, log);
+
+    const ev1 = { ledger: 5000, txHash: "sameTxHash", eventIndex: 0, ...makeCreatedEvent() };
+    const base2 = makeCreatedEvent(5000, "sameTxHash");
+    const topic2 = [...base2.topic];
+    topic2[3] = nativeToScVal(Buffer.from("b".repeat(64), "hex"));
+    const ev2 = { ledger: 5000, txHash: "sameTxHash", eventIndex: 1, ...base2, topic: topic2 };
+
+    await (listener as any).processSorobanEvent(ev1);
+    await (listener as any).processSorobanEvent(ev2);
+
+    expect(recordSrcLock).toHaveBeenCalledTimes(2);
+
+    // Replaying ev1 should be suppressed
+    await (listener as any).processSorobanEvent(ev1);
+    expect(recordSrcLock).toHaveBeenCalledTimes(2);
+  });
+
+  it("processes two events with the same topic in the same transaction when they have distinct IDs", async () => {
+    const { svc } = await makeServices();
+    const HASHLOCK2 = "0x" + "b".repeat(64);
+    await announceOrder(svc, HASHLOCK);
+    await announceOrder(svc, HASHLOCK2);
+
+    const recordSrcLock = vi.spyOn(svc, "recordSrcLock");
+    const listener = new SorobanListener(BASE_CFG, svc, log);
+
+    const ev1 = { ledger: 5000, txHash: "sameTxHash2", id: "1000-1", ...makeCreatedEvent() };
+    const base2 = makeCreatedEvent(5000, "sameTxHash2");
+    const topic2 = [...base2.topic];
+    topic2[3] = nativeToScVal(Buffer.from("b".repeat(64), "hex"));
+    const ev2 = { ledger: 5000, txHash: "sameTxHash2", id: "1000-2", ...base2, topic: topic2 };
+
+    await (listener as any).processSorobanEvent(ev1);
+    await (listener as any).processSorobanEvent(ev2);
+
+    expect(recordSrcLock).toHaveBeenCalledTimes(2);
+
+    // Replaying ev1 should be suppressed
+    await (listener as any).processSorobanEvent(ev1);
     expect(recordSrcLock).toHaveBeenCalledTimes(2);
   });
 });

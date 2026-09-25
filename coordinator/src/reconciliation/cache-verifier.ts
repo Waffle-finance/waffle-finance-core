@@ -107,6 +107,12 @@ export interface CacheVerificationStatus {
   mismatches: CacheMismatch[];
   /** Whether cache alignment is considered healthy (ok=true and 0 mismatches). */
   aligned: boolean;
+  /**
+   * Number of on-chain events skipped because required fields (hashlock or
+   * orderId) were absent.  Non-zero means malformed chain data was encountered;
+   * operators should inspect logs tagged `cache-verifier:incomplete_event`.
+   */
+  incompleteEvents: number;
 }
 
 export interface CacheVerifierOptions {
@@ -135,6 +141,7 @@ export class CacheVerifier {
     sampleSize: 0,
     mismatches: [],
     aligned: true,
+    incompleteEvents: 0,
   };
 
   constructor(
@@ -175,6 +182,7 @@ export class CacheVerifier {
 
     const mismatches: CacheMismatch[] = [];
     let sampledCount = 0;
+    let incompleteEvents = 0;
 
     try {
       // ── 1. Pick orders to verify ───────────────────────────────────────────
@@ -191,6 +199,7 @@ export class CacheVerifier {
           sampleSize: 0,
           mismatches: [],
           aligned: true,
+          incompleteEvents: 0,
         };
         cacheVerifierLastRun.set(Date.now() / 1000);
         cacheVerifierLastRunMismatches.set(0);
@@ -203,13 +212,17 @@ export class CacheVerifier {
 
       // ── 3. Verify each chain ───────────────────────────────────────────────
       if (this.cfg.ethereum.htlcEscrow && ethOrders.length > 0) {
-        const ethMismatches = await this.verifyEthereum(ethOrders);
+        const { mismatches: ethMismatches, incompleteEvents: ethIncomplete } =
+          await this.verifyEthereum(ethOrders);
         mismatches.push(...ethMismatches);
+        incompleteEvents += ethIncomplete;
       }
 
       if (this.cfg.soroban.htlcContract && stellarOrders.length > 0) {
-        const stellarMismatches = await this.verifySoroban(stellarOrders);
+        const { mismatches: stellarMismatches, incompleteEvents: stellarIncomplete } =
+          await this.verifySoroban(stellarOrders);
         mismatches.push(...stellarMismatches);
+        incompleteEvents += stellarIncomplete;
       }
 
       // ── 4. Record metrics ─────────────────────────────────────────────────
@@ -237,10 +250,11 @@ export class CacheVerifier {
         sampleSize: sampledCount,
         mismatches,
         aligned: mismatches.length === 0,
+        incompleteEvents,
       };
 
       this.log.info(
-        { sampledCount, mismatchCount: mismatches.length },
+        { sampledCount, mismatchCount: mismatches.length, incompleteEvents },
         mismatches.length === 0
           ? "cache verification complete — cache is aligned"
           : "cache verification complete — mismatches detected"
@@ -256,6 +270,7 @@ export class CacheVerifier {
         sampleSize: sampledCount,
         mismatches,
         aligned: false,
+        incompleteEvents,
       };
     }
 
@@ -288,16 +303,19 @@ export class CacheVerifier {
 
   // ── Ethereum verification ──────────────────────────────────────────────────
 
-  private async verifyEthereum(orders: OrderRow[]): Promise<CacheMismatch[]> {
+  private async verifyEthereum(
+    orders: OrderRow[]
+  ): Promise<{ mismatches: CacheMismatch[]; incompleteEvents: number }> {
     const address = this.cfg.ethereum.htlcEscrow!;
     const mismatches: CacheMismatch[] = [];
+    let incompleteEvents = 0;
 
     let latest: bigint;
     try {
       latest = await this.ethClient.getBlockNumber();
     } catch (err) {
       this.log.warn({ err }, "cache-verifier: cannot fetch Ethereum block number — skipping ETH check");
-      return mismatches;
+      return { mismatches, incompleteEvents };
     }
 
     const fromBlock = latest > ETH_VERIFY_LOOKBACK ? latest - ETH_VERIFY_LOOKBACK : 0n;
@@ -320,13 +338,21 @@ export class CacheVerifier {
       ]);
     } catch (err) {
       this.log.warn({ err }, "cache-verifier: Ethereum getLogs failed — skipping ETH check");
-      return mismatches;
+      return { mismatches, incompleteEvents };
     }
 
     // ── Check: on-chain Created events vs DB status ────────────────────────
     for (const log of createdLogs) {
       const args = (log as any).args as { hashlock?: `0x${string}` };
-      if (!args?.hashlock) continue;
+      if (!args?.hashlock) {
+        // #577: missing required field — skip and record structured error
+        incompleteEvents++;
+        this.log.warn(
+          { event: "OrderCreated", chain: "ethereum", reason: "missing_hashlock" },
+          "cache-verifier:incomplete_event OrderCreated missing hashlock — skipping"
+        );
+        continue;
+      }
       const order = byHashlock.get(args.hashlock.toLowerCase());
       if (!order) continue; // not in our sample
 
@@ -376,7 +402,15 @@ export class CacheVerifier {
     // ── Check: on-chain Claimed but DB has no preimage ─────────────────────
     for (const log of claimedLogs) {
       const args = (log as any).args as { orderId?: bigint };
-      if (!args?.orderId) continue;
+      if (!args?.orderId) {
+        // #577: missing required field — skip and record structured error
+        incompleteEvents++;
+        this.log.warn(
+          { event: "OrderClaimed", chain: "ethereum", reason: "missing_orderId" },
+          "cache-verifier:incomplete_event OrderClaimed missing orderId — skipping"
+        );
+        continue;
+      }
       const order = orders.find((o) => o.srcOrderId === args.orderId?.toString());
       if (!order) continue;
 
@@ -397,7 +431,15 @@ export class CacheVerifier {
     // ── Check: on-chain Refunded but DB not refunded ───────────────────────
     for (const log of refundedLogs) {
       const args = (log as any).args as { orderId?: bigint };
-      if (!args?.orderId) continue;
+      if (!args?.orderId) {
+        // #577: missing required field — skip and record structured error
+        incompleteEvents++;
+        this.log.warn(
+          { event: "OrderRefunded", chain: "ethereum", reason: "missing_orderId" },
+          "cache-verifier:incomplete_event OrderRefunded missing orderId — skipping"
+        );
+        continue;
+      }
       const order = orders.find((o) => o.srcOrderId === args.orderId?.toString());
       if (!order) continue;
 
@@ -416,16 +458,22 @@ export class CacheVerifier {
     }
 
     // Filter to only hashlocks in our sample
-    return mismatches.filter((m) =>
-      hashlocks.some((hl) => hl.toLowerCase() === m.hashlock.toLowerCase())
-    );
+    return {
+      mismatches: mismatches.filter((m) =>
+        hashlocks.some((hl) => hl.toLowerCase() === m.hashlock.toLowerCase())
+      ),
+      incompleteEvents,
+    };
   }
 
   // ── Soroban verification ───────────────────────────────────────────────────
 
-  private async verifySoroban(orders: OrderRow[]): Promise<CacheMismatch[]> {
+  private async verifySoroban(
+    orders: OrderRow[]
+  ): Promise<{ mismatches: CacheMismatch[]; incompleteEvents: number }> {
     const contractId = this.cfg.soroban.htlcContract!;
     const mismatches: CacheMismatch[] = [];
+    let incompleteEvents = 0;
 
     const byOrderId = new Map<string, OrderRow>(
       orders
@@ -441,7 +489,7 @@ export class CacheVerifier {
       latest = await this.sorobanServer.getLatestLedger();
     } catch (err) {
       this.log.warn({ err }, "cache-verifier: cannot fetch Soroban latest ledger — skipping Soroban check");
-      return mismatches;
+      return { mismatches, incompleteEvents };
     }
 
     const startLedger = Math.max(0, latest.sequence - SOROBAN_VERIFY_LOOKBACK);
@@ -462,7 +510,7 @@ export class CacheVerifier {
       } while (cursor);
     } catch (err) {
       this.log.warn({ err }, "cache-verifier: Soroban getEvents failed — skipping Soroban check");
-      return mismatches;
+      return { mismatches, incompleteEvents };
     }
 
     for (const ev of events) {
@@ -481,6 +529,12 @@ export class CacheVerifier {
       if (eventKind === "created") {
         const hashlockRaw = topics[3];
         if (!hashlockRaw || !(hashlockRaw instanceof Uint8Array || Buffer.isBuffer(hashlockRaw))) {
+          // #577: missing required hashlock field — skip and record structured error
+          incompleteEvents++;
+          this.log.warn(
+            { event: "created", chain: "stellar", ledger: ev.ledger, reason: "missing_hashlock" },
+            "cache-verifier:incomplete_event Soroban created missing hashlock — skipping"
+          );
           continue;
         }
         const hashlock = "0x" + Buffer.from(hashlockRaw as Uint8Array).toString("hex");
@@ -511,7 +565,15 @@ export class CacheVerifier {
         } catch { continue; }
 
         const orderId = typeof dataArr[0] === "bigint" ? dataArr[0].toString() : null;
-        if (!orderId) continue;
+        if (!orderId) {
+          // #577: missing required orderId field — skip and record structured error
+          incompleteEvents++;
+          this.log.warn(
+            { event: "claimed", chain: "stellar", ledger: ev.ledger, reason: "missing_orderId" },
+            "cache-verifier:incomplete_event Soroban claimed missing orderId — skipping"
+          );
+          continue;
+        }
         const order = byOrderId.get(orderId);
         if (!order) continue;
 
@@ -539,7 +601,15 @@ export class CacheVerifier {
         } catch { continue; }
 
         const orderId = typeof dataArr[0] === "bigint" ? dataArr[0].toString() : null;
-        if (!orderId) continue;
+        if (!orderId) {
+          // #577: missing required orderId field — skip and record structured error
+          incompleteEvents++;
+          this.log.warn(
+            { event: "refunded", chain: "stellar", ledger: ev.ledger, reason: "missing_orderId" },
+            "cache-verifier:incomplete_event Soroban refunded missing orderId — skipping"
+          );
+          continue;
+        }
         const order = byOrderId.get(orderId);
         if (!order) continue;
 
@@ -558,6 +628,6 @@ export class CacheVerifier {
       }
     }
 
-    return mismatches;
+    return { mismatches, incompleteEvents };
   }
 }

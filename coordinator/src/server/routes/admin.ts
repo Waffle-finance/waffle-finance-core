@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Logger } from "pino";
 import type { StaleCleanupResult } from "../../services/stale-cleanup.js";
 import type { ReconciliationStatus } from "../../reconciliation/reconciler.js";
+import type { OrderService } from "../../services/order-service.js";
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import { loadTrustedProxies } from "../middleware/ratelimit.js";
 
@@ -29,6 +30,8 @@ export interface AdminRouteDeps {
    * Omitting this disables the endpoint (the route is not mounted).
    */
   runExpiry?: () => Promise<ExpiryResult>;
+  /** Return chain-level and per-order reconciler cursor state for observability. */
+  getReconciliationCursors?: () => ReturnType<OrderService["getReconciliationCursorState"]>;
 }
 
 /**
@@ -41,6 +44,7 @@ export interface AdminRouteDeps {
  *   POST /admin/reconcile      — trigger an immediate reconciliation run
  *   POST /admin/stale-cleanup  — trigger an immediate stale-order cleanup run
  *   POST /admin/expire-now     — trigger an immediate order-expiry scan
+ *   GET  /admin/reconciliation-cursors — inspect chain + per-order ledger cursors
  *
  * These endpoints are intentionally POST so they cannot be triggered by bots
  * or browser prefetching. They are not idempotent in the HTTP sense: each call
@@ -136,6 +140,35 @@ export function adminRoutes(deps: AdminRouteDeps): Router {
         res.json({ ok: true, expiredCount: result.expiredCount });
       } catch (err) {
         deps.log.error({ err }, "[admin] manual order-expiry scan failed");
+        next(err);
+      }
+    });
+  }
+
+  /**
+   * GET /admin/reconciliation-cursors
+   *
+   * Returns the current chain-level reconciler cursors and per-order ledger
+   * high-water marks for operator observability and cursor audit.
+   *
+   * Response 200:
+   *   {
+   *     ok: true,
+   *     chainCursors: [{ chain, position, updatedAt }],
+   *     orderCursors: [{ publicId, status, lastEthBlock, lastSorobanLedger, lastSolanaSlot, updatedAt }]
+   *   }
+   *
+   * Response 501:
+   *   { ok: false, error: "not_configured" }
+   */
+  if (deps.getReconciliationCursors) {
+    const getReconciliationCursors = deps.getReconciliationCursors;
+    router.get("/admin/reconciliation-cursors", auth, async (_req, res, next) => {
+      try {
+        const state = await getReconciliationCursors();
+        res.json({ ok: true, ...state });
+      } catch (err) {
+        deps.log.error({ err }, "[admin] reconciliation cursor query failed");
         next(err);
       }
     });

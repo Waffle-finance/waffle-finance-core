@@ -529,8 +529,48 @@ export class EthereumListener {
     publicId: string,
     chainHead: number
   ): Promise<void> {
-    const blockNumber = Number(log.blockNumber as bigint);
-    const txHash = log.transactionHash as string;
+    // ── Required-field validation ─────────────────────────────────────────
+    // A malformed provider result can produce logs where blockNumber,
+    // transactionHash, args.orderId, or args.timelock are undefined/null.
+    // Dispatching such a log would write undefined IDs or hashlocks into
+    // the persistence layer, poisoning reconciliation.  Reject atomically
+    // before touching any state.
+    const rawBlockNumber = log.blockNumber as bigint | null | undefined;
+    const txHash = log.transactionHash as string | null | undefined;
+    const rawOrderId = log.args?.orderId as bigint | null | undefined;
+    const rawTimelock = log.args?.timelock as bigint | null | undefined;
+
+    if (
+      rawBlockNumber == null ||
+      !txHash ||
+      rawOrderId == null ||
+      rawTimelock == null
+    ) {
+      this.log.warn(
+        {
+          publicId,
+          hasBlockNumber: rawBlockNumber != null,
+          hasTxHash: Boolean(txHash),
+          hasOrderId: rawOrderId != null,
+          hasTimelock: rawTimelock != null,
+        },
+        "OrderCreated log missing required fields — rejecting without dispatch"
+      );
+      return;
+    }
+
+    // ── Safe-integer guard for block number ───────────────────────────────
+    // bigint values above Number.MAX_SAFE_INTEGER lose precision when cast to
+    // number, which can cause cursor duplication or skipped blocks.  Reject
+    // rather than silently corrupt the stored position.
+    if (rawBlockNumber > BigInt(Number.MAX_SAFE_INTEGER)) {
+      this.log.warn(
+        { publicId, txHash, blockNumber: rawBlockNumber.toString() },
+        "OrderCreated log blockNumber exceeds Number.MAX_SAFE_INTEGER — rejecting to avoid precision loss"
+      );
+      return;
+    }
+    const blockNumber = Number(rawBlockNumber);
 
     // ── In-process deduplication ──────────────────────────────────────────
     // If we have already processed this transaction in the current process
@@ -561,10 +601,10 @@ export class EthereumListener {
     try {
       await this.orders.recordSrcLock({
         publicId,
-        orderId: (log.args.orderId as bigint).toString(),
+        orderId: rawOrderId.toString(),
         txHash,
         blockNumber,
-        timelock: Number(log.args.timelock as bigint)
+        timelock: Number(rawTimelock)
       });
       this.markProcessed("OrderCreated", txHash);
       this.log.info({ publicId, blockNumber }, "confirmed OrderCreated processed");
