@@ -736,3 +736,203 @@ export const secretRecoveryOutcomeTotal = new Counter({
   labelNames: ['outcome'] as const,
   registers: [registry],
 });
+
+// ── Phase distribution & chain progression metrics ────────────────────────────
+//
+// These metrics give operators a real-time picture of WHERE orders are in the
+// settlement pipeline and HOW LONG they have been there. Together they surface
+// two classes of anomaly:
+//
+//   1. BACKLOG — a state accumulates far more orders than normal, indicating
+//      a downstream leg is stalled (e.g. resolver not locking destination).
+//
+//   2. DWELL-TIME SPIKE — the p90/p95 time spent in a phase rises above its
+//      historical norm, indicating a chain/RPC slowdown before the anomaly
+//      becomes a stuck-order incident.
+//
+// The `direction` label is carried on all metrics so operators can isolate
+// which bridge leg is affected (e.g. eth_to_xlm vs xlm_to_eth).
+
+/**
+ * Proportion of active (non-terminal) orders currently in each phase.
+ *
+ * Expressed as a ratio (0–1) rather than a raw count so dashboards can
+ * render a normalised phase-distribution bar chart that is meaningful
+ * regardless of total order volume.
+ *
+ * Updated synchronously on every successful state transition in OrderService
+ * alongside `coordinator_order_current_state`.
+ */
+export const orderPhaseRatio = new Gauge({
+  name: 'coordinator_order_phase_ratio',
+  help: 'Fraction of active (non-terminal) orders currently in each phase, by direction (0–1)',
+  labelNames: ['direction', 'phase'] as const,
+  registers: [registry],
+});
+
+/**
+ * Time spent waiting in each non-terminal phase before the NEXT transition.
+ *
+ * Complements `coordinator_order_state_duration_seconds` (which records
+ * wall-clock seconds in the previous state on exit) with a tighter set of
+ * buckets calibrated to each phase's expected SLA:
+ *
+ *   announced       → should progress in < 60 s once user locks on-chain
+ *   src_locked      → resolver should lock destination within 60–300 s
+ *   dst_locked      → secret should appear within 60–300 s
+ *   secret_revealed → completion/refund typically confirmed within 120 s
+ *   expired         → refund window is typically 1–24 h
+ *
+ * A high p90 in any bucket is an early-warning signal worth alerting on.
+ */
+export const orderPhaseDwellSeconds = new Histogram({
+  name: 'coordinator_order_phase_dwell_seconds',
+  help: 'Seconds an order spent in each non-terminal phase before the next transition, by direction and phase',
+  labelNames: ['direction', 'phase'] as const,
+  // Buckets cover 5 s → 2 h, with fine resolution in the 30 s–15 min window
+  // where most healthy swaps complete, and coarse resolution beyond that.
+  buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
+  registers: [registry],
+});
+
+/**
+ * Per-phase-transition wall-clock latency.
+ *
+ * Records the time between consecutive phase milestones:
+ *   announced       → src_locked   (user on-chain lock latency)
+ *   src_locked      → dst_locked   (resolver response latency)
+ *   dst_locked      → secret_revealed (settlement latency)
+ *   secret_revealed → completed    (finality latency)
+ *
+ * Label `transition` uses the form `<from>_to_<to>` for readability in
+ * Grafana legend entries.
+ */
+export const orderPhaseTransitionSeconds = new Histogram({
+  name: 'coordinator_order_phase_transition_seconds',
+  help: 'Wall-clock seconds between consecutive phase milestones (e.g. src_locked→dst_locked), by direction',
+  labelNames: ['direction', 'transition'] as const,
+  buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
+  registers: [registry],
+});
+
+/**
+ * Count of orders that have been in a non-terminal phase longer than the
+ * configured warning threshold.
+ *
+ * Sampled periodically by the maintenance scheduler (see
+ * `coordinator/src/services/phase-backlog-scanner.ts`). A rising value in
+ * any phase means orders are stalling — correlated with listener lag it
+ * distinguishes a chain outage from a resolver failure.
+ *
+ * `threshold` label: `warn` (soft) or `critical` (hard) — so a single
+ * alert rule can use severity = threshold.
+ */
+export const orderPhaseBacklogCount = new Gauge({
+  name: 'coordinator_order_phase_backlog_count',
+  help: 'Number of orders in a non-terminal phase longer than the warn/critical dwell threshold',
+  labelNames: ['direction', 'phase', 'threshold'] as const,
+  registers: [registry],
+});
+
+/**
+ * Age in seconds of the OLDEST order currently stuck in each non-terminal phase.
+ *
+ * A single outlier order can be invisible in average/histogram metrics —
+ * this gauge surfaces it directly. An alert on `max_stuck_age_seconds >
+ * phase_critical_threshold` is the simplest possible stuck-order detector.
+ */
+export const orderPhaseMaxStuckAgeSeconds = new Gauge({
+  name: 'coordinator_order_phase_max_stuck_age_seconds',
+  help: 'Age in seconds of the oldest order currently in each non-terminal phase',
+  labelNames: ['direction', 'phase'] as const,
+  registers: [registry],
+});
+
+/**
+ * End-to-end swap completion time from announcement to terminal state.
+ *
+ * Observed once when an order reaches `completed` or `refunded`. The
+ * `outcome` label distinguishes successful settlements from refunds so
+ * a rising refund-path p90 can be alerted separately from settled swaps.
+ *
+ * NOTE: This wires the `coordinator_swap_duration_seconds` histogram
+ * (declared above near line 238) via the `recordSwapCompletion` helper.
+ * Do not declare a second histogram here — use that one.
+ */
+
+/**
+ * Helper called by OrderService.markStatus when an order reaches a
+ * terminal state. Records swap duration and clears the phase gauges.
+ *
+ * @param direction  order direction label (eth_to_xlm, etc.)
+ * @param outcome    'completed' | 'refunded' | 'failed'
+ * @param createdAtSeconds  order.createdAt (unix seconds)
+ */
+export function recordSwapCompletion(
+  direction: string,
+  outcome: 'completed' | 'refunded' | 'failed',
+  createdAtSeconds: number,
+): void {
+  const durationSeconds = Math.max(Date.now() / 1000 - createdAtSeconds, 0);
+  swapDuration.observe({ direction, outcome }, durationSeconds);
+}
+
+/**
+ * Helper called on every non-terminal phase exit to record fine-grained
+ * per-phase dwell time and per-transition latency metrics.
+ *
+ * @param direction        order direction label
+ * @param fromPhase        the phase the order is leaving
+ * @param toPhase          the phase the order is entering
+ * @param enteredAtSeconds unix seconds when the order entered `fromPhase`
+ *                         (use order.updatedAt as the best available proxy)
+ */
+export function recordPhaseDwell(
+  direction: string,
+  fromPhase: string,
+  toPhase: string,
+  enteredAtSeconds: number,
+): void {
+  const dwell = Math.max(Date.now() / 1000 - enteredAtSeconds, 0);
+
+  // Phase dwell histogram (one observation per phase exit)
+  orderPhaseDwellSeconds.observe({ direction, phase: fromPhase }, dwell);
+
+  // Named transition latency (e.g. 'announced_to_src_locked')
+  const TERMINAL = new Set(['completed', 'refunded', 'failed', 'expired']);
+  if (!TERMINAL.has(toPhase)) {
+    const transition = `${fromPhase}_to_${toPhase}`;
+    orderPhaseTransitionSeconds.observe({ direction, transition }, dwell);
+  }
+}
+
+/**
+ * Recalculate and publish phase ratio gauges.
+ *
+ * Called after any state transition so the distribution is always up-to-date.
+ * `stateCounts` should be a snapshot of `coordinator_order_current_state`
+ * keyed by phase name.
+ *
+ * This helper is intentionally kept pure (no DB access) so it can be called
+ * cheaply on the hot path.
+ */
+export function refreshPhaseRatios(
+  direction: string,
+  stateCounts: Record<string, number>,
+): void {
+  const NON_TERMINAL = ['announced', 'src_locked', 'dst_locked', 'secret_revealed', 'expired'];
+  const total = NON_TERMINAL.reduce((sum, p) => sum + (stateCounts[p] ?? 0), 0);
+  for (const phase of NON_TERMINAL) {
+    const count = stateCounts[phase] ?? 0;
+    orderPhaseRatio.set({ direction, phase }, total > 0 ? count / total : 0);
+  }
+}
+
+/** Phase-distribution metrics bundle — for test assertions. */
+export const phaseDistributionMetrics = {
+  phaseRatio: orderPhaseRatio,
+  phaseDwell: orderPhaseDwellSeconds,
+  phaseTransition: orderPhaseTransitionSeconds,
+  phaseBacklog: orderPhaseBacklogCount,
+  phaseMaxStuckAge: orderPhaseMaxStuckAgeSeconds,
+} as const;
