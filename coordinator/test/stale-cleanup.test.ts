@@ -61,7 +61,8 @@ describe("StaleCleanupService", () => {
 
     const updated = await repo.findByPublicId(order.publicId);
     expect(updated!.archivedAt).not.toBeNull();
-    expect(updated!.status).toBe("announced"); // status unchanged
+    expect(updated!.status).toBe("abandoned");
+    expect(updated!.cancellationReason).toBe("stale:no_src_lock");
   });
 
   it("does not archive orders younger than the retention window", async () => {
