@@ -849,47 +849,6 @@ export const reconciliationGapExceedances = new Counter({
 });
 
 /**
- * Count of orders that have been in a non-terminal phase longer than the
- * configured warning threshold.
- *
- * Sampled periodically by the maintenance scheduler (see
- * `coordinator/src/services/phase-backlog-scanner.ts`). A rising value in
- * any phase means orders are stalling — correlated with listener lag it
- * distinguishes a chain outage from a resolver failure.
- *
- * `threshold` label: `warn` (soft) or `critical` (hard) — so a single
- * alert rule can use severity = threshold.
- */
-export const orderPhaseBacklogCount = new Gauge({
-  name: 'coordinator_order_phase_backlog_count',
-  help: 'Number of orders in a non-terminal phase longer than the warn/critical dwell threshold',
-  labelNames: ['direction', 'phase', 'threshold'] as const,
- * Conflicts classified during event replay, by type.
- *
- * conflict_type label values:
- *   - already_applied      — event targets a status the order already has (benign)
- *   - status_ahead         — order is past the event's target status (benign)
- *   - state_contradiction  — event contradicts persisted state (investigate)
- *   - unknown_order        — event references an order not in the DB (gap signal)
- */
-export const reconciliationConflicts = new Counter({
-  name: "coordinator_reconciliation_conflicts_total",
-  help: "Total event-vs-state conflicts classified during reconciler replay, by type",
-  labelNames: ["conflict_type"] as const,
-  registers: [registry],
-});
-
-/**
- * Age in seconds of the OLDEST order currently stuck in each non-terminal phase.
- *
- * A single outlier order can be invisible in average/histogram metrics —
- * this gauge surfaces it directly. An alert on `max_stuck_age_seconds >
- * phase_critical_threshold` is the simplest possible stuck-order detector.
- */
-export const orderPhaseMaxStuckAgeSeconds = new Gauge({
-  name: 'coordinator_order_phase_max_stuck_age_seconds',
-  help: 'Age in seconds of the oldest order currently in each non-terminal phase',
-  labelNames: ['direction', 'phase'] as const,
  * Cumulative count of forced historical re-sync decisions: gaps that exceeded
  * 3× the lookback window, requiring operator action to ensure no events were
  * permanently missed.

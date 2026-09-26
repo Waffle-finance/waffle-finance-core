@@ -106,6 +106,46 @@ const SOLANA_MAPPINGS: Record<AssetMappingNetwork, {
   mainnet: { ethToSolana: MAINNET_ETH_TO_SOLANA, solanaToEth: MAINNET_SOLANA_TO_ETH },
 };
 
+// ── Stellar ↔ Solana mappings ─────────────────────────────────────────────────
+
+const TESTNET_STELLAR_TO_SOLANA: Record<string, CanonicalSolanaAsset> = {
+  XLM: NATIVE_SOL_ASSET,
+  "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5": {
+    mint: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    symbol: "USDC",
+  },
+};
+
+const TESTNET_SOLANA_TO_STELLAR: Record<string, CanonicalStellarAsset> = {
+  [NATIVE_SOL_MINT]: NATIVE_STELLAR_ASSET,
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU": {
+    code: "USDC",
+    issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  },
+};
+
+const MAINNET_STELLAR_TO_SOLANA: Record<string, CanonicalSolanaAsset> = {
+  XLM: NATIVE_SOL_ASSET,
+};
+
+const MAINNET_SOLANA_TO_STELLAR: Record<string, CanonicalStellarAsset> = {
+  [NATIVE_SOL_MINT]: NATIVE_STELLAR_ASSET,
+};
+
+const STELLAR_SOLANA_MAPPINGS: Record<AssetMappingNetwork, {
+  stellarToSolana: Record<string, CanonicalSolanaAsset>;
+  solanaToStellar: Record<string, CanonicalStellarAsset>;
+}> = {
+  testnet: {
+    stellarToSolana: TESTNET_STELLAR_TO_SOLANA,
+    solanaToStellar: TESTNET_SOLANA_TO_STELLAR,
+  },
+  mainnet: {
+    stellarToSolana: MAINNET_STELLAR_TO_SOLANA,
+    solanaToStellar: MAINNET_SOLANA_TO_STELLAR,
+  },
+};
+
 // ── Normalization helpers ─────────────────────────────────────────────────
 
 /**
@@ -329,4 +369,126 @@ export function resolveEthereumTokenFromSolana(
   network: AssetMappingNetwork = "testnet",
 ): string {
   return SOLANA_MAPPINGS[network].solanaToEth[normalizeSolanaMint(mint)] ?? NATIVE_ETH_ADDRESS;
+}
+
+// ── Stellar ↔ Solana support guards and resolvers ─────────────────────────────
+
+/**
+ * Return `true` if `stellarAsset` has a known stellar→solana mapping on
+ * `network`.  Accepts both object and string-key forms.
+ */
+export function isSupportedStellarToSolana(
+  stellarAsset: string | CanonicalStellarAsset,
+  network: AssetMappingNetwork = "testnet",
+): boolean {
+  const key = normalizeStellarAssetKey(stellarAsset);
+  return key in STELLAR_SOLANA_MAPPINGS[network].stellarToSolana;
+}
+
+/**
+ * Return `true` if `mint` has a known solana→stellar mapping on `network`.
+ * Leading/trailing whitespace is stripped before lookup.
+ */
+export function isSupportedSolanaToStellar(
+  mint: string,
+  network: AssetMappingNetwork = "testnet",
+): boolean {
+  return normalizeSolanaMint(mint) in STELLAR_SOLANA_MAPPINGS[network].solanaToStellar;
+}
+
+/**
+ * Assert that `stellarAsset` maps to a known Solana mint on `network`.
+ * Throws {@link UnsupportedAssetError} if not.
+ */
+export function assertSupportedStellarToSolana(
+  stellarAsset: string | CanonicalStellarAsset,
+  network: AssetMappingNetwork = "testnet",
+): void {
+  if (!isSupportedStellarToSolana(stellarAsset, network)) {
+    throw new UnsupportedAssetError(
+      normalizeStellarAssetKey(stellarAsset),
+      network,
+      "stellar→solana",
+    );
+  }
+}
+
+/**
+ * Assert that `mint` maps to a known Stellar asset on `network`.
+ * Throws {@link UnsupportedAssetError} if not.
+ */
+export function assertSupportedSolanaToStellar(
+  mint: string,
+  network: AssetMappingNetwork = "testnet",
+): void {
+  if (!isSupportedSolanaToStellar(mint, network)) {
+    throw new UnsupportedAssetError(normalizeSolanaMint(mint), network, "solana→stellar");
+  }
+}
+
+/**
+ * Resolve a Stellar asset to its canonical Solana mint on `network`.
+ * Falls back to the native SOL asset when no mapping exists.
+ */
+export function resolveSolanaAssetFromStellar(
+  stellarAsset: string | CanonicalStellarAsset,
+  network: AssetMappingNetwork = "testnet",
+): CanonicalSolanaAsset {
+  const key = normalizeStellarAssetKey(stellarAsset);
+  return STELLAR_SOLANA_MAPPINGS[network].stellarToSolana[key] ?? NATIVE_SOL_ASSET;
+}
+
+/**
+ * Resolve a Solana mint to its canonical Stellar asset on `network`.
+ * Falls back to the native XLM asset when no mapping exists.
+ */
+export function resolveStellarAssetFromSolana(
+  mint: string,
+  network: AssetMappingNetwork = "testnet",
+): CanonicalStellarAsset {
+  return STELLAR_SOLANA_MAPPINGS[network].solanaToStellar[normalizeSolanaMint(mint)] ?? NATIVE_STELLAR_ASSET;
+}
+
+/**
+ * Return all Stellar asset keys that have a stellar→solana mapping on `network`.
+ */
+export function getSupportedStellarToSolana(
+  network: AssetMappingNetwork = "testnet",
+): string[] {
+  return Object.keys(STELLAR_SOLANA_MAPPINGS[network].stellarToSolana);
+}
+
+/**
+ * Return all Solana mint addresses that have a solana→stellar mapping on `network`.
+ */
+export function getSupportedSolanaToStellar(
+  network: AssetMappingNetwork = "testnet",
+): string[] {
+  return Object.keys(STELLAR_SOLANA_MAPPINGS[network].solanaToStellar);
+}
+
+// ── Canonical asset identity ──────────────────────────────────────────────────
+
+/**
+ * Produce the canonical cross-service asset identifier for a given chain and
+ * token.  The format matches the frontend's `NormalizedAsset.canonicalId` so
+ * all services emit the same string for the same asset.
+ *
+ * Format:
+ *  - Native assets:   `<chain>:native:<SYMBOL>`     e.g. `ethereum:native:ETH`
+ *  - Contract assets: `<chain>:contract:<SYMBOL>:<address_lowercase>`
+ *
+ * @param chain   The chain the asset lives on.
+ * @param symbol  Token symbol (will be upper-cased).
+ * @param address Contract address (EVM) or mint address (Solana).
+ *                Pass `undefined` or omit for native assets.
+ */
+export function toCanonicalId(
+  chain: "ethereum" | "stellar" | "solana",
+  symbol: string,
+  address?: string,
+): string {
+  const sym = symbol.toUpperCase();
+  if (!address) return `${chain}:native:${sym}`;
+  return `${chain}:contract:${sym}:${address.toLowerCase()}`;
 }

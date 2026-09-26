@@ -30,6 +30,8 @@ import type { CoordinatorConfig } from './config.js';
 import { AuditRepository } from './audit/audit-repo.js';
 import { buildSystemAuditEntry } from './audit/audit-log.js';
 import { PressureController } from './services/pressure-controller.js';
+import { SseBroker } from './sse/sse-broker.js';
+import { createRedisAdapter } from './sse/redis-adapter.js';
 
 // ── Startup dependency probes ────────────────────────────────────────────────
 
@@ -529,6 +531,8 @@ async function main(): Promise<void> {
     maintenance.stop();
 
     clearInterval(reconcileInterval);
+    clearInterval(expiryInterval);
+    clearInterval(staleCleanupInterval);
     clearInterval(cacheVerifyInterval);
     ethListener.stop();
     sorobanListener.stop();

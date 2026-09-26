@@ -27,7 +27,9 @@ export type OrderStatus =
   | "completed"
   | "refunded"
   | "failed"
-  | "expired";
+  | "expired"
+  | "cancelled"
+  | "abandoned";
 
 export type Chain = "ethereum" | "stellar" | "solana";
 export type Direction = "eth_to_xlm" | "xlm_to_eth" | "eth_to_sol" | "sol_to_eth";
@@ -97,6 +99,8 @@ export interface OrderRow {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  /** Machine-readable reason for cancellation or abandonment, e.g. "stale:no_src_lock". */
+  cancellationReason: string | null;
 }
 
 export interface OrderHistoryResult {
@@ -156,6 +160,7 @@ interface OrderDbRow {
   created_at: number;
   updated_at: number;
   archived_at: number | null;
+  cancellation_reason: string | null;
 }
 
 function rowToOrder(r: OrderDbRow): OrderRow {
@@ -192,6 +197,7 @@ function rowToOrder(r: OrderDbRow): OrderRow {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     archivedAt: r.archived_at ?? null,
+    cancellationReason: r.cancellation_reason ?? null,
   };
 }
 
@@ -923,13 +929,125 @@ export class OrdersRepository {
         SELECT MIN(${col}) AS min_cursor
         FROM orders
         WHERE (src_chain = ? OR dst_chain = ?)
-          AND status NOT IN ('completed', 'refunded', 'failed', 'expired')
+          AND status NOT IN ('completed', 'refunded', 'failed', 'expired', 'cancelled', 'abandoned')
           AND ${col} IS NOT NULL AND ${col} > 0
       `),
       chain,
       chain
     );
     return row?.min_cursor ?? null;
+  }
+
+  /**
+   * Explicitly cancel an announced order that has not yet been locked on-chain.
+   *
+   * Only orders in `announced` state can be cancelled — the transition is
+   * allowed by the state machine.  Orders that have progressed past
+   * `announced` (i.e. already have a source lock) cannot be cancelled through
+   * this path.
+   *
+   * The `reason` field is stored as `cancellationReason` for user-facing APIs.
+   */
+  async cancelOrder(publicId: string, reason: string, actor = "system"): Promise<void> {
+    await this.transactionManager.runWithRetry("cancel-order", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) {
+        const err = new Error(`Order not found: ${publicId}`);
+        (err as any).code = "NOT_FOUND";
+        throw err;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (isTerminal(order.status)) {
+        await this.appendTransitionEvent(order.id, "cancel.no_op", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:terminal",
+          reason,
+          triggeredAt: now,
+        });
+        return;
+      }
+      if (!canTransition(order.status, "cancelled")) {
+        const err = new Error(
+          `Cannot cancel order ${publicId} in status "${order.status}": transition to "cancelled" is not allowed`
+        );
+        (err as any).code = "INVALID_TRANSITION";
+        throw err;
+      }
+      await this.run(
+        this.db.prepare(`
+          UPDATE orders
+          SET status = 'cancelled',
+              cancellation_reason = :reason,
+              updated_at = CAST(strftime('%s','now') AS INTEGER)
+          WHERE public_id = :publicId
+        `),
+        { publicId, reason }
+      );
+      await this.appendTransitionEvent(order.id, "cancel.transitioned", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "cancelled",
+        outcome: "transitioned",
+        reason,
+        triggeredAt: now,
+      });
+    });
+  }
+
+  /**
+   * Mark an order as abandoned and soft-delete it.
+   *
+   * Used by the stale-cleanup service for announced orders that received no
+   * source-chain lock within the retention window.  The order is transitioned
+   * to `abandoned` (terminal) and `archived_at` is stamped so maintenance
+   * queries skip it.  If a late lock event later surfaces, `unarchiveOrder`
+   * can recover the row.
+   *
+   * Unlike `cancelOrder`, this is a silent no-op when the order is already
+   * terminal or not in a state that allows the transition — callers do not
+   * need to guard against that case.
+   */
+  async abandonOrder(publicId: string, reason: string, actor = "system"): Promise<void> {
+    await this.transactionManager.runWithRetry("abandon-order", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) return;
+      const now = Math.floor(Date.now() / 1000);
+      if (isTerminal(order.status)) {
+        await this.appendTransitionEvent(order.id, "abandon.no_op", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:terminal",
+          reason,
+          triggeredAt: now,
+        });
+        return;
+      }
+      if (!canTransition(order.status, "abandoned")) {
+        return;
+      }
+      await this.run(
+        this.db.prepare(`
+          UPDATE orders
+          SET status = 'abandoned',
+              cancellation_reason = :reason,
+              archived_at = CAST(strftime('%s','now') AS INTEGER),
+              updated_at = CAST(strftime('%s','now') AS INTEGER)
+          WHERE public_id = :publicId
+        `),
+        { publicId, reason }
+      );
+      await this.appendTransitionEvent(order.id, "abandon.transitioned", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "abandoned",
+        outcome: "transitioned",
+        reason,
+        triggeredAt: now,
+      });
+    });
   }
 
   // ── Soroban listener checkpoints ──────────────────────────────────────────
@@ -1209,14 +1327,15 @@ export class OrdersRepository {
    * recently updated.  Used by `CacheVerifier` to select a representative
    * sample for on-chain spot-checking.
    *
-   * Terminal statuses (completed, refunded, failed) are excluded.  `expired`
-   * is intentionally included — an expired order can still be reconciled.
+   * Terminal statuses (completed, refunded, failed, cancelled, abandoned) are
+   * excluded.  `expired` is intentionally included — an expired order can
+   * still be reconciled.
    */
   async findNonTerminalSample(limit: number): Promise<OrderRow[]> {
     const rows = await this.all<OrderDbRow>(
       this.db.prepare(`
         SELECT * FROM orders
-        WHERE status NOT IN ('completed', 'refunded', 'failed')
+        WHERE status NOT IN ('completed', 'refunded', 'failed', 'cancelled', 'abandoned')
           AND archived_at IS NULL
         ORDER BY updated_at DESC
         LIMIT ?

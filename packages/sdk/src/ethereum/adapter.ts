@@ -75,14 +75,50 @@ function classifyViemError(err: unknown): HTLCError {
     });
   }
 
+  // ── ERC20 allowance too low ────────────────────────────────────────────────
+  // HTLCEscrow reverts with InsufficientAllowance(allowance, required) when the
+  // caller has not approved the escrow for at least `amount` of the ERC20 token.
+  // Match both the typed Solidity error name and viem's decoded string form.
+  if (lc.includes("insufficientallowance") || lc.includes("insufficient allowance")) {
+    return new HTLCError({
+      code: "insufficient_allowance",
+      message: "ERC20 allowance is too low — call token.approve(escrow, amount) first: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
+  // ── resolver not authorised ────────────────────────────────────────────────
+  // HTLCEscrow reverts with ResolverNotAuthorised when the caller is not listed
+  // as active in the attached ResolverRegistry.
+  if (lc.includes("resolvernotauthorised") || lc.includes("resolver not authorised") || lc.includes("resolver not authorized")) {
+    return new HTLCError({
+      code: "resolver_not_authorised",
+      message: "Caller is not an active resolver — register in the ResolverRegistry first: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
+  // ── safety deposit too small ───────────────────────────────────────────────
+  // HTLCEscrow reverts with SafetyDepositTooSmall when safetyDeposit < minSafetyDeposit.
+  if (lc.includes("safetydeposittoosmall") || lc.includes("safety deposit too small")) {
+    return new HTLCError({
+      code: "safety_deposit_too_small",
+      message: "Safety deposit is below the contract minimum — increase safetyDeposit: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
   // ── simulation / contract revert ───────────────────────────────────────────
   // "simulat" matches both "simulate" and "simulation failed".
   // This check is intentionally last among the specific codes so that more
-  // precise patterns above (invalid_preimage, timelock_not_expired) win when
-  // viem prefixes the message with "simulation: <specific reason>".
+  // precise patterns above (invalid_preimage, timelock_not_expired,
+  // insufficient_allowance, resolver_not_authorised, safety_deposit_too_small)
+  // win when viem prefixes the message with "simulation: <specific reason>".
   if (
     lc.includes("simulat") ||
-    lc.includes("insufficient allowance") ||
     lc.includes("insufficient balance") ||
     lc.includes("invalidtoken") ||
     lc.includes("invalidvalue") ||
