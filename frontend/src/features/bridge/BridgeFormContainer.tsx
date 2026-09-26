@@ -1495,11 +1495,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/55">Bridge console</p>
             </div>
             <div className="flex items-center gap-2">
-              <button type="button" className="rounded-full border border-cyan-200/15 bg-white/[0.055] p-2 text-slate-300 transition hover:border-cyan-200/35 hover:bg-cyan-200/10 hover:text-cyan-50" title="Refresh quote">
-                <RefreshCw className="h-4 w-4" />
+              <button type="button" aria-label="Refresh quote" className="rounded-full border border-cyan-200/15 bg-white/[0.055] p-2 text-slate-300 transition hover:border-cyan-200/35 hover:bg-cyan-200/10 hover:text-cyan-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-cyan-400" title="Refresh quote">
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
               </button>
-              <button type="button" className="rounded-full border border-cyan-200/15 bg-white/[0.055] p-2 text-slate-300 transition hover:border-cyan-200/35 hover:bg-cyan-200/10 hover:text-cyan-50" title="Bridge settings">
-                <Settings2 className="h-4 w-4" />
+              <button type="button" aria-label="Bridge settings" className="rounded-full border border-cyan-200/15 bg-white/[0.055] p-2 text-slate-300 transition hover:border-cyan-200/35 hover:bg-cyan-200/10 hover:text-cyan-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-cyan-400" title="Bridge settings">
+                <Settings2 className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -1548,7 +1548,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             })}
           </div>
           {validationErrors.route && (
-            <p className="mt-1.5 text-xs text-red-300">{validationErrors.route}</p>
+            <p role="alert" className="mt-1.5 text-xs text-red-300">{validationErrors.route}</p>
           )}
           {routeValidation.reason && (
             <p className="mt-1.5 text-xs text-red-300" role="alert">{routeValidation.reason}</p>
@@ -1668,7 +1668,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               </div>
               <div className="mt-1 text-xs text-slate-500">$0.00</div>
               {validationErrors.destination && (
-                <p className="mt-1 text-xs text-red-300">{validationErrors.destination}</p>
+                <p id="bridge-destination-error" role="alert" className="mt-1 text-xs text-red-300">{validationErrors.destination}</p>
               )}
             </div>
           </div>

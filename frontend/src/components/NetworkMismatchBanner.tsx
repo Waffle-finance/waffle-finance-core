@@ -100,9 +100,20 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
   };
 
   return (
-    <div className="w-full bg-amber-500/15 border-y border-amber-400/40 text-amber-100 px-6 py-3 flex flex-col md:flex-row items-start md:items-center gap-3 justify-between">
+    /*
+     * role="alert" causes most screen readers to announce this banner
+     * immediately when it mounts (interrupting polite queues). aria-live is
+     * kept as a belt-and-suspenders fallback for assistive tech that treats
+     * role="alert" as "assertive" implicitly.
+     */
+    <div
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      className="w-full bg-amber-500/15 border-y border-amber-400/40 text-amber-100 px-6 py-3 flex flex-col md:flex-row items-start md:items-center gap-3 justify-between"
+    >
       <div className="flex items-start gap-3 text-sm">
-        <span className="mt-0.5">⚠</span>
+        <span className="mt-0.5" aria-hidden="true">⚠</span>
         <div>
           <div className="font-semibold">
             Your wallet network does not match the app network.
