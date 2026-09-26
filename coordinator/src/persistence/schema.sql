@@ -59,12 +59,7 @@ CREATE TABLE IF NOT EXISTS orders (
 
     created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    archived_at           INTEGER,
-
-    -- Per-order high-water marks for reconciler (see TD-043).
-    last_eth_block        INTEGER,
-    last_soroban_ledger   INTEGER,
-    last_solana_slot      INTEGER
+    archived_at           INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_hashlock         ON orders (hashlock);

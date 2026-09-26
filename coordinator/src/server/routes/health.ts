@@ -11,9 +11,22 @@ export interface ReadinessCheck {
 
 export type ReadinessCheckProvider = () => ReadinessCheck[] | Promise<ReadinessCheck[]>;
 
+export interface SorobanStalenessInfo {
+  state: "connected" | "degraded" | "stale" | "inactive";
+  lastPollAgeSeconds: number;
+  lastEventAgeSeconds: number;
+  lastProcessedLedger: number;
+}
+
 export interface HealthRouteOptions {
   getReconciliationStatus?: () => ReconciliationStatus;
   getReadinessChecks?: ReadinessCheckProvider;
+  /**
+   * Returns the Soroban listener's current staleness state so the /health
+   * endpoint can surface it for monitoring dashboards.  Omit when the
+   * Soroban listener is not configured.
+   */
+  getSorobanStalenessInfo?: () => SorobanStalenessInfo;
 }
 
 function servicePayload(startedAt: number) {
@@ -31,10 +44,19 @@ export function healthRoutes(options: HealthRouteOptions = {}): Router {
 
   router.get('/health', (_req, res) => {
     const reconciliation = options.getReconciliationStatus?.() ?? null;
+    const sorobanStaleness = options.getSorobanStalenessInfo?.() ?? null;
     res.json({
       status: 'ok',
       ...servicePayload(startedAt),
       reconciliation,
+      soroban: sorobanStaleness
+        ? {
+            state: sorobanStaleness.state,
+            lastPollAgeSeconds: sorobanStaleness.lastPollAgeSeconds,
+            lastEventAgeSeconds: sorobanStaleness.lastEventAgeSeconds,
+            lastProcessedLedger: sorobanStaleness.lastProcessedLedger,
+          }
+        : null,
     });
   });
 
