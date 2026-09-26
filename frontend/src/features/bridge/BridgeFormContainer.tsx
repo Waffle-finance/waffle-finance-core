@@ -447,7 +447,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       const { getBalance } = await import('@wagmi/core');
       const { wagmiConfig: cfg } = await import('../../config/wagmi');
       const balanceResult = await getBalance(cfg, { address: addr as `0x${string}` });
-      return (Number(balanceResult.value) / 1e18).toFixed(4);
+      const raw = Number(balanceResult.value) / 1e18;
+      const { formatAmount } = await import('../../lib/formatAmount');
+      const { getNativeAsset } = await import('../../lib/assetNormalization');
+      const asset = getNativeAsset('ethereum');
+      return formatAmount(raw, asset, { showSymbol: false });
     };
 
     const fetchXlmBalance = async (addr: string): Promise<string> => {
@@ -459,7 +463,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       }
       const data = await response.json();
       const bal = data.balances?.find((b: any) => b.asset_type === 'native')?.balance || '0';
-      return parseFloat(bal).toFixed(4);
+      const raw = parseFloat(bal);
+      const { formatAmount } = await import('../../lib/formatAmount');
+      const { getNativeAsset } = await import('../../lib/assetNormalization');
+      const asset = getNativeAsset('stellar');
+      return formatAmount(raw, asset, { showSymbol: false });
     };
 
     const fetchSolBalance = async (addr: string): Promise<string> => {
@@ -475,7 +483,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       const json = await res.json();
       if (json?.error) throw new Error(`Solana RPC error: ${json.error.message ?? 'unknown'}`);
       const lamports = BigInt(json.result?.value ?? 0n);
-      return (Number(lamports) / 1e9).toFixed(4);
+      const raw = Number(lamports) / 1e9;
+      const { formatAmount } = await import('../../lib/formatAmount');
+      const { getNativeAsset } = await import('../../lib/assetNormalization');
+      const asset = getNativeAsset('solana');
+      return formatAmount(raw, asset, { showSymbol: false });
     };
 
     const loadBalance = async () => {
@@ -1093,7 +1105,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
           const userAccount = await stellarServer.loadAccount(stellarAddress);
           
           // Create payment to relayer using exact amounts from relayer
-          const xlmAmount = (parseInt(result.orderData.stellarAmount) / 10000000).toFixed(7); // Convert stroops to XLM
+          const rawXlm = parseInt(result.orderData.stellarAmount) / 10000000;
+          const { formatAmount } = await import('../../lib/formatAmount');
+          const { getNativeAsset } = await import('../../lib/assetNormalization');
+          const xlmAsset = getNativeAsset('stellar');
+          const xlmAmount = formatAmount(rawXlm, xlmAsset, { showSymbol: false });
           const payment = Operation.payment({
             destination: relayerStellarAddress,
             asset: Asset.native(), // XLM
@@ -1583,7 +1599,11 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                   <button
                     type="button"
                     onClick={() => {
-                      const newAmount = (parseFloat(balance) * 0.5).toFixed(4);
+                      const rawNew = parseFloat(balance) * 0.5;
+                      const { formatAmount } = await import('../../lib/formatAmount');
+                      const { getNativeAsset } = await import('../../lib/assetNormalization');
+                      const asset = direction.startsWith('xlm') ? getNativeAsset('stellar') : getNativeAsset('ethereum');
+                      const newAmount = formatAmount(rawNew, asset, { showSymbol: false });
                       console.log('🔘 50% Button clicked:', { balance, newAmount });
                       setAmount(newAmount);
                     }}
