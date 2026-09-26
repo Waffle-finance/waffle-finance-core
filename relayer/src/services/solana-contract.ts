@@ -29,6 +29,8 @@ import {
   buildClaimOrderInstruction,
   buildRefundOrderInstruction,
   NATIVE_SOL_MINT,
+  SolanaRpcProvider,
+  createSolanaRpcProvider,
 } from "@wafflefinance/sdk/solana";
 import {
   isSolanaPlaceholder,
@@ -216,6 +218,7 @@ class PlaceholderSolanaIntegration implements SolanaIntegration {
  */
 class ConfiguredSolanaIntegration implements SolanaIntegration {
   readonly mode: SolanaConfigStatus = "configured";
+  private readonly rpcProvider: SolanaRpcProvider;
   private readonly connection: Connection;
   private readonly keypair: Keypair;
   private readonly programPk: PublicKey;
@@ -230,7 +233,9 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   ) {
     this.programPk = new PublicKey(programId);
     this.commitment = commitment;
-    this.connection = new Connection(rpcUrl, commitment);
+    this.rpcProvider = createSolanaRpcProvider(rpcUrl, commitment);
+    // Keep a direct Connection for callers that build Transactions themselves.
+    this.connection = this.rpcProvider.getConnection();
 
     // Parse the private key — supports both base-58 and hex formats.
     let secretKey: Uint8Array;
@@ -298,8 +303,9 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     );
 
     try {
-      const { blockhash } = await this.connection.getLatestBlockhash(
-        this.commitment
+      const { blockhash } = await this.rpcProvider.withFallback(
+        (conn) => conn.getLatestBlockhash(this.commitment),
+        "getLatestBlockhash(lock)"
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
@@ -308,13 +314,22 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       tx.add(instruction);
       tx.partialSign(this.keypair);
 
-      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-      });
-      await this.connection.confirmTransaction(sig, this.commitment);
+      const sig = await this.rpcProvider.withFallback(
+        (conn) => conn.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          maxRetries: 3,
+        }),
+        "sendRawTransaction(lock)"
+      );
+      await this.rpcProvider.withFallback(
+        (conn) => conn.confirmTransaction(sig, this.commitment),
+        "confirmTransaction(lock)"
+      );
 
-      const slot = await this.connection.getSlot(this.commitment);
+      const slot = await this.rpcProvider.withFallback(
+        (conn) => conn.getSlot(this.commitment),
+        "getSlot(lock)"
+      );
 
       this.log.info(
         { signature: sig, orderId: orderPda.toBase58(), slot },
@@ -359,8 +374,9 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     });
 
     try {
-      const { blockhash } = await this.connection.getLatestBlockhash(
-        this.commitment
+      const { blockhash } = await this.rpcProvider.withFallback(
+        (conn) => conn.getLatestBlockhash(this.commitment),
+        "getLatestBlockhash(claim)"
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
@@ -369,13 +385,22 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       tx.add(ix);
       tx.partialSign(this.keypair);
 
-      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-      });
-      await this.connection.confirmTransaction(sig, this.commitment);
+      const sig = await this.rpcProvider.withFallback(
+        (conn) => conn.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          maxRetries: 3,
+        }),
+        "sendRawTransaction(claim)"
+      );
+      await this.rpcProvider.withFallback(
+        (conn) => conn.confirmTransaction(sig, this.commitment),
+        "confirmTransaction(claim)"
+      );
 
-      const slot = await this.connection.getSlot(this.commitment);
+      const slot = await this.rpcProvider.withFallback(
+        (conn) => conn.getSlot(this.commitment),
+        "getSlot(claim)"
+      );
 
       this.log.info(
         { signature: sig, orderId: params.orderId, slot },
@@ -414,8 +439,9 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     });
 
     try {
-      const { blockhash } = await this.connection.getLatestBlockhash(
-        this.commitment
+      const { blockhash } = await this.rpcProvider.withFallback(
+        (conn) => conn.getLatestBlockhash(this.commitment),
+        "getLatestBlockhash(refund)"
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
@@ -424,13 +450,22 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       tx.add(ix);
       tx.partialSign(this.keypair);
 
-      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-      });
-      await this.connection.confirmTransaction(sig, this.commitment);
+      const sig = await this.rpcProvider.withFallback(
+        (conn) => conn.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          maxRetries: 3,
+        }),
+        "sendRawTransaction(refund)"
+      );
+      await this.rpcProvider.withFallback(
+        (conn) => conn.confirmTransaction(sig, this.commitment),
+        "confirmTransaction(refund)"
+      );
 
-      const slot = await this.connection.getSlot(this.commitment);
+      const slot = await this.rpcProvider.withFallback(
+        (conn) => conn.getSlot(this.commitment),
+        "getSlot(refund)"
+      );
 
       this.log.info(
         { signature: sig, orderId: params.orderId, slot },

@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::{
-    Error, ResolverLifecycle, ResolverRegistry, ResolverRegistryClient,
+    Error, ResolverLifecycle, SlashCondition, ResolverRegistry, ResolverRegistryClient,
     MIN_UNBONDING_PERIOD_SECS,
 };
 use soroban_sdk::{
@@ -1599,4 +1599,170 @@ fn lifecycle_and_active_bool_always_consistent() {
     registry.withdraw_stake(&r);
     assert!(registry.get(&r).is_none());
     assert!(!registry.is_active(&r), "is_active must be false for unknown resolver");
+}
+
+// ---------------------------------------------------------------------------
+// Slash during Unbonding that keeps stake >= min stays Unbonding (#703)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slash_during_unbonding_above_min_keeps_unbonding_lifecycle() {
+    // A partial slash during the unbonding window that leaves stake >= min_stake
+    // must keep lifecycle == Unbonding (not transition to Inactive).
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    // Stake is 3× minimum so a single-unit slash leaves it well above the floor.
+    let stake = min_stake * 3;
+    sac.mint(&r, &stake);
+    registry.register(&r, &stake);
+
+    registry.request_unregister(&r);
+    assert_eq!(registry.get(&r).unwrap().lifecycle, ResolverLifecycle::Unbonding);
+
+    // Slash by exactly min_stake; remaining = 2× min_stake ≥ min_stake.
+    registry.slash(&r, &min_stake);
+
+    let info = registry.get(&r).unwrap();
+    assert_eq!(
+        info.lifecycle,
+        ResolverLifecycle::Unbonding,
+        "slash during unbonding that keeps stake >= min_stake must stay Unbonding"
+    );
+    assert!(!info.active, "active must remain false while Unbonding");
+    assert_eq!(info.stake, min_stake * 2);
+    assert!(info.unbonding_at.is_some(), "unbonding_at must be preserved");
+
+    // Advance past window — withdrawal must succeed with the remaining stake.
+    advance_time(&env, PERIOD);
+    registry.withdraw_stake(&r);
+    assert!(registry.get(&r).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// slash_with_reason: each SlashCondition code is recorded in the event (#703)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slash_with_reason_failed_fulfillment_emits_condition_in_event() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, beneficiary, _, sac, token, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+
+    registry.slash_with_reason(&r, &min_stake, &SlashCondition::FailedOrderFulfillment);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("slashed"), r.clone()),
+        (min_stake, SlashCondition::FailedOrderFulfillment),
+    );
+
+    assert_eq!(token.balance(&beneficiary), min_stake);
+    let info = registry.get(&r).unwrap();
+    assert_eq!(info.stake, 0);
+    assert_eq!(info.lifecycle, ResolverLifecycle::Inactive);
+}
+
+#[test]
+fn slash_with_reason_fraudulent_claim_deactivates_and_emits() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    let stake = min_stake * 2;
+    sac.mint(&r, &stake);
+    registry.register(&r, &stake);
+
+    registry.slash_with_reason(&r, &min_stake, &SlashCondition::FraudulentClaim);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("slashed"), r.clone()),
+        (min_stake, SlashCondition::FraudulentClaim),
+    );
+
+    let info = registry.get(&r).unwrap();
+    // stake == min_stake remains; resolver is still Active (strict < threshold).
+    assert_eq!(info.stake, min_stake);
+    assert_eq!(info.lifecycle, ResolverLifecycle::Active);
+    assert!(info.active);
+}
+
+#[test]
+fn slash_with_reason_order_abandonment_during_unbonding() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    registry.request_unregister(&r);
+
+    // Full slash with OrderAbandonment condition during unbonding window.
+    registry.slash_with_reason(&r, &min_stake, &SlashCondition::OrderAbandonment);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("slashed"), r.clone()),
+        (min_stake, SlashCondition::OrderAbandonment),
+    );
+
+    let info = registry.get(&r).unwrap();
+    assert_eq!(info.stake, 0);
+    assert_eq!(info.lifecycle, ResolverLifecycle::Inactive);
+    // Entry still present; resolver must complete the exit cycle.
+    assert!(info.unbonding_at.is_some());
+}
+
+#[test]
+fn slash_with_reason_protocol_violation_is_catchall() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &(min_stake * 2));
+    registry.register(&r, &(min_stake * 2));
+
+    let slash_amt = min_stake / 2;
+    registry.slash_with_reason(&r, &slash_amt, &SlashCondition::ProtocolViolation);
+    assert_last_event(
+        &env,
+        &registry.address,
+        (symbol_short!("slashed"), r.clone()),
+        (slash_amt, SlashCondition::ProtocolViolation),
+    );
+
+    let info = registry.get(&r).unwrap();
+    // Partial slash above the floor — resolver stays Active.
+    assert_eq!(info.lifecycle, ResolverLifecycle::Active);
+    assert!(info.active);
+    assert_eq!(info.stake, min_stake * 2 - slash_amt);
+}
+
+#[test]
+fn slash_with_reason_zero_amount_rejected() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (_, _, _, sac, _, registry) = setup_full(&env, min_stake);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+    assert_eq!(
+        registry
+            .try_slash_with_reason(&r, &0i128, &SlashCondition::ProtocolViolation)
+            .err()
+            .unwrap()
+            .unwrap(),
+        Error::InvalidAmount.into()
+    );
 }

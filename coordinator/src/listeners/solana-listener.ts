@@ -9,6 +9,10 @@ import {
 } from "../metrics.js";
 import { isSolanaPlaceholder } from "../config.js";
 import { decideDispatch } from "../services/workflow-priority-policy.js";
+import {
+  SolanaRpcProvider,
+  createSolanaRpcProvider,
+} from "@wafflefinance/sdk";
 
 /**
  * Confirmation level constants for Solana commitment model.
@@ -70,6 +74,7 @@ const DEDUP_CACHE_MAX = 10_000;
  */
 export class SolanaListener {
   private readonly connection: Connection;
+  private readonly rpcProvider: SolanaRpcProvider;
   private readonly log: Logger;
   private stopped = false;
   private timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -104,7 +109,14 @@ export class SolanaListener {
     log: Logger
   ) {
     this.log = log.child({ component: "SolanaListener" });
-    this.connection = new Connection(cfg.solana.rpcUrl, cfg.solana.commitment);
+    this.rpcProvider = createSolanaRpcProvider(
+      cfg.solana.rpcUrl,
+      cfg.solana.commitment,
+      { maxConsecutiveErrors: 3, recoveryWindowMs: 30_000 }
+    );
+    // Keep a direct connection reference for callers that need it
+    // (e.g. getParsedTransaction — which is already inside withFallback).
+    this.connection = this.rpcProvider.getConnection();
   }
 
   start(): void {
@@ -132,6 +144,14 @@ export class SolanaListener {
     return this.pendingSlots.size;
   }
 
+  /**
+   * Returns the current health of the underlying RPC provider.
+   * Exposes degraded state for /health endpoint and metrics (#713).
+   */
+  getRpcHealth() {
+    return this.rpcProvider.getHealth();
+  }
+
   // ---------------------------------------------------------------------------
   // Main poll loop
   // ---------------------------------------------------------------------------
@@ -156,10 +176,21 @@ export class SolanaListener {
     const startedAt = Date.now();
 
     // --- Step a: fetch both commitment levels to measure the gap -----------
+    // All RPC calls are routed through the provider so a degraded primary
+    // endpoint transparently falls back to a configured secondary (#713).
     const [finalizedSlot, confirmedSlot] = await Promise.all([
-      this.connection.getSlot("finalized"),
-      this.connection.getSlot("confirmed"),
+      this.rpcProvider.withFallback((conn) => conn.getSlot("finalized"), "getSlot(finalized)"),
+      this.rpcProvider.withFallback((conn) => conn.getSlot("confirmed"), "getSlot(confirmed)"),
     ]);
+
+    // Report RPC provider health for degraded-mode detection.
+    const providerHealth = this.rpcProvider.getHealth();
+    if (providerHealth.degraded) {
+      this.log.warn(
+        { activeEndpoint: providerHealth.activeEndpoint, endpoints: providerHealth.endpoints },
+        "Solana RPC provider is degraded — running on fallback endpoint"
+      );
+    }
 
     // --- Step b: detect slot regression ------------------------------------
     if (this.lastSlot > 0 && confirmedSlot < this.lastSlot - REGRESSION_THRESHOLD) {
@@ -171,21 +202,39 @@ export class SolanaListener {
     }
 
     // --- Step c: fetch new signatures at `confirmed` and queue them --------
-    const sigs = await this.connection.getSignaturesForAddress(programPk, {
-      limit: 50,
-    });
+    const sigs = await this.rpcProvider.withFallback(
+      (conn) => conn.getSignaturesForAddress(programPk, { limit: 50 }),
+      "getSignaturesForAddress"
+    );
 
     for (const sigInfo of sigs) {
       // Skip anything we have already seen or that reports an on-chain error.
       if (sigInfo.slot <= this.lastSlot) continue;
       if (sigInfo.err) continue;
 
+      // ── Dedup at queue time (#714) ────────────────────────────────────
+      // Reject signatures already in the pending queue or already fully
+      // processed.  This prevents double-queueing on overlapping poll windows
+      // and on restart when the same signatures are returned again.
+      if (this.isDuplicate(sigInfo.signature)) {
+        this.log.debug({ sig: sigInfo.signature }, "Solana event duplicate skipped (in-process cache) during queue");
+        continue;
+      }
+      if (this.isInPendingSlots(sigInfo.signature)) {
+        this.log.debug({ sig: sigInfo.signature, slot: sigInfo.slot }, "Solana event already queued in pendingSlots — skipping");
+        continue;
+      }
+
       let logs: string[] = [];
       try {
-        const tx = await this.connection.getParsedTransaction(sigInfo.signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
+        const tx = await this.rpcProvider.withFallback(
+          (conn) =>
+            conn.getParsedTransaction(sigInfo.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0,
+            }),
+          `getParsedTransaction(${sigInfo.signature.slice(0, 8)}…)`
+        );
         if (!tx?.meta?.logMessages) continue;
         logs = tx.meta.logMessages;
       } catch (txErr) {
@@ -247,6 +296,19 @@ export class SolanaListener {
   /** Returns true if this signature was already processed in-process. */
   isDuplicate(sig: string): boolean {
     return this.processedSigs.has(sig);
+  }
+
+  /**
+   * Returns true if this signature is already queued in `pendingSlots`.
+   * Prevents double-queueing the same transaction on overlapping poll windows.
+   */
+  isInPendingSlots(sig: string): boolean {
+    for (const txList of this.pendingSlots.values()) {
+      for (const entry of txList) {
+        if (entry.sig === sig) return true;
+      }
+    }
+    return false;
   }
 
   /** Mark a signature as processed; evicts oldest on overflow. */

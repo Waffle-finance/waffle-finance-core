@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, RefreshCw, WifiOff } from "lucide-react";
 import type { Address, Hex } from "viem";
 import { makeEthereumHTLCClient } from "../../lib/sdk-context";
 import { useNetworkMode } from "../../lib/useNetworkMode";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 export interface ClaimFallbackDialogProps {
   /** Ethereum address of the user (used as wallet signer). */
@@ -75,6 +76,21 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const titleId = "claim-dialog-title";
+
+  // Trap focus inside this dialog while it is mounted.
+  useFocusTrap(containerRef, true);
+
+  // Dismiss on Escape key.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose?.();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [props.onClose]);
+
   const networkState = useNetworkMode({ ethAddress: props.userAddress });
 
   useEffect(() => {
@@ -118,11 +134,32 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
   const isTestnet = networkState.mode === "testnet";
   const explorer = isTestnet ? "https://sepolia.etherscan.io" : "https://etherscan.io";
 
+  // Human-readable status for the aria-live status region.
+  const statusAnnouncement =
+    phase === "checking"       ? "Checking coordinator availability…" :
+    phase === "coordinator-up" ? "Coordinator is available. Use the standard claim flow." :
+    phase === "fallback"       ? "Coordinator unavailable. You can claim directly on-chain." :
+    phase === "submitting"     ? "Submitting claim transaction…" :
+    phase === "done"           ? "Claim submitted successfully." :
+    phase === "error"          ? `Claim failed: ${error ?? "unknown error"}` :
+    "";
+
   return (
-    <div className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full">
+    <div
+      ref={containerRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full"
+    >
+      {/* Hidden live region — announces phase changes to screen readers */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {statusAnnouncement}
+      </div>
+
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold text-white mb-1">Claim order</h2>
+          <h2 id={titleId} className="text-xl font-bold text-white mb-1">Claim order</h2>
           <p className="text-gray-400 text-sm">
             Direct on-chain claim — your wallet calls the contract directly.
           </p>
@@ -130,8 +167,8 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         {props.onClose && (
           <button
             onClick={props.onClose}
-            className="text-gray-400 hover:text-white transition-colors text-sm"
-            aria-label="Close"
+            className="text-gray-400 hover:text-white transition-colors text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 rounded"
+            aria-label="Close claim dialog"
           >
             ✕
           </button>
@@ -147,14 +184,14 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
 
       {phase === "checking" && (
         <div className="bg-gray-500/10 border border-gray-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
-          <RefreshCw className="h-5 w-5 text-gray-400 animate-spin" />
+          <RefreshCw className="h-5 w-5 text-gray-400 animate-spin" aria-hidden="true" />
           <p className="text-sm text-gray-300">Checking coordinator availability…</p>
         </div>
       )}
 
       {phase === "coordinator-up" && (
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
-          <CheckCircle2 className="h-5 w-5 text-emerald-400 mt-0.5 shrink-0" />
+          <CheckCircle2 className="h-5 w-5 text-emerald-400 mt-0.5 shrink-0" aria-hidden="true" />
           <div className="text-sm">
             <p className="text-emerald-300 font-medium">Coordinator is available</p>
             <p className="text-gray-400">
@@ -165,9 +202,9 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
         </div>
       )}
 
-      {(phase === "fallback" || phase === "error") && phase !== "error" && (
+      {phase === "fallback" && (
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
-          <WifiOff className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" />
+          <WifiOff className="h-5 w-5 text-yellow-400 mt-0.5 shrink-0" aria-hidden="true" />
           <div className="text-sm">
             <p className="text-yellow-300 font-medium">Coordinator unavailable — fallback mode</p>
             <p className="text-gray-400">
@@ -179,8 +216,11 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
       )}
 
       {phase === "error" && error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
-          <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 shrink-0" />
+        <div
+          role="alert"
+          className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4"
+        >
+          <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 shrink-0" aria-hidden="true" />
           <div className="text-sm">
             <p className="text-red-300 font-medium">Claim failed</p>
             <p className="text-gray-400 break-all">{error}</p>
@@ -211,9 +251,9 @@ export function ClaimFallbackDialog(props: ClaimFallbackDialogProps) {
           phase === "done" ||
           networkState.hasAnyMismatch
         }
-        className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+        className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
       >
-        {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" />}
+        {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
         {phase === "submitting" ? "Submitting claim…" : "Claim directly on-chain"}
       </button>
 

@@ -56,7 +56,7 @@ import {
   type Log,
 } from "viem";
 import { sepolia, mainnet } from "viem/chains";
-import { rpc } from "@stellar/stellar-sdk";
+import { rpc, xdr } from "@stellar/stellar-sdk";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
@@ -71,6 +71,8 @@ import {
   reconciliationGapBlocks,
   reconciliationLookbackCoverage,
   reconciliationRestartRecoveryEvents,
+  reconciliationChainErrors,
+  reconciliationDuplicatesSkipped,
   sorobanDecodeErrors,
   workflowDispatchDecisions,
 } from "../metrics.js";
@@ -100,12 +102,24 @@ interface SorobanRpcEvent {
 }
 
 import {
+  LedgerCursor,
   computeIncrementalScanStart,
   ETH_LOOKBACK_BLOCKS,
   SOROBAN_LOOKBACK_LEDGERS,
   SOLANA_LOOKBACK_SLOTS,
   isEventBehindOrderCursor,
 } from "./ledger-cursor.js";
+import {
+  EventSeenSet,
+  ethEventKey,
+  sorobanEventKey,
+  solanaEventKey,
+  semanticKey,
+} from "./event-identity.js";
+import {
+  ReplayPolicy,
+  buildReplayDecision,
+} from "./replay-policy.js";
 
 // ─── Status types ─────────────────────────────────────────────────────────────
 
@@ -203,6 +217,29 @@ export class Reconciler {
       allowHttp: cfg.soroban.rpcUrl.startsWith("http://"),
     });
     this.solanaConn = new Connection(cfg.solana.rpcUrl, cfg.solana.commitment);
+  }
+
+  // ─── Cursor initialisation ────────────────────────────────────────────────
+
+  /**
+   * Seed per-chain cursors from the DB on the first `run()` call.
+   * Ensures the very first reconciliation run covers the full offline gap
+   * without any manual operator action.
+   */
+  private async initCursors(): Promise<void> {
+    const [ethHwm, sorobanHwm, solanaHwm] = await Promise.all([
+      this.orders.getChainCursor("ethereum"),
+      this.orders.getChainCursor("stellar"),
+      this.orders.getChainCursor("solana"),
+    ]);
+    this.ethCursor = new LedgerCursor(ethHwm, ETH_LOOKBACK_BLOCKS);
+    this.sorobanCursor = new LedgerCursor(sorobanHwm, SOROBAN_LOOKBACK_LEDGERS);
+    this.solanaCursor = new LedgerCursor(solanaHwm, SOLANA_LOOKBACK_SLOTS);
+    this.cursorsReady = true;
+    this.log.info(
+      { ethHwm, sorobanHwm, solanaHwm },
+      "reconciler: cursors initialised from DB",
+    );
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -433,6 +470,7 @@ export class Reconciler {
     const latest = await this.ethClient.getBlockNumber();
     const fromBlock = await this.computeEthFromBlock(latest);
 
+    const toBlock = latest;
     const [createdLogs, claimedLogs, refundedLogs] = await Promise.all([
       this.ethClient.getLogs({ address, event: ORDER_CREATED, fromBlock, toBlock }),
       this.ethClient.getLogs({ address, event: ORDER_CLAIMED, fromBlock, toBlock }),
@@ -771,16 +809,13 @@ export class Reconciler {
 
     let replayed = 0;
     let eventIndex = 0;
-
-    try {
-      const latest = await this.sorobanServer.getLatestLedger();
-      const startLedger = await this.computeSorobanFromLedger(latest.sequence);
+    let pageCursor: string | undefined = this.sorobanRpcCursor;
 
     try {
       do {
         const events = await this.sorobanServer.getEvents({
           filters: [{ type: "contract", contractIds: [contractId] }],
-          startLedger: pageCursor ? undefined : startLedger,
+          startLedger: pageCursor ? undefined : decision.fromBlock,
           cursor: pageCursor,
           limit: 200,
         });
@@ -789,11 +824,12 @@ export class Reconciler {
           replayed += await this.replaySorobanEvent(ev, eventIndex++);
         }
 
-        cursor = events.cursor ?? undefined;
+        pageCursor = events.cursor ?? undefined;
+        this.sorobanRpcCursor = pageCursor;
         if (events.events.length < 200) break;
-      } while (cursor);
+      } while (pageCursor);
 
-      await this.orders.setChainCursor("stellar", latest.sequence);
+      await this.orders.setChainCursor("stellar", tip);
     } catch (err) {
       // Stale page cursor — clear it so the next run re-scans from HWM.
       this.sorobanRpcCursor = undefined;
@@ -805,7 +841,7 @@ export class Reconciler {
     return replayed;
   }
 
-  private async replaySorobanEvent(ev: any): Promise<number> {
+  private async replaySorobanEvent(ev: any, eventIndex: number = 0): Promise<number> {
     const result = decodeHtlcEvent(ev.topic ?? [], ev.value);
 
     if (isMalformedEvent(result)) {
@@ -819,6 +855,17 @@ export class Reconciler {
     }
 
     if (result === null) return 0;
+
+    // Dedup: skip events already seen in this reconciler run.
+    const sorobanEventTypeMap = { created: "OrderCreated", claimed: "OrderClaimed", refunded: "OrderRefunded" } as const;
+    const sorobanEvType = sorobanEventTypeMap[result.kind];
+    const sorobanIdentifier = result.kind === "created" ? result.hashlock : result.orderId.toString();
+    const sorobanDedupKey = sorobanEventKey(sorobanEvType, ev.txHash ?? "", ev.ledger ?? 0, eventIndex);
+    const sorobanSemKey = semanticKey("soroban", sorobanEvType, sorobanIdentifier);
+    if (this.seenSet.checkAndMark("soroban", sorobanEvType, sorobanDedupKey, sorobanSemKey)) {
+      reconciliationDuplicatesSkipped.inc();
+      return 0;
+    }
 
     if (result.kind === "created") {
       try {
@@ -1220,5 +1267,26 @@ export class Reconciler {
     }
 
     return 0;
+  }
+
+  private emitPolicyMetrics(): void {
+    for (const decision of this.policy.getDecisions()) {
+      reconciliationGapBlocks.set({ chain: decision.chain }, decision.toBlock - decision.fromBlock);
+      reconciliationLookbackCoverage.set({ chain: decision.chain }, decision.windowSize);
+
+      if (decision.forcedHistoricalResync) {
+        this.log.warn(
+          {
+            chain: decision.chain,
+            fromBlock: decision.fromBlock,
+            toBlock: decision.toBlock,
+            gapSeverity: decision.gapSeverity,
+            lookbackExceeded: decision.lookbackExceeded,
+          },
+          "reconciler: forced historical re-sync triggered — gap exceeds 3× lookback window; events before the window may be permanently missed"
+        );
+        reconciliationConflicts.inc({ chain: decision.chain, conflict_type: "forced_historical_resync" });
+      }
+    }
   }
 }

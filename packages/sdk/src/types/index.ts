@@ -15,7 +15,9 @@ export type OrderStatus =
   | "completed"
   | "refunded"
   | "failed"
-  | "expired";
+  | "expired"
+  | "cancelled"
+  | "abandoned";
 
 /** Cross-chain swap order as visible to clients of the SDK. */
 export interface Order {

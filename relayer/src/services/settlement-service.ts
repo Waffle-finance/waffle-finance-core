@@ -108,6 +108,26 @@ export interface SettleOptions {
   maxAttempts?: number;
   /** Override base delay ms. */
   baseDelayMs?: number;
+  /**
+   * Optional Soroban-specific deduplication key, typically
+   * `"<ledger>:<txHash>"` or `"<contractId>:<orderId>"`.
+   *
+   * When provided, `settle()` checks this key against an in-process index
+   * before creating a new TxStateRecord.  If a matching record already has a
+   * txHash (submitted or complete), that hash is returned immediately without
+   * calling `action` again.
+   *
+   * This prevents a second Soroban contract submission when the same
+   * coordinator event triggers `settle()` twice within the same process
+   * lifetime — e.g. during a bounded replay pass or when a live event and a
+   * recovery event for the same order arrive within the same poll window.
+   *
+   * Note: this guard is in-process only.  Cross-restart replay protection
+   * relies on the TxStateStore's durable `ackSubmission` record and on the
+   * coordinator's `decideDispatch` policy (which checks the DB for
+   * already-applied transitions before notifying the relayer).
+   */
+  contractKey?: string;
 }
 
 export interface SettleResult {
@@ -146,6 +166,15 @@ export class SettlementService {
   private readonly defaultBaseDelayMs: number;
   private readonly defaultMaxDelayMs: number;
 
+  /**
+   * In-process index from Soroban `contractKey` → `orderId`.
+   *
+   * Populated by `settle()` when a caller supplies a `contractKey`.  Used to
+   * short-circuit duplicate contract submissions within the same process
+   * lifetime without requiring a second TxStateStore lookup by contractKey.
+   */
+  private readonly contractKeyIndex = new Map<string, string>();
+
   constructor(options: SettlementServiceOptions = {}) {
     this.store = options.txStateStore ?? new TxStateStore();
     this.engine = options.retryEngine ?? new RetryEngine();
@@ -183,6 +212,21 @@ export class SettlementService {
     } = opts;
 
     const startedAt = Date.now();
+
+    // ── Soroban contractKey dedup (in-process, within session) ────────────
+    // When a Soroban-specific key is provided, check if this exact contract
+    // invocation was already initiated in this session.  Prevents a second
+    // Soroban contract call when a bounded replay or a live+recovery event
+    // pair triggers settle() for the same on-chain action twice.
+    if (opts.contractKey) {
+      const knownOrderId = this.contractKeyIndex.get(opts.contractKey);
+      if (knownOrderId) {
+        const keyRecord = this.store.get(knownOrderId);
+        if (keyRecord?.txHash) {
+          return { txHash: keyRecord.txHash, attempts: 0 };
+        }
+      }
+    }
 
     // ── Idempotency: if a record already exists, check its state. ──────────
     const existing = this.store.get(orderId);
@@ -270,6 +314,10 @@ export class SettlementService {
         (Date.now() - startedAt) / 1000,
       );
       this._updateStateGauge();
+
+      if (opts.contractKey) {
+        this.contractKeyIndex.set(opts.contractKey, orderId);
+      }
 
       return { txHash, attempts, lastFaultClass: attempts > 1 ? lastFaultClass : undefined };
     } catch (err) {

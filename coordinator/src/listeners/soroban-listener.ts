@@ -8,6 +8,10 @@ import {
   observeListenerEventProcessing,
   recordListenerProgress,
   sorobanDecodeErrors,
+  sorobanOutOfOrderEventsTotal,
+  sorobanListenerLastPollTimestampSeconds,
+  sorobanListenerEventAgeSeconds,
+  sorobanListenerStalenessState,
   workflowDispatchDecisions,
   listenerCheckpointPersistTotal,
   listenerCheckpointLedger,
@@ -30,6 +34,16 @@ import type { SorobanRecoveryMarker } from "../persistence/orders-repo.js";
 
 /** Maximum ledger gap before we treat it as a node inconsistency and re-scan. */
 const MAX_LEDGER_GAP = 100;
+
+/**
+ * Staleness thresholds for the Soroban listener health signal.
+ *
+ * These are wall-clock ages, not block counts.  A listener can be at the
+ * chain tip (zero lag) but still be "degraded" if the poll loop has stalled
+ * or the node is returning empty responses while the chain is advancing.
+ */
+const STALENESS_DEGRADED_THRESHOLD_MS = 120_000;  // 2 min → degraded
+const STALENESS_STALE_THRESHOLD_MS    = 300_000;  // 5 min → stale
 
 /**
  * Upper bound on the ledger span a single bounded replay/recovery pass will
@@ -126,6 +140,11 @@ export class SorobanListener {
    */
   private readonly processedEventKeys = new Map<string, true>();
 
+  /** Wall-clock ms when the last poll iteration completed successfully. */
+  private lastPollTimestampMs = 0;
+  /** Wall-clock ms when the last HTLC lifecycle event was applied (any kind). */
+  private lastEventTimestampMs = 0;
+
   constructor(
     private readonly cfg: CoordinatorConfig,
     private readonly orders: OrderService,
@@ -152,6 +171,56 @@ export class SorobanListener {
 
   stop(): void {
     this.stopped = true;
+  }
+
+  /**
+   * Returns a snapshot of the listener's current staleness state for health
+   * checks and telemetry dashboards.
+   *
+   * State classification:
+   *   `inactive`  — listener never started (contract not configured or start()
+   *                 not yet called).
+   *   `connected` — poll loop is running and within normal thresholds.
+   *   `degraded`  — no successful poll for > 2 minutes.
+   *   `stale`     — no successful poll for > 5 minutes.
+   *
+   * `lastEventAgeSeconds` is –1 when no HTLC lifecycle event has been observed
+   * yet in this session (i.e. the contract has been idle since startup).
+   */
+  getStalenessInfo(): {
+    state: "connected" | "degraded" | "stale" | "inactive";
+    lastPollAgeSeconds: number;
+    lastEventAgeSeconds: number;
+    lastProcessedLedger: number;
+  } {
+    if (this.lastPollTimestampMs === 0) {
+      return {
+        state: "inactive",
+        lastPollAgeSeconds: -1,
+        lastEventAgeSeconds: -1,
+        lastProcessedLedger: 0,
+      };
+    }
+    const now = Date.now();
+    const pollAgeMs = now - this.lastPollTimestampMs;
+
+    let state: "connected" | "degraded" | "stale";
+    if (pollAgeMs >= STALENESS_STALE_THRESHOLD_MS) {
+      state = "stale";
+    } else if (pollAgeMs >= STALENESS_DEGRADED_THRESHOLD_MS) {
+      state = "degraded";
+    } else {
+      state = "connected";
+    }
+
+    return {
+      state,
+      lastPollAgeSeconds: pollAgeMs / 1000,
+      lastEventAgeSeconds: this.lastEventTimestampMs > 0
+        ? (now - this.lastEventTimestampMs) / 1000
+        : -1,
+      lastProcessedLedger: this.lastProcessedLedger,
+    };
   }
 
   // ─── Event deduplication helpers ─────────────────────────────────────────
@@ -421,13 +490,16 @@ export class SorobanListener {
         let gapDetected = false;
         for (const ev of events.events) {
           // ── Guard 1: out-of-order event ──────────────────────────────────
+          // Stellar consensus is BFT-finalized — out-of-order delivery is a
+          // node-level inconsistency, not a chain reorg.  Skip and count.
           if (ev.ledger < this.lastProcessedLedger) {
+            sorobanOutOfOrderEventsTotal.inc({ chain: "stellar" });
             this.log.warn(
               {
                 evLedger: ev.ledger,
                 lastProcessedLedger: this.lastProcessedLedger,
               },
-              "Soroban event out of order — possible node inconsistency"
+              "Soroban event out of order — possible node inconsistency (BFT finality rules out chain reorg)"
             );
             continue;
           }
@@ -463,6 +535,26 @@ export class SorobanListener {
         recordListenerProgress("soroban", processedLedger, latest.sequence);
         observeListenerEventProcessing("soroban", "poll", startedAt);
 
+        // ── Staleness metrics ─────────────────────────────────────────────
+        this.lastPollTimestampMs = Date.now();
+        sorobanListenerLastPollTimestampSeconds.set(
+          { chain: "stellar" },
+          this.lastPollTimestampMs / 1000
+        );
+        if (this.lastEventTimestampMs > 0) {
+          sorobanListenerEventAgeSeconds.set(
+            { chain: "stellar" },
+            (Date.now() - this.lastEventTimestampMs) / 1000
+          );
+        }
+        const stalenessInfo = this.getStalenessInfo();
+        for (const s of ["connected", "degraded", "stale", "inactive"] as const) {
+          sorobanListenerStalenessState.set(
+            { chain: "stellar", state: s },
+            stalenessInfo.state === s ? 1 : 0
+          );
+        }
+
         if (gapDetected) {
           await this.orders
             .markSorobanRecovery(contractId, "pending_replay")
@@ -490,10 +582,11 @@ export class SorobanListener {
   }
 
   /**
-   * Record that a mutation was applied and, on the replay/recovery path,
-   * increment the recovery-events metric.
+   * Record that a mutation was applied: update the event age timestamp and,
+   * on the replay/recovery path, increment the recovery-events metric.
    */
   private onApplied(path: WorkflowPath, mutation: WorkflowMutation): void {
+    this.lastEventTimestampMs = Date.now();
     if (path !== "live") {
       listenerReplayEventsTotal.inc({ chain: "stellar", mutation });
     }
@@ -584,7 +677,7 @@ export class SorobanListener {
     // ── created ────────────────────────────────────────────────────────────
     if (decoded.kind === "created") {
       try {
-        const order = await this.orders.findByHashlock(decoded.hashlock);
+        const order = await this.orders.findByHashlock(`0x${decoded.hashlock}`);
         if (!order) {
           this.log.info(
             {
@@ -615,6 +708,18 @@ export class SorobanListener {
           blockNumber: ev.ledger,
           timelock: decoded.timelock,
         });
+        this.log.info({
+          audit: "src_lock",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          timelock: decoded.timelock,
+          outcome: "src_locked",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order source-locked — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "src_lock");
         return true;
@@ -638,7 +743,7 @@ export class SorobanListener {
           decoded.orderId.toString()
         );
         if (!order) {
-          const byHash = await this.orders.findByHashlock(decoded.hashlock);
+          const byHash = await this.orders.findByHashlock(`0x${decoded.hashlock}`);
           if (!byHash) {
             this.log.info(
               {
@@ -667,6 +772,17 @@ export class SorobanListener {
             decoded.preimage,
             ev.txHash
           );
+          this.log.info({
+            audit: "settle",
+            chain: "stellar",
+            publicId: byHash.publicId,
+            sorobanOrderId: decoded.orderId.toString(),
+            hashlockPresent: decoded.hashlock.length > 0,
+            outcome: "settled",
+            ledger: ev.ledger,
+            txHash: ev.txHash,
+            path,
+          }, "Soroban order settled — settlement trace");
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "secret_reveal");
           return true;
@@ -689,6 +805,17 @@ export class SorobanListener {
           decoded.preimage,
           ev.txHash
         );
+        this.log.info({
+          audit: "settle",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          outcome: "settled",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order settled — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "secret_reveal");
         return true;
@@ -712,7 +839,7 @@ export class SorobanListener {
           decoded.orderId.toString()
         );
         if (!order) {
-          const byHash = await this.orders.findByHashlock(decoded.hashlock);
+          const byHash = await this.orders.findByHashlock(`0x${decoded.hashlock}`);
           if (!byHash) {
             this.log.info(
               {
@@ -737,6 +864,18 @@ export class SorobanListener {
           });
           if (!decision.shouldApply) return false;
           await this.orders.markStatus(byHash.publicId, "refunded");
+          this.log.info({
+            audit: "refund",
+            chain: "stellar",
+            publicId: byHash.publicId,
+            sorobanOrderId: decoded.orderId.toString(),
+            hashlockPresent: decoded.hashlock.length > 0,
+            timelockExpired: true,
+            outcome: "refunded",
+            ledger: ev.ledger,
+            txHash: ev.txHash,
+            path,
+          }, "Soroban order refunded — settlement trace");
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "refund");
           return true;
@@ -755,6 +894,18 @@ export class SorobanListener {
         });
         if (!decision.shouldApply) return false;
         await this.orders.markStatus(order.publicId, "refunded");
+        this.log.info({
+          audit: "refund",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          timelockExpired: true,
+          outcome: "refunded",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order refunded — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "refund");
         return true;

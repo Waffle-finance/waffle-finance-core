@@ -15,6 +15,8 @@ const VALID_STELLAR_SECRET = "S" + "A".repeat(55); // 56-char S-prefixed key
 const VALID_ENV = {
   ETHEREUM_RPC_URL: "https://eth-mainnet.example.com/v3/key",
   STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+  SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+  STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
 };
 const VALID_CFG = {
   ethereumPrivateKey: VALID_ETH_KEY,

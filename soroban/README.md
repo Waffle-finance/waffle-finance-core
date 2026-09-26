@@ -118,6 +118,36 @@ stellar contract bindings typescript \
 | Resolver | Stake, register, fill orders permissionlessly | Steal stake of other resolvers; claim without a valid preimage |
 | User | Lock funds, claim with preimage, refund after timeout | Claim without a valid preimage; refund before timeout |
 
+The "cannot move locked HTLC funds" constraint on Admin and Coordinator is
+enforced by the **Soroban host VM**, not merely by contract logic.  The host
+evaluates the SHA-256 preimage check and the timelock before allowing any
+transfer.  This is the Soroban equivalent of the EVM's immutable bytecode
+guarantee: a compromised off-chain service cannot force a transfer no matter
+what transaction it submits.
+
+## Consensus model and finality
+
+Stellar uses the **Stellar Consensus Protocol (SCP)**, a federated Byzantine
+Agreement (FBA) variant.  Ledgers close with immediate finality — there are
+no block reorgs or probabilistic confirmation windows.
+
+**Operational implications:**
+
+- The coordinator's `SorobanListener` does **not** wait for N confirmations
+  before treating an event as final.  A single ledger close is sufficient.
+- Out-of-order event delivery is a **node-level inconsistency** (stale RPC
+  cursor, buggy relay), not a chain phenomenon.  The listener's Guard 1
+  (skip events with `ledger < lastProcessedLedger`) handles this case.
+- If a Soroban RPC node appears connected but its ledger sequence has stopped
+  advancing, the coordinator's staleness metrics
+  (`coordinator_soroban_listener_staleness_state`) will classify it as
+  `degraded` or `stale` before users experience failures.
+
+This is a meaningful difference from the Ethereum listener, which must
+reconcile reorgs, block hash mismatches, and confirmation-depth policies.
+Do not apply Ethereum-style "wait for N confirmations" rules to Soroban
+event processing.
+
 ## IDL and Account Schema Reference
 
 For full details on contract entrypoints, data types, and account storage schemas, please refer to the formal IDL documentation at [HTLC IDL Reference](./docs/HTLC_IDL.md). This documentation is essential for SDK and frontend integration.

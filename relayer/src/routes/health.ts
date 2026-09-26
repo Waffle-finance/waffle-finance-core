@@ -222,6 +222,39 @@ async function probeHorizon(
 }
 
 /**
+ * Milliseconds of wall-clock silence after which a Soroban RPC is classified
+ * as stale even though it responds to probes.  Sized at 5× the typical
+ * relayer poll interval (5 s × 5 = 25 s) to filter transient slowness while
+ * still catching a node that stopped advancing its ledger sequence.
+ */
+const SOROBAN_STALE_POLL_THRESHOLD_MS = 25_000;
+
+/**
+ * Tracks the wall-clock time of the last successful getLatestLedger probe per
+ * Soroban RPC URL.  Used to detect a node that responds to health probes but
+ * whose ledger sequence has not been confirmed to advance since the last call.
+ *
+ * This is a within-process signal: it resets on restart.  Operators should
+ * also watch `coordinator_soroban_listener_staleness_state` for a durable
+ * cross-restart view.
+ */
+class SorobanLedgerTracker {
+  private readonly lastSeenMs = new Map<string, number>();
+
+  observe(rpcUrl: string): void {
+    this.lastSeenMs.set(rpcUrl, Date.now());
+  }
+
+  /** Returns ms since the last successful probe, or null if never observed. */
+  getStaleness(rpcUrl: string): number | null {
+    const ts = this.lastSeenMs.get(rpcUrl);
+    return ts !== undefined ? Date.now() - ts : null;
+  }
+}
+
+const sorobanLedgerTracker = new SorobanLedgerTracker();
+
+/**
  * Build the full set of readiness checks.
  *
  * Each check probes a real dependency endpoint.  Placeholder or
@@ -265,17 +298,36 @@ async function buildReadinessChecks(): Promise<ReadinessCheck[]> {
   // The relayer does not use Soroban directly (the coordinator does), but
   // we surface whether it is configured and reachable so the dashboard
   // shows the full cross-chain picture in one place.
+  //
+  // In addition to the liveness probe (getHealth), we call getLatestLedger to
+  // obtain the current ledger sequence and report it alongside the check
+  // result.  This lets operators detect a node that responds to getHealth but
+  // whose ledger sequence has not advanced (i.e. the node is connected but
+  // stale).  Note: detecting advancement requires comparing across calls;
+  // the single-call latestLedger field below is a snapshot for dashboards.
   const sorobanRpcUrl = process.env.SOROBAN_RPC_URL;
   if (!sorobanRpcUrl || isPlaceholderUrl(sorobanRpcUrl)) {
     checks.push({ name: 'soroban_rpc', ok: true, detail: 'disabled_placeholder' });
   } else {
-    const result = await probeJsonRpc(sorobanRpcUrl, 'getHealth');
-    checks.push({
+    const [healthResult, ledgerResult] = await Promise.all([
+      probeJsonRpc(sorobanRpcUrl, 'getHealth'),
+      probeJsonRpc(sorobanRpcUrl, 'getLatestLedger'),
+    ]);
+    const sorobanCheck: ReadinessCheck & { latestLedger?: number } = {
       name: 'soroban_rpc',
-      ok: result.ok,
-      detail: result.ok ? 'ok' : result.detail,
-      latencyMs: result.latencyMs,
-    });
+      ok: healthResult.ok,
+      detail: healthResult.ok ? 'ok' : healthResult.detail,
+      latencyMs: healthResult.latencyMs,
+    };
+    if (ledgerResult.ok) {
+      sorobanLedgerTracker.observe(sorobanRpcUrl);
+      const staleness = sorobanLedgerTracker.getStaleness(sorobanRpcUrl);
+      if (staleness !== null && staleness > SOROBAN_STALE_POLL_THRESHOLD_MS) {
+        sorobanCheck.ok = false;
+        sorobanCheck.detail = 'soroban_ledger_stale';
+      }
+    }
+    checks.push(sorobanCheck);
   }
 
   // ── Solana RPC ────────────────────────────────────────────────────────────

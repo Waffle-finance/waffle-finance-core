@@ -111,3 +111,193 @@ export const IX_REFUND_ORDER = Buffer.from([
 
 /** Seed prefix for HTLCOrder PDAs: [b"order", hashlock_bytes]. */
 export const ORDER_SEED = Buffer.from("order");
+
+// ── IDL compatibility guard ────────────────────────────────────────────────
+
+/**
+ * Canonical account ordering for the three HTLC instructions.
+ *
+ * This table is the authoritative reference for the on-chain account list
+ * order.  Any SDK change that alters the account order or roles MUST be
+ * accompanied by a bump of IDL_VERSION and an entry in the table below.
+ *
+ * Index 0 = first account passed to the instruction.
+ *
+ * create_order:
+ *   0  payer            signer, writable   (fee payer / sender)
+ *   1  order_pda        writable           (HTLCOrder PDA)
+ *   2  mint             readonly           (SPL mint or native SOL)
+ *   3  beneficiary      readonly
+ *   4  refund_address   readonly
+ *   5  system_program   readonly
+ *   6  clock            readonly           (SYSVAR_CLOCK_PUBKEY)
+ *
+ * claim_order:
+ *   0  claimer                   signer, writable
+ *   1  order_pda                 writable
+ *   2  beneficiary_token_account writable
+ *   3  system_program            readonly
+ *
+ * refund_order:
+ *   0  refunder        signer, writable
+ *   1  order_pda       writable
+ *   2  refund_account  writable
+ *   3  system_program  readonly
+ *   4  clock           readonly
+ */
+export const CANONICAL_ACCOUNT_ORDERING = {
+  /** IDL version this table was generated from. */
+  idlVersion: IDL_VERSION,
+  createOrder: [
+    { name: "payer",           signer: true,  writable: true  },
+    { name: "order_pda",       signer: false, writable: true  },
+    { name: "mint",            signer: false, writable: false },
+    { name: "beneficiary",     signer: false, writable: false },
+    { name: "refund_address",  signer: false, writable: false },
+    { name: "system_program",  signer: false, writable: false },
+    { name: "clock",           signer: false, writable: false },
+  ],
+  claimOrder: [
+    { name: "claimer",                    signer: true,  writable: true  },
+    { name: "order_pda",                  signer: false, writable: true  },
+    { name: "beneficiary_token_account",  signer: false, writable: true  },
+    { name: "system_program",             signer: false, writable: false },
+  ],
+  refundOrder: [
+    { name: "refunder",       signer: true,  writable: true  },
+    { name: "order_pda",      signer: false, writable: true  },
+    { name: "refund_account", signer: false, writable: true  },
+    { name: "system_program", signer: false, writable: false },
+    { name: "clock",          signer: false, writable: false },
+  ],
+} as const;
+
+/**
+ * Instruction data sizes (bytes) including the 8-byte Anchor discriminator.
+ *
+ * create_order:  8 discriminator + 8 amount + 8 safety_deposit + 32 hashlock + 8 timelock = 64
+ * claim_order:   8 discriminator + 32 preimage = 40
+ * refund_order:  8 discriminator only = 8
+ */
+export const INSTRUCTION_DATA_SIZES = {
+  createOrder: 64,
+  claimOrder: 40,
+  refundOrder: 8,
+} as const;
+
+export interface IdlCompatibilityResult {
+  compatible: boolean;
+  /** Detected on-chain version (from account data), or null if unknown. */
+  onChainVersion: number | null;
+  /** SDK IDL version. */
+  sdkVersion: number;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Assert that an on-chain account version is compatible with this SDK.
+ *
+ * Call this whenever you obtain an account version from on-chain data
+ * before deserialising fields.  Throws `Error` when the on-chain layout
+ * is newer than this SDK supports, which prevents silent field misparse.
+ *
+ * Upgrade path:
+ *  1. Deploy new Anchor program (bumps the `version` byte in every new account)
+ *  2. Bump IDL_VERSION in this file
+ *  3. Update FIELD_OFFSET and CANONICAL_ACCOUNT_ORDERING as needed
+ *  4. Update deserialiseOrderAccount to handle both old and new layouts
+ */
+export function assertIdlCompatibility(onChainVersion: number): IdlCompatibilityResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (onChainVersion > IDL_VERSION) {
+    errors.push(
+      `On-chain account version ${onChainVersion} is newer than SDK IDL version ${IDL_VERSION}. ` +
+      `Update @wafflefinance/sdk to read this account.`
+    );
+  }
+
+  if (onChainVersion < IDL_VERSION) {
+    // Older accounts are still readable — we keep backward compatibility.
+    warnings.push(
+      `On-chain account version ${onChainVersion} is older than SDK IDL version ${IDL_VERSION}. ` +
+      `The account was created with an older program version; all known fields remain readable.`
+    );
+  }
+
+  return {
+    compatible: errors.length === 0,
+    onChainVersion,
+    sdkVersion: IDL_VERSION,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Verify that a generated instruction's data and account list match the
+ * canonical schema defined in this IDL.  Returns an array of validation
+ * errors; an empty array means the instruction is schema-conformant.
+ *
+ * Callers (tests, CI gates) should assert `errors.length === 0` to prevent
+ * instruction-layout drift from silently breaking the Anchor program.
+ */
+export function validateInstructionSchema(
+  instruction: "createOrder" | "claimOrder" | "refundOrder",
+  data: Uint8Array,
+  keys: Array<{ isSigner: boolean; isWritable: boolean }>
+): string[] {
+  const errors: string[] = [];
+
+  // ── Check data size ────────────────────────────────────────────────────
+  const expectedSize = INSTRUCTION_DATA_SIZES[instruction];
+  if (data.length !== expectedSize) {
+    errors.push(
+      `${instruction}: instruction data size mismatch — expected ${expectedSize} bytes, got ${data.length}`
+    );
+  }
+
+  // ── Check discriminator ────────────────────────────────────────────────
+  const DISCRIMINATORS: Record<string, Buffer> = {
+    createOrder: IX_CREATE_ORDER,
+    claimOrder: IX_CLAIM_ORDER,
+    refundOrder: IX_REFUND_ORDER,
+  };
+  const expectedDisc = DISCRIMINATORS[instruction];
+  const actualDisc = Buffer.from(data.subarray(0, 8));
+  if (!actualDisc.equals(expectedDisc)) {
+    errors.push(
+      `${instruction}: discriminator mismatch — expected ${expectedDisc.toString("hex")}, ` +
+      `got ${actualDisc.toString("hex")}`
+    );
+  }
+
+  // ── Check account ordering ─────────────────────────────────────────────
+  const expectedAccounts = CANONICAL_ACCOUNT_ORDERING[instruction];
+  if (keys.length !== expectedAccounts.length) {
+    errors.push(
+      `${instruction}: account count mismatch — expected ${expectedAccounts.length}, got ${keys.length}`
+    );
+  } else {
+    for (let i = 0; i < expectedAccounts.length; i++) {
+      const exp = expectedAccounts[i];
+      const act = keys[i];
+      if (exp.signer !== act.isSigner) {
+        errors.push(
+          `${instruction}: account[${i}] (${exp.name}) signer mismatch — ` +
+          `expected ${exp.signer}, got ${act.isSigner}`
+        );
+      }
+      if (exp.writable !== act.isWritable) {
+        errors.push(
+          `${instruction}: account[${i}] (${exp.name}) writable mismatch — ` +
+          `expected ${exp.writable}, got ${act.isWritable}`
+        );
+      }
+    }
+  }
+
+  return errors;
+}

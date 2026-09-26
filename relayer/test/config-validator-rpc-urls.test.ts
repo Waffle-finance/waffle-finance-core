@@ -37,6 +37,12 @@ const VALID_CFG = {
   stellarSecretKey: VALID_STELLAR_SECRET,
 };
 
+// Shared Soroban / Stellar fields required by the extended validator.
+const SOROBAN_VALID_ENV_ADDITIONS = {
+  SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+  STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+};
+
 function onlyRpcErrors(errors: ConfigError[]): ConfigError[] {
   return errors.filter(
     (e) =>
@@ -47,7 +53,7 @@ function onlyRpcErrors(errors: ConfigError[]): ConfigError[] {
 // ── ETHEREUM_RPC_URL — malformed / unparseable strings ───────────────────────
 
 describe("validateRelayerStartup — ETHEREUM_RPC_URL malformed strings", () => {
-  const base = { STELLAR_HORIZON_URL: "https://horizon.stellar.org" };
+  const base = { STELLAR_HORIZON_URL: "https://horizon.stellar.org", ...SOROBAN_VALID_ENV_ADDITIONS };
 
   it("rejects a completely non-URL string with invalid_format", () => {
     const errors = validateRelayerStartup(
@@ -156,7 +162,7 @@ describe("validateRelayerStartup — ETHEREUM_RPC_URL malformed strings", () => 
 // ── STELLAR_HORIZON_URL — malformed / unsupported protocols ──────────────────
 
 describe("validateRelayerStartup — STELLAR_HORIZON_URL malformed strings", () => {
-  const base = { ETHEREUM_RPC_URL: "https://eth-mainnet.example.com/v3/key" };
+  const base = { ETHEREUM_RPC_URL: "https://eth-mainnet.example.com/v3/key", ...SOROBAN_VALID_ENV_ADDITIONS };
 
   it("rejects a completely non-URL string with invalid_format", () => {
     const errors = validateRelayerStartup(
@@ -244,6 +250,7 @@ describe("validateRelayerStartup — both RPC endpoints malformed", () => {
       {
         ETHEREUM_RPC_URL: "not-a-url",
         STELLAR_HORIZON_URL: "also-not-a-url",
+        ...SOROBAN_VALID_ENV_ADDITIONS,
       },
       VALID_CFG,
     );
@@ -258,6 +265,7 @@ describe("validateRelayerStartup — both RPC endpoints malformed", () => {
       {
         ETHEREUM_RPC_URL: "wss://eth.example.com",
         STELLAR_HORIZON_URL: "ftp://horizon.example.com",
+        ...SOROBAN_VALID_ENV_ADDITIONS,
       },
       VALID_CFG,
     );
