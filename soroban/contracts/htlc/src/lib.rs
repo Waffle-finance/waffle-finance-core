@@ -2,10 +2,12 @@
 //! WaffleFinance HTLC contract for Stellar (Soroban).
 //!
 //! This contract implements the Stellar side of the WaffleFinance cross-chain
-//! bridge. It mirrors the semantics of the Ethereum `HTLCEscrow` contract
-//! so that a swap between Ethereum and Stellar enforces the same
-//! atomicity invariants on both chains:
+//! bridge. It shares the same *logical* HTLC semantics as the Ethereum
+//! `HTLCEscrow` contract — same hashlock scheme, same timelock direction,
+//! same permissionless refund — but the *runtime semantics* differ in
+//! several ways that both operators and auditors must understand:
 //!
+//! **Logical semantics (identical to Ethereum)**
 //! - A sender locks `amount` of a Stellar asset under a `hashlock`
 //!   (sha256(preimage)) and a `timelock`.
 //! - Before the `timelock` the `beneficiary` can claim the locked
@@ -14,10 +16,36 @@
 //!   locked amount to the original `refund_address` (typically the
 //!   original sender).
 //!
-//! The contract never holds custodial discretion: every transfer is
-//! constrained by the on-ledger hashlock + timelock. No address —
-//! including the coordinator or admin — can move locked funds without
-//! satisfying these conditions.
+//! **Runtime semantics (Soroban-specific — different from EVM)**
+//!
+//! *Finality*: Stellar uses BFT consensus (Stellar Consensus Protocol).
+//! Ledgers are final as soon as they close; there are no chain reorgs or
+//! probabilistic confirmation windows.  The coordinator's listener guards
+//! against node-level inconsistencies (stale cursors, out-of-order delivery)
+//! but does NOT need to wait for confirmations the way an Ethereum listener
+//! must.  Operators should not apply Ethereum-style "N confirmations" rules
+//! to Soroban events.
+//!
+//! *Cryptography*: `sha256` is a Soroban host function call, not an EVM
+//! precompile.  The hash function is identical (SHA-256), but the invocation
+//! mechanism and gas accounting differ.
+//!
+//! *Event observability*: events are fetched via cursor-based pagination
+//! (`getEvents` RPC call) rather than block-range `getLogs`.  Cursors are
+//! opaque strings tied to the node's event history window (~48 h); a cursor
+//! that falls outside the window is silently invalidated, triggering a
+//! bounded replay in the coordinator.
+//!
+//! *State archival*: Soroban uses a rent-based TTL model.  Order entries and
+//! the contract instance itself have finite lifetimes unless explicitly
+//! extended.  See the "State archival (TTL) behaviour" section below.
+//!
+//! *Trust enforcement*: on Ethereum, the EVM bytecode is immutable once
+//! deployed; correctness is enforced by the global EVM.  On Soroban, the
+//! Soroban host enforces the same SHA-256 preimage check and timelock
+//! invariants.  No address — including the coordinator or admin — can move
+//! locked funds without satisfying these conditions, because the host
+//! enforces it at the VM level, not just through contract logic.
 //!
 //! # Governance
 //!

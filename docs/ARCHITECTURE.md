@@ -81,8 +81,8 @@ Two things this diagram is trying to make explicit:
 | Chain | Contract | Language | Settlement rule |
 | --- | --- | --- | --- |
 | Ethereum | `HTLCEscrow.sol` + `ResolverRegistry.sol` | Solidity 0.8.24 (Hardhat + Foundry) | `sha256(preimage) == hashlock` before `timelock` → pay `beneficiary`; timelock expired → anyone calls `refundOrder` |
-| Stellar | `wafflefinance-htlc` + `wafflefinance-resolver-registry` | Rust / Soroban SDK 22.x | Same rule, Soroban host functions |
-| Solana | Anchor HTLC program | Rust / Anchor | Same rule, sha256 preimage reveal |
+| Stellar | `wafflefinance-htlc` + `wafflefinance-resolver-registry` | Rust / Soroban SDK 22.x | Same logical rule; Soroban host functions enforce the SHA-256 check and timelock at the VM level |
+| Solana | Anchor HTLC program | Rust / Anchor | Same logical rule; sha256 preimage reveal via Anchor constraint |
 
 There is no cross-chain messaging protocol, validator set, or attester.
 Each leg is an independent HTLC; the same `sha256` preimage unlocks both.
@@ -96,6 +96,18 @@ window on the destination chain always closes before the user's refund
 window on the source chain opens, so refund races can't leave either party
 stuck. `e2e/cross-chain.test.ts` encodes this asymmetry directly in its
 stuck-order-refund test scenarios.
+
+**Where Soroban and EVM runtime semantics diverge** (relevant for operations
+and audits — the logical HTLC rules above are the same on all three chains):
+
+| Aspect | Ethereum | Soroban |
+| --- | --- | --- |
+| **Finality model** | Probabilistic (PoS); the coordinator waits for confirmations before treating an event as final | BFT (Stellar Consensus Protocol); ledgers are immediately final — no reorgs, no confirmation window needed |
+| **Out-of-order events** | Can occur during short-lived reorgs; listener handles block hash mismatches | Only possible due to node-level inconsistency (stale cursor, RPC bug), never due to chain state |
+| **Event sourcing** | `getLogs` with a block-number range | Cursor-based `getEvents` pagination; cursors expire after ~48 h — a cursor reset triggers a bounded replay |
+| **Crypto enforcement** | `sha256` EVM precompile (address 0x02) | `sha256` Soroban host function; semantically identical, different invocation path |
+| **State TTL** | No automatic expiry; contract state is permanent | Rent-based TTL; order entries and the contract instance expire unless actively extended |
+| **Admin override** | Upgradeability gated by proxy pattern (if used) | Admin can update governance params (min deposit) but cannot move locked HTLC funds; enforced by the Soroban host |
 
 ---
 

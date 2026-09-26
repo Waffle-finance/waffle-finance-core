@@ -552,6 +552,77 @@ export const sorobanDecodeErrors = new Counter({
   registers: [registry],
 });
 
+/**
+ * Soroban events skipped because their ledger sequence is earlier than the
+ * last processed ledger (Guard 1 in the live poll loop).
+ *
+ * A non-zero rate during steady-state is a signal of node-level inconsistency
+ * or an RPC endpoint that is returning events from different ledger windows
+ * within the same response.  Unlike Ethereum, Stellar's BFT consensus means
+ * these are always node-level anomalies rather than chain reorgs.
+ */
+export const sorobanOutOfOrderEventsTotal = new Counter({
+  name: "coordinator_soroban_out_of_order_events_total",
+  help: "Soroban events skipped because their ledger is behind the last processed ledger (node inconsistency, not a chain reorg)",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+// ── Soroban listener staleness metrics ───────────────────────────────────────
+//
+// These expose time-based health signals for the Soroban event listener.
+// Block-count-based lag (listenerLagBlocks) measures distance from the chain
+// tip; the metrics below measure wall-clock age so operators can detect a
+// listener that is technically at the tip but has not seen any events in an
+// abnormally long time (e.g. the contract is idle but the RPC is stale).
+
+/**
+ * Unix timestamp (seconds) of the last successful Soroban listener poll.
+ * Should advance approximately every `pollIntervalMs` during normal operation.
+ * A flat value while the process is running indicates a stalled poll loop.
+ */
+export const sorobanListenerLastPollTimestampSeconds = new Gauge({
+  name: "coordinator_soroban_listener_last_poll_timestamp_seconds",
+  help: "Unix timestamp of the last successful Soroban listener poll, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Seconds elapsed since the last Soroban HTLC lifecycle event (created,
+ * claimed, or refunded) was successfully decoded and dispatched.
+ *
+ * A value above the staleness threshold does NOT indicate a fault — contract
+ * activity may simply be low.  Combine with `listenerLagBlocks` and
+ * `sorobanListenerStalenessState` to distinguish idle-but-healthy from stale.
+ */
+export const sorobanListenerEventAgeSeconds = new Gauge({
+  name: "coordinator_soroban_listener_event_age_seconds",
+  help: "Seconds since the last Soroban HTLC lifecycle event was successfully dispatched",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * One-hot gauge classifying the Soroban listener's current staleness state.
+ * Exactly one `state` label value equals 1 at any time; the others are 0.
+ *
+ * `state` values:
+ *   connected  — poll loop is live and within normal lag thresholds
+ *   degraded   — no successful poll or no HTLC event for > 2 minutes
+ *   stale      — no successful poll or no HTLC event for > 5 minutes
+ *   inactive   — listener has not started (contract not configured)
+ *
+ * Alert on `state="stale"` with a threshold of 1 to detect Soroban staleness
+ * before users experience failed order processing.
+ */
+export const sorobanListenerStalenessState = new Gauge({
+  name: "coordinator_soroban_listener_staleness_state",
+  help: "1 when the named staleness state is active for the Soroban listener (connected|degraded|stale|inactive)",
+  labelNames: ["chain", "state"] as const,
+  registers: [registry],
+});
+
 // ── Cache verifier metrics ────────────────────────────────────────────────────
 
 /**
