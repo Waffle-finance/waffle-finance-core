@@ -61,6 +61,8 @@ const DEFAULTS = {
 type StellarRejectionCode =
   | "tx_bad_seq"
   | "tx_insufficient_fee"
+  | "tx_insufficient_balance"
+  | "tx_bad_auth"
   | "tx_failed"
   | "unknown";
 
@@ -72,6 +74,8 @@ function parseRejectionCode(
     const name = (errorResult.result().switch() as { name: string }).name;
     if (name === "txBadSeq") return "tx_bad_seq";
     if (name === "txInsufficientFee") return "tx_insufficient_fee";
+    if (name === "txInsufficientBalance") return "tx_insufficient_balance";
+    if (name === "txBadAuth") return "tx_bad_auth";
     if (name === "txFailed") return "tx_failed";
     return "unknown";
   } catch {
@@ -371,6 +375,33 @@ export async function orchestrateTransaction({
           }
           txToSubmit = _fromXDR(bumpXdr, networkPassphrase) as FeeBumpTransaction;
           continue feeBumpLoop;
+        }
+
+        if (code === "tx_insufficient_balance") {
+          // Account does not hold enough XLM to cover the transaction fee and
+          // minimum balance reserve. Retrying with the same account will not
+          // help — the operator must top up the source account first.
+          throw makeError(
+            "tx_rejected",
+            `Transaction rejected: insufficient XLM balance on source account ${sourceAccountId}. ` +
+              `Top up the account and retry. ` +
+              `Minimum balance = (2 + subentry_count) × base_reserve (currently 0.5 XLM each).`,
+            false,
+            snap(attempt),
+          );
+        }
+
+        if (code === "tx_bad_auth") {
+          // Signature did not match the source account — indicates a key
+          // mismatch or a transaction that was signed with the wrong keypair.
+          // Never retryable; the operator must resolve the key configuration.
+          throw makeError(
+            "tx_rejected",
+            `Transaction rejected: bad authentication on source account ${sourceAccountId}. ` +
+              `Verify that the signing key matches the account and all required signers are present.`,
+            false,
+            snap(attempt),
+          );
         }
 
         // Terminal rejection (tx_failed, unknown, etc.)

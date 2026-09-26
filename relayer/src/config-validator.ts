@@ -51,9 +51,22 @@ function isValidStellarSecretFormat(secret: string): boolean {
   return /^S[A-Z2-7]{55}$/.test(secret);
 }
 
+/**
+ * Stellar contract IDs are 56-character StrKey strings starting with 'C'
+ * (base32 alphabet A–Z plus digits 2–7).
+ */
+function isStellarContractId(value: string): boolean {
+  return /^C[A-Z2-7]{55}$/.test(value.trim());
+}
+
+const STELLAR_TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+const STELLAR_MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+
 export interface RelayerRuntimeConfig {
   ethereumPrivateKey?: string | null;
   stellarSecretKey?: string | null;
+  /** Network mode — used to validate the Stellar network passphrase. Defaults to 'testnet'. */
+  network?: "testnet" | "mainnet";
 }
 
 /**
@@ -162,6 +175,84 @@ export function validateRelayerStartup(
       message:
         `RELAYER_STELLAR_SECRET must be a 56-character Stellar secret key starting with 'S'. ` +
         `Got a value of length ${stellarSecret.length}.`,
+    });
+  }
+
+  // ── Soroban RPC endpoint ─────────────────────────────────────────────────
+  // Required for all Stellar/Soroban interactions. A missing or malformed URL
+  // causes every Soroban operation to fail at runtime rather than at startup.
+
+  const sorobanRpcUrl = env["SOROBAN_RPC_URL"];
+  if (!sorobanRpcUrl) {
+    errors.push({
+      field: "SOROBAN_RPC_URL",
+      code: "missing",
+      message:
+        "SOROBAN_RPC_URL is not set. Provide a valid Soroban RPC endpoint " +
+        "(e.g. https://soroban-testnet.stellar.org for testnet, " +
+        "https://mainnet.sorobanrpc.com for mainnet).",
+    });
+  } else if (isPlaceholder(sorobanRpcUrl)) {
+    errors.push({
+      field: "SOROBAN_RPC_URL",
+      code: "placeholder",
+      message: `SOROBAN_RPC_URL looks like a placeholder (${sorobanRpcUrl}). Set a real Soroban RPC endpoint.`,
+    });
+  } else if (!isHttpUrl(sorobanRpcUrl)) {
+    errors.push({
+      field: "SOROBAN_RPC_URL",
+      code: "invalid_format",
+      message: `SOROBAN_RPC_URL must be an http(s) URL, got: ${sorobanRpcUrl}`,
+    });
+  }
+
+  // ── Stellar network passphrase ────────────────────────────────────────────
+  // The passphrase is embedded in every signed Stellar transaction. A mismatch
+  // causes signature verification to fail on-chain with tx_bad_auth — often
+  // with no obvious connection back to the misconfiguration.
+
+  const networkMode = env["NETWORK_MODE"] ?? cfg.network ?? "testnet";
+  const isMainnet = networkMode === "mainnet";
+  const expectedPassphrase = isMainnet
+    ? STELLAR_MAINNET_PASSPHRASE
+    : STELLAR_TESTNET_PASSPHRASE;
+
+  const stellarPassphrase = env["STELLAR_NETWORK_PASSPHRASE"];
+  if (!stellarPassphrase) {
+    errors.push({
+      field: "STELLAR_NETWORK_PASSPHRASE",
+      code: "missing",
+      message:
+        `STELLAR_NETWORK_PASSPHRASE is not set. ` +
+        `Expected: "${expectedPassphrase}" for network mode "${networkMode}".`,
+    });
+  } else if (stellarPassphrase.trim() !== expectedPassphrase) {
+    errors.push({
+      field: "STELLAR_NETWORK_PASSPHRASE",
+      code: "invalid_value",
+      message:
+        `STELLAR_NETWORK_PASSPHRASE does not match network mode "${networkMode}". ` +
+        `Got: "${stellarPassphrase.trim()}". ` +
+        `Expected: "${expectedPassphrase}". ` +
+        `Ensure NETWORK_MODE and STELLAR_NETWORK_PASSPHRASE are consistent.`,
+    });
+  }
+
+  // ── Soroban HTLC contract ID (OPTIONAL, format-checked if provided) ───────
+  // The contract ID is not required — missing means Soroban settlement is
+  // disabled. But if a value is set it must be a valid Stellar StrKey so that
+  // the service does not start with a syntactically invalid contract address.
+
+  const htlcEnvKey = isMainnet ? "SOROBAN_HTLC_MAINNET" : "SOROBAN_HTLC_TESTNET";
+  const htlcContractId = env[htlcEnvKey];
+  if (htlcContractId && !isPlaceholder(htlcContractId) && !isStellarContractId(htlcContractId)) {
+    errors.push({
+      field: htlcEnvKey,
+      code: "invalid_format",
+      message:
+        `${htlcEnvKey} is not a valid Stellar contract ID. ` +
+        `Expected a 56-character StrKey starting with 'C' (base32 A–Z, 2–7), ` +
+        `got: "${htlcContractId}".`,
     });
   }
 

@@ -106,6 +106,7 @@ If you add a new document, add a row here in the same PR.
 | `packages/sdk/TREE_SHAKING.md` | current | Engineering | SDK bundle size and tree-shaking guidance |
 | `soroban/README.md` | current | Engineering | Soroban contracts: build, test, deploy, TS bindings |
 | `soroban/docs/` | current | Engineering | Soroban-specific design docs |
+| `docs/SOROBAN_OPERATOR_GUIDE.md` | current | Operations | Soroban trust model, lifecycle, readiness checks, RPC degradation, recovery |
 | `frontend/CACHING_STRATEGY.md` | current | Engineering | Frontend caching approach |
 | `frontend/FEATURE_FLAGS.md` | current | Engineering | Frontend feature flag usage |
 | `frontend/MAINTAINABILITY.md` | current | Engineering | Frontend code maintainability guidelines |

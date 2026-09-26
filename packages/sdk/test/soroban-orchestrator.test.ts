@@ -379,6 +379,89 @@ describe("orchestrateTransaction", () => {
     });
   });
 
+  // ── Funding / balance errors (#706) ──────────────────────────────────────────
+
+  describe("tx_insufficient_balance", () => {
+    function makeInsufficientBalanceResult(): any {
+      return {
+        toXDR: () => "",
+        result: () => ({ switch: () => ({ name: "txInsufficientBalance" }) }),
+      };
+    }
+
+    it("throws tx_rejected with a balance guidance message without retrying", async () => {
+      const sendTransaction = vi.fn().mockResolvedValue({
+        status: "ERROR",
+        hash: TX_HASH,
+        errorResult: makeInsufficientBalanceResult(),
+      });
+      const opts = makeOptions({ serverOverrides: { sendTransaction } });
+
+      const err = await orchestrateTransaction(opts).catch((e) => e);
+      expect(err.code).toBe("tx_rejected");
+      expect(err.retryable).toBe(false);
+      expect(err.message).toMatch(/insufficient.*balance/i);
+      // Balance errors are not retried — no point without external remediation.
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("error message names the source account for operator diagnosis", async () => {
+      const opts = makeOptions({
+        sourceAccountId: "GBALANCE123",
+        serverOverrides: {
+          sendTransaction: vi.fn().mockResolvedValue({
+            status: "ERROR",
+            hash: TX_HASH,
+            errorResult: makeInsufficientBalanceResult(),
+          }),
+        },
+      });
+      const err = await orchestrateTransaction(opts).catch((e) => e);
+      expect(err.message).toContain("GBALANCE123");
+    });
+  });
+
+  // ── Bad auth / mis-signed transactions (#706) ────────────────────────────────
+
+  describe("tx_bad_auth", () => {
+    function makeBadAuthErrorResult(): any {
+      return {
+        toXDR: () => "",
+        result: () => ({ switch: () => ({ name: "txBadAuth" }) }),
+      };
+    }
+
+    it("throws tx_rejected with an auth guidance message without retrying", async () => {
+      const sendTransaction = vi.fn().mockResolvedValue({
+        status: "ERROR",
+        hash: TX_HASH,
+        errorResult: makeBadAuthErrorResult(),
+      });
+      const opts = makeOptions({ serverOverrides: { sendTransaction } });
+
+      const err = await orchestrateTransaction(opts).catch((e) => e);
+      expect(err.code).toBe("tx_rejected");
+      expect(err.retryable).toBe(false);
+      expect(err.message).toMatch(/bad auth/i);
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("error message names the source account", async () => {
+      const opts = makeOptions({
+        sourceAccountId: "GBADKEY456",
+        serverOverrides: {
+          sendTransaction: vi.fn().mockResolvedValue({
+            status: "ERROR",
+            hash: TX_HASH,
+            errorResult: makeBadAuthErrorResult(),
+          }),
+        },
+      });
+      const err = await orchestrateTransaction(opts).catch((e) => e);
+      expect(err.message).toContain("GBADKEY456");
+    });
+  });
+
   // ── Polling ─────────────────────────────────────────────────────────────────
 
   describe("status polling", () => {
