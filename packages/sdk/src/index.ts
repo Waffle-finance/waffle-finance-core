@@ -164,6 +164,38 @@ export {
   type SolanaSigner,
 } from "./solana/index.js";
 
+// Solana — multi-endpoint RPC provider with automatic failover (#713)
+export {
+  SolanaRpcProvider,
+  SolanaRpcFallbackExhaustedError,
+  createSolanaRpcProvider,
+  type SolanaRpcProviderOptions,
+  type SolanaProviderHealth,
+  type EndpointHealth,
+} from "./solana/rpc-provider.js";
+
+// Solana — IDL schema compatibility helpers (#712)
+export {
+  assertIdlCompatibility,
+  validateInstructionSchema,
+  CANONICAL_ACCOUNT_ORDERING,
+  INSTRUCTION_DATA_SIZES,
+  type IdlCompatibilityResult,
+} from "./solana/idl/htlc.js";
+
+// Solana — account metadata validation (#715)
+export {
+  AccountValidationError,
+  validateSolanaAddress,
+  validateOrderPda,
+  validateOrderAccountOnChain,
+  validateCreateOrderParams,
+  validateClaimOrderParams,
+  validateRefundOrderParams,
+  type AccountValidationCode,
+  type AccountValidationResult,
+} from "./solana/account-validation.js";
+
 // Shared utilities for hex conversion, order ID handling, and serialisation
 export {
   hexToBuffer,
