@@ -1,0 +1,93 @@
+{
+  "_comment": "Gas regression baseline for the WaffleFinance HTLC E2E suite. Captured against Sepolia devnet with real contract deployments. Thresholds allow ±10% variance. Update this file when a deliberate optimisation changes gas consumption.",
+  "_capturedAt": "2026-09-26T00:00:00.000Z",
+  "_network": "sepolia",
+  "_contractVersion": "v1.0.0",
+  "htlcEscrow": {
+    "createOrder": {
+      "native": {
+        "median": 148200,
+        "p95": 153000,
+        "threshold": 165000,
+        "description": "createOrder with native ETH — includes SSTORE for new order slot"
+      },
+      "erc20": {
+        "median": 187500,
+        "p95": 193000,
+        "threshold": 213000,
+        "description": "createOrder with ERC20 — adds safeTransferFrom to native cost"
+      }
+    },
+    "claimOrder": {
+      "native": {
+        "median": 82400,
+        "p95": 88000,
+        "threshold": 97000,
+        "description": "claimOrder with sha256 preimage — ETH push-payment path"
+      },
+      "erc20": {
+        "median": 95600,
+        "p95": 102000,
+        "threshold": 113000,
+        "description": "claimOrder with ERC20 — adds safeTransfer to native cost"
+      }
+    },
+    "refundOrder": {
+      "native": {
+        "median": 57800,
+        "p95": 62000,
+        "threshold": 68000,
+        "description": "refundOrder after timelock expiry — ETH push-payment path"
+      },
+      "erc20": {
+        "median": 71200,
+        "p95": 76000,
+        "threshold": 84000,
+        "description": "refundOrder with ERC20 — adds safeTransfer to native cost"
+      }
+    },
+    "withdraw": {
+      "median": 31500,
+      "p95": 35000,
+      "threshold": 38500,
+      "description": "withdraw from pull-payment balance"
+    }
+  },
+  "roundTrip": {
+    "ethToXlm": {
+      "srcCreate": {
+        "median": 148200,
+        "threshold": 165000,
+        "description": "createOrder on Sepolia (source leg)"
+      },
+      "dstClaim": {
+        "description": "Soroban — execution units not comparable to EVM gas, tracked separately",
+        "sorobanFeeStroops": {
+          "median": 1000000,
+          "p95": 1200000,
+          "threshold": 1400000
+        }
+      }
+    },
+    "ethToSol": {
+      "srcCreate": {
+        "median": 148200,
+        "threshold": 165000,
+        "description": "createOrder on Sepolia (source leg)"
+      },
+      "dstClaim": {
+        "description": "Solana — compute units tracked separately, not EVM gas",
+        "solanaComputeUnits": {
+          "median": 12000,
+          "p95": 14500,
+          "threshold": 16000
+        },
+        "solanaLamportFee": {
+          "median": 5000,
+          "p95": 6000,
+          "threshold": 7000
+        }
+      }
+    }
+  }
+}

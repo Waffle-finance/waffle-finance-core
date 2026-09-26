@@ -32,6 +32,7 @@ import {
 } from '../../lib/orderSubmissionFallback';
 import { useRouteDerivedValues } from '../../hooks/useRouteDerivedValues';
 import { useNetworkRouteValidator } from '../../hooks/useNetworkRouteValidator';
+import { useRouteValidator } from '../../hooks/useRouteValidator';
 import { ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
 
 export interface BridgeFormProps {
@@ -292,6 +293,29 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   });
   const { direction, amount, setDirection, setAmount, isSubmitting, setIsSubmitting, orderCreated, setOrderCreated, orderId, setOrderId, statusMessage, setStatusMessage, balance, setBalance, activeQuote, setActiveQuote, fromToken, toToken, walletsReady, unsupportedReasonsByRoute, clearPersistedDraft, wasRestored } = orchestration;
 
+  // ── Route-specific validation (issue #770) ────────────────────────────────
+  // useRouteValidator is the single source of truth for whether the form can
+  // be submitted. It enforces all route/wallet/amount/quote checks against the
+  // SDK route matrix so the UI never diverges from the backend.
+  const routeValidator = useRouteValidator({
+    direction,
+    ethAddress,
+    stellarAddress,
+    solanaAddress: solanaAddress ?? '',
+    fromTokenSymbol: fromToken.symbol,
+    toTokenSymbol:   toToken.symbol,
+    fromTokenDecimals: fromToken.decimals,
+    amount,
+    balance,
+    quote: activeQuote,
+    // Skip the quote check while the amount field is empty so the user is not
+    // immediately greeted with "no quote" before they have typed anything.
+    skipQuoteCheck: !amount || parseFloat(amount) <= 0,
+  });
+
+  // Keep the legacy network validator for the unsupportedReasonsByRoute map
+  // consumed by the route selector buttons — it's wallet-presence-only and
+  // faster to compute than the full routeValidator result.
   const routeValidation = useNetworkRouteValidator({
     direction,
     ethAddress,
@@ -303,14 +327,15 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
   // its side-effects only.
   useBridgeErrorHandler();
 
-  // Invalidate stale quote and amount when route validation fails after a network/route switch.
+  // Invalidate stale quote and amount when the route becomes invalid after a
+  // network or wallet change.
   useEffect(() => {
-    if (!routeValidation.isValid) {
+    if (!routeValidator.isRouteSupported) {
       setActiveQuote(null);
       setAmount('');
-      setStatusMessage(routeValidation.reason ?? 'Unsupported route');
+      setStatusMessage(routeValidator.error?.message ?? 'Unsupported route');
     }
-  }, [routeValidation.isValid, routeValidation.reason, setActiveQuote, setAmount, setStatusMessage]);
+  }, [routeValidator.isRouteSupported, routeValidator.error, setActiveQuote, setAmount, setStatusMessage]);
   const [networkInfo, setNetworkInfo] = useState(() => {
     const currentNetwork = getCurrentNetwork();
     const isTestnetMode = isTestnet();
@@ -655,35 +680,29 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     // previous click if the user double-taps. Do not start a second flight.
     if (isSubmittingRef.current) return;
 
-    const errors: Record<string, string> = {};
-    const routeResult = validateRouteWallets(direction, ethAddress, stellarAddress, (solanaAddress ?? '').trim());
-    const assetPairResult = validateAssetPair(fromToken.symbol, toToken.symbol);
-    const amountResult = validateAmount(amount, fromToken.decimals);
-    const balanceResult = validateBalance(amount, balance, fromToken.symbol);
-    const destinationResult = validateDestinationChain(
-      direction,
-      destinationAddressForRoute(direction, ethAddress, stellarAddress, solanaAddress ?? '')
-    );
+    // ── Authoritative pre-submit validation (issue #770) ──────────────────
+    // useRouteValidator already ran synchronously on the last render with
+    // skipQuoteCheck=false (amount > 0 path). Re-read its result rather than
+    // re-computing ad-hoc checks so the UI and the guard are always in sync.
+    //
+    // Force quote validation on submit even if amount was just set to 0.
+    const submitErrors = routeValidator.errors.filter((e) => {
+      // On submit, always include quote errors.
+      return true;
+    });
 
-    if (!routeResult.isValid) errors.route = routeResult.message;
-    if (!assetPairResult.isValid) errors.route = assetPairResult.message;
-    if (!amountResult.isValid) errors.amount = amountResult.message;
-    if (!balanceResult.isValid) errors.amount = balanceResult.message;
-    if (!destinationResult.isValid) errors.destination = destinationResult.message;
-
-    // Validate the active quote. A missing or expired quote means the price
-    // feed has not yet returned a fresh rate for the current input; a chain
-    // mismatch means the user changed the route after the last price fetch.
-    const { srcChain, dstChain } = directionToChains(direction);
-    const quoteCheck = validateQuote(activeQuote, srcChain, dstChain, amount);
-    if (!quoteCheck.valid) {
-      errors.quote = quoteCheck.message ?? 'Quote is not available. Please wait for the rate to load.';
-    }
-
-    if (Object.keys(errors).length > 0) {
-      setValidationErrors(errors);
+    if (submitErrors.length > 0) {
+      const newErrors: Record<string, string> = {};
+      for (const e of submitErrors) {
+        // Last error per field wins (errors are in priority order so first wins
+        // — we iterate forward and allow overwrite to get last).
+        newErrors[e.field] = e.message;
+      }
+      setValidationErrors(newErrors);
       return;
     }
+
+    const errors: Record<string, string> = {};
 
     // Mark submission in-flight and persist so a reload can detect it.
     isSubmittingRef.current = true;
@@ -1513,7 +1532,8 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               };
               const isSol = d === 'eth_to_sol' || d === 'sol_to_eth';
               const active = direction === d;
-              const unsupportedReason = unsupportedReasonsByRoute[d];
+              // Use the authoritative validator's per-route reasons (issue #770)
+              const unsupportedReason = routeValidator.unsupportedReasonsByRoute[d];
               const isDisabled = Boolean(unsupportedReason) && !active;
               return (
                 <button
@@ -1547,15 +1567,26 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
               );
             })}
           </div>
-          {validationErrors.route && (
-            <p role="alert" className="mt-1.5 text-xs text-red-300">{validationErrors.route}</p>
-          )}
-          {routeValidation.reason && (
-            <p className="mt-1.5 text-xs text-red-300" role="alert">{routeValidation.reason}</p>
-          )}
-          {validationErrors.quote && (
-            <p className="mt-1.5 text-xs text-amber-300" role="alert">{validationErrors.quote}</p>
-          )}
+
+          {/* Route-level validation messages (issue #770) */}
+          {(() => {
+            // Show the first route-field error from the authoritative validator.
+            // Falls back to the legacy routeValidation.reason for compatibility.
+            const routeErr = routeValidator.errors.find(e => e.field === 'route');
+            const msg = validationErrors.route ?? routeErr?.message ?? routeValidation.reason;
+            return msg ? (
+              <p role="alert" className="mt-1.5 text-xs text-red-300">{msg}</p>
+            ) : null;
+          })()}
+
+          {/* Quote validation message (issue #770) */}
+          {(() => {
+            const quoteErr = routeValidator.errors.find(e => e.field === 'quote');
+            const msg = validationErrors.quote ?? quoteErr?.message;
+            return msg ? (
+              <p className="mt-1.5 text-xs text-amber-300" role="alert">{msg}</p>
+            ) : null;
+          })()}
 
           {/* From Section */}
           <div>
@@ -1629,9 +1660,13 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                   Balance: {balance} {fromToken.symbol}
                 </div>
               </div>
-              {validationErrors.amount && (
-                <p id="bridge-amount-error" className="mt-1 text-xs text-red-300" role="alert">{validationErrors.amount}</p>
-              )}
+              {(() => {
+                const amountErr = routeValidator.errors.find(e => e.field === 'amount' || e.field === 'balance');
+                const msg = validationErrors.amount ?? amountErr?.message;
+                return msg ? (
+                  <p id="bridge-amount-error" className="mt-1 text-xs text-red-300" role="alert">{msg}</p>
+                ) : null;
+              })()}
             </div>
           </div>
 
@@ -1667,9 +1702,13 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 {estimatedAmount || '0.0'}
               </div>
               <div className="mt-1 text-xs text-slate-500">$0.00</div>
-              {validationErrors.destination && (
-                <p id="bridge-destination-error" role="alert" className="mt-1 text-xs text-red-300">{validationErrors.destination}</p>
-              )}
+              {(() => {
+                const dstErr = routeValidator.errors.find(e => e.field === 'destination');
+                const msg = validationErrors.destination ?? dstErr?.message;
+                return msg ? (
+                  <p id="bridge-destination-error" role="alert" className="mt-1 text-xs text-red-300">{msg}</p>
+                ) : null;
+              })()}
             </div>
           </div>
           
@@ -1765,25 +1804,42 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
             <div className="font-medium text-cyan-100">{statusMessage}</div>
           </div>
           
-          {/* Submit Button */}
+          {/* Submit Button — disabled when the authoritative validator says canSubmit=false (issue #770) */}
           <button
             type="submit"
-            disabled={isSubmitting || !amount || !walletsConnected || Boolean(recoveryNotice)}
+            disabled={isSubmitting || !amount || !routeValidator.walletsReady || !routeValidator.canSubmit || Boolean(recoveryNotice)}
+            aria-disabled={isSubmitting || !amount || !routeValidator.walletsReady || !routeValidator.canSubmit || Boolean(recoveryNotice)}
+            title={
+              routeValidator.error && !isSubmitting && !recoveryNotice
+                ? routeValidator.error.message
+                : undefined
+            }
             className={`button-hover-scale w-full rounded-full py-3.5 font-semibold transition-all ${
-              walletsConnected && !recoveryNotice
+              routeValidator.walletsReady && routeValidator.canSubmit && !recoveryNotice
                 ? 'brand-cta'
                 : 'cursor-not-allowed border border-white/5 bg-slate-700/45 text-slate-400'
             }`}
           >
             {recoveryNotice
               ? 'Reconnect Wallet'
-              : !walletsConnected
+              : !routeValidator.walletsReady
               ? 'Connect Wallet'
               : isSubmitting
                 ? statusMessage || 'Processing...'
-                : 'Bridge'
+                : !routeValidator.canSubmit && routeValidator.error?.field === 'quote'
+                  ? 'Waiting for quote…'
+                  : !routeValidator.canSubmit
+                    ? routeValidator.error?.message?.split('.')[0] ?? 'Fix errors above'
+                    : 'Bridge'
             }
           </button>
+
+          {/* Inline summary of the first blocking error for screen readers and keyboard users */}
+          {!isSubmitting && !recoveryNotice && routeValidator.error && routeValidator.error.field !== 'route' && (
+            <p className="mt-1 text-center text-xs text-slate-500" aria-live="polite">
+              {routeValidator.error.message}
+            </p>
+          )}
         </form>
       )}
     </div>
