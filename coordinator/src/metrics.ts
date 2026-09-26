@@ -782,22 +782,6 @@ export const reconciliationGapExceedances = new Counter({
 });
 
 /**
- * Conflicts classified during event replay, by type.
- *
- * conflict_type label values:
- *   - already_applied      — event targets a status the order already has (benign)
- *   - status_ahead         — order is past the event's target status (benign)
- *   - state_contradiction  — event contradicts persisted state (investigate)
- *   - unknown_order        — event references an order not in the DB (gap signal)
- */
-export const reconciliationConflicts = new Counter({
-  name: "coordinator_reconciliation_conflicts_total",
-  help: "Total event-vs-state conflicts classified during reconciler replay, by type",
-  labelNames: ["conflict_type"] as const,
-  registers: [registry],
-});
-
-/**
  * Cumulative count of forced historical re-sync decisions: gaps that exceeded
  * 3× the lookback window, requiring operator action to ensure no events were
  * permanently missed.

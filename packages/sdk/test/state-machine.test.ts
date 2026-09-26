@@ -17,10 +17,12 @@ const ALL_STATUSES: OrderStatus[] = [
   "refunded",
   "failed",
   "expired",
+  "cancelled",
+  "abandoned",
 ];
 
 const EXPECTED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  announced: ["src_locked", "failed", "expired"],
+  announced: ["src_locked", "cancelled", "abandoned", "failed", "expired"],
   src_locked: ["dst_locked", "secret_revealed", "refunded", "failed", "expired"],
   dst_locked: ["secret_revealed", "refunded", "failed", "expired"],
   secret_revealed: ["completed", "refunded", "failed"],
@@ -28,6 +30,8 @@ const EXPECTED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   refunded: [],
   failed: [],
   expired: ["refunded", "failed"],
+  cancelled: [],
+  abandoned: [],
 };
 
 describe("order state machine", () => {
@@ -67,12 +71,23 @@ describe("order state machine", () => {
       expect(isTerminal("completed")).toBe(true);
       expect(isTerminal("refunded")).toBe(true);
       expect(isTerminal("failed")).toBe(true);
+      expect(isTerminal("cancelled")).toBe(true);
+      expect(isTerminal("abandoned")).toBe(true);
       expect(isTerminal("announced")).toBe(false);
       expect(isTerminal("src_locked")).toBe(false);
     });
 
+    it("allows cancellation and abandonment from announced only", () => {
+      expect(canTransition("announced", "cancelled")).toBe(true);
+      expect(canTransition("announced", "abandoned")).toBe(true);
+      expect(canTransition("src_locked", "cancelled")).toBe(false);
+      expect(canTransition("src_locked", "abandoned")).toBe(false);
+      expect(canTransition("dst_locked", "cancelled")).toBe(false);
+      expect(canTransition("expired", "cancelled")).toBe(false);
+    });
+
     it("nextStatesOf returns a stable list", () => {
-      expect(nextStatesOf("announced")).toEqual(["src_locked", "failed", "expired"]);
+      expect(nextStatesOf("announced")).toEqual(["src_locked", "cancelled", "abandoned", "failed", "expired"]);
       expect(nextStatesOf("completed")).toEqual([]);
     });
   });
@@ -172,6 +187,8 @@ describe("order state machine", () => {
       expect(nextStatesOf("completed")).toEqual([]);
       expect(nextStatesOf("refunded")).toEqual([]);
       expect(nextStatesOf("failed")).toEqual([]);
+      expect(nextStatesOf("cancelled")).toEqual([]);
+      expect(nextStatesOf("abandoned")).toEqual([]);
     });
 
     it("throwing transition error includes from/to state", () => {

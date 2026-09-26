@@ -11,13 +11,22 @@ import {
   isSupportedStellarToEth,
   isSupportedEthToSolana,
   isSupportedSolanaToEth,
+  isSupportedStellarToSolana,
+  isSupportedSolanaToStellar,
   assertSupportedEthToStellar,
   assertSupportedStellarToEth,
   assertSupportedEthToSolana,
   assertSupportedSolanaToEth,
+  assertSupportedStellarToSolana,
+  assertSupportedSolanaToStellar,
+  resolveSolanaAssetFromStellar,
+  resolveStellarAssetFromSolana,
   getSupportedEthereumAddresses,
   getSupportedStellarAssets,
   getSupportedSolanaMints,
+  getSupportedStellarToSolana,
+  getSupportedSolanaToStellar,
+  toCanonicalId,
   UnsupportedAssetError,
   NATIVE_ETH_ADDRESS,
   NATIVE_STELLAR_ASSET,
@@ -529,5 +538,166 @@ describe("round-trip consistency", () => {
   it("eth→solana→eth round-trips for Sepolia USDC on testnet", () => {
     const sol = resolveSolanaAsset(SEPOLIA_USDC, "testnet");
     expect(resolveEthereumTokenFromSolana(sol.mint, "testnet")).toBe(SEPOLIA_USDC);
+  });
+});
+
+// ── Stellar ↔ Solana mappings ─────────────────────────────────────────────────
+
+describe("isSupportedStellarToSolana", () => {
+  it("returns true for native XLM on testnet", () => {
+    expect(isSupportedStellarToSolana("XLM", "testnet")).toBe(true);
+  });
+
+  it("returns true for Stellar USDC on testnet", () => {
+    expect(isSupportedStellarToSolana(STELLAR_USDC_KEY, "testnet")).toBe(true);
+  });
+
+  it("returns false for an unknown Stellar asset", () => {
+    expect(isSupportedStellarToSolana("UNKNOWN:GXXX", "testnet")).toBe(false);
+  });
+
+  it("accepts CanonicalStellarAsset object", () => {
+    expect(isSupportedStellarToSolana({ code: "XLM" }, "testnet")).toBe(true);
+  });
+});
+
+describe("isSupportedSolanaToStellar", () => {
+  it("returns true for native SOL on testnet", () => {
+    expect(isSupportedSolanaToStellar(NATIVE_SOL_MINT, "testnet")).toBe(true);
+  });
+
+  it("returns true for devnet USDC mint on testnet", () => {
+    expect(isSupportedSolanaToStellar(DEVNET_USDC_MINT, "testnet")).toBe(true);
+  });
+
+  it("returns false for an unknown mint", () => {
+    expect(isSupportedSolanaToStellar("UnknownMint1111111111111111111111111111111", "testnet")).toBe(false);
+  });
+});
+
+describe("assertSupportedStellarToSolana", () => {
+  it("does not throw for a supported asset", () => {
+    expect(() => assertSupportedStellarToSolana("XLM", "testnet")).not.toThrow();
+  });
+
+  it("throws UnsupportedAssetError for an unsupported asset", () => {
+    expect(() => assertSupportedStellarToSolana("UNKN:GXXX", "testnet")).toThrow(UnsupportedAssetError);
+  });
+});
+
+describe("assertSupportedSolanaToStellar", () => {
+  it("does not throw for a supported mint", () => {
+    expect(() => assertSupportedSolanaToStellar(NATIVE_SOL_MINT, "testnet")).not.toThrow();
+  });
+
+  it("throws UnsupportedAssetError for an unsupported mint", () => {
+    expect(() => assertSupportedSolanaToStellar("UnknownMint1111111111111111111111111111111", "testnet")).toThrow(UnsupportedAssetError);
+  });
+});
+
+describe("resolveSolanaAssetFromStellar", () => {
+  it("maps native XLM to native SOL", () => {
+    expect(resolveSolanaAssetFromStellar("XLM", "testnet")).toEqual(NATIVE_SOL_ASSET);
+  });
+
+  it("maps Stellar USDC to devnet USDC mint", () => {
+    const sol = resolveSolanaAssetFromStellar(STELLAR_USDC_KEY, "testnet");
+    expect(sol.mint).toBe(DEVNET_USDC_MINT);
+    expect(sol.symbol).toBe("USDC");
+  });
+
+  it("falls back to native SOL for an unknown asset", () => {
+    expect(resolveSolanaAssetFromStellar("UNKN:GXXX", "testnet")).toEqual(NATIVE_SOL_ASSET);
+  });
+});
+
+describe("resolveStellarAssetFromSolana", () => {
+  it("maps native SOL to native XLM", () => {
+    expect(resolveStellarAssetFromSolana(NATIVE_SOL_MINT, "testnet")).toEqual(NATIVE_STELLAR_ASSET);
+  });
+
+  it("maps devnet USDC mint to Stellar USDC", () => {
+    const stellar = resolveStellarAssetFromSolana(DEVNET_USDC_MINT, "testnet");
+    expect(stellar.code).toBe("USDC");
+    expect(stellar.issuer).toBeTruthy();
+  });
+
+  it("falls back to native XLM for an unknown mint", () => {
+    expect(resolveStellarAssetFromSolana("UnknownMint1111111111111111111111111111111", "testnet")).toEqual(NATIVE_STELLAR_ASSET);
+  });
+});
+
+describe("stellar↔solana round-trips", () => {
+  it("XLM round-trips through solana and back", () => {
+    const sol = resolveSolanaAssetFromStellar("XLM", "testnet");
+    const stellar = resolveStellarAssetFromSolana(sol.mint, "testnet");
+    expect(stellar).toEqual(NATIVE_STELLAR_ASSET);
+  });
+
+  it("USDC round-trips through solana and back", () => {
+    const sol = resolveSolanaAssetFromStellar(STELLAR_USDC_KEY, "testnet");
+    const stellar = resolveStellarAssetFromSolana(sol.mint, "testnet");
+    expect(stellar.code).toBe("USDC");
+  });
+});
+
+describe("getSupportedStellarToSolana / getSupportedSolanaToStellar", () => {
+  it("returns a non-empty list on testnet", () => {
+    expect(getSupportedStellarToSolana("testnet").length).toBeGreaterThan(0);
+    expect(getSupportedSolanaToStellar("testnet").length).toBeGreaterThan(0);
+  });
+
+  it("includes XLM in stellar-to-solana list", () => {
+    expect(getSupportedStellarToSolana("testnet")).toContain("XLM");
+  });
+
+  it("includes native SOL mint in solana-to-stellar list", () => {
+    expect(getSupportedSolanaToStellar("testnet")).toContain(NATIVE_SOL_MINT);
+  });
+});
+
+// ── toCanonicalId ─────────────────────────────────────────────────────────────
+
+describe("toCanonicalId", () => {
+  it("produces chain:native:SYMBOL for assets without an address", () => {
+    expect(toCanonicalId("ethereum", "ETH")).toBe("ethereum:native:ETH");
+    expect(toCanonicalId("stellar", "XLM")).toBe("stellar:native:XLM");
+    expect(toCanonicalId("solana", "SOL")).toBe("solana:native:SOL");
+  });
+
+  it("upper-cases the symbol", () => {
+    expect(toCanonicalId("ethereum", "eth")).toBe("ethereum:native:ETH");
+  });
+
+  it("produces chain:contract:SYMBOL:address for contract assets", () => {
+    const id = toCanonicalId("ethereum", "USDC", "0xA0b86a33e6417C4fd30aD9d05D6b9b7CD6Dd11b");
+    expect(id).toBe("ethereum:contract:USDC:0xa0b86a33e6417c4fd30ad9d05d6b9b7cd6dd11b");
+  });
+
+  it("lower-cases the address in contract canonical ids", () => {
+    const id = toCanonicalId("ethereum", "WETH", "0xC02AAA39B223FE8D0A0E5C4F27EAD9083C756CC2");
+    expect(id).toBe("ethereum:contract:WETH:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+  });
+
+  it("matches the frontend NormalizedAsset.canonicalId format", () => {
+    // Native ETH — same as frontend NATIVE_ASSETS.ethereum.canonicalId
+    expect(toCanonicalId("ethereum", "ETH")).toBe("ethereum:native:ETH");
+    // Native XLM
+    expect(toCanonicalId("stellar", "XLM")).toBe("stellar:native:XLM");
+    // Native SOL
+    expect(toCanonicalId("solana", "SOL")).toBe("solana:native:SOL");
+  });
+
+  it("produces distinct ids for the same symbol on different chains", () => {
+    const ethUsdc = toCanonicalId("ethereum", "USDC", "0xa0b86a33e6417c4fd30ad9d05d6b9b7cd6dd11b");
+    const solUsdc = toCanonicalId("solana", "USDC", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+    expect(ethUsdc).not.toBe(solUsdc);
+  });
+
+  it("unsupported assets that have no mapping fail predictably via assert guards", () => {
+    expect(() => assertSupportedStellarToSolana("UNKNOWN:GXXX", "testnet")).toThrow(UnsupportedAssetError);
+    expect(() => assertSupportedSolanaToStellar("UnknownMint1111111111111111111111111111111", "testnet")).toThrow(UnsupportedAssetError);
+    expect(() => assertSupportedEthToStellar("0x1111111111111111111111111111111111111111", "testnet")).toThrow(UnsupportedAssetError);
+    expect(() => assertSupportedEthToSolana("0x1111111111111111111111111111111111111111", "testnet")).toThrow(UnsupportedAssetError);
   });
 });

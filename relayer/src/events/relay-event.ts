@@ -27,6 +27,26 @@
  * • The entire envelope is JSON-serialisable with no Date or bigint values.
  */
 
+// ── Schema versioning ─────────────────────────────────────────────────────────
+
+/**
+ * Current schema version for {@link NormalizedRelayEvent}.
+ *
+ * Bump this constant whenever a field is added, removed, or changes type in
+ * `NormalizedRelayEvent`.  Listeners must handle events at any version ≤ this
+ * value — use {@link parseLegacyRelayEvent} to upgrade older envelopes to the
+ * current shape before passing them to version-agnostic service logic.
+ *
+ * Version history
+ *  v0 (legacy) — original unversioned shape; no `schemaVersion` field.
+ *  v1 (current) — explicit `schemaVersion: 1` added to every envelope.
+ */
+export const RELAY_EVENT_SCHEMA_VERSION = 1 as const;
+export type RelayEventSchemaVersion = typeof RELAY_EVENT_SCHEMA_VERSION;
+
+/** Schema version produced by the original (pre-versioning) relay listeners. */
+export const LEGACY_RELAY_EVENT_SCHEMA_VERSION = 0 as const;
+
 // ── Source chains ─────────────────────────────────────────────────────────────
 
 export type RelaySourceChain =
@@ -97,8 +117,15 @@ export interface RelayEventRoutingMeta {
  *
  * Required fields are always present. Optional fields are typed `| null` and
  * never `undefined` so the envelope survives JSON round-trips without gaps.
+ *
+ * `schemaVersion` identifies the envelope layout.  Listeners receiving
+ * events from older relayer instances (before versioning was added) may see
+ * events without this field; call {@link parseLegacyRelayEvent} to normalise
+ * them before processing.
  */
 export interface NormalizedRelayEvent {
+  /** Envelope schema version.  See {@link RELAY_EVENT_SCHEMA_VERSION}. */
+  schemaVersion: RelayEventSchemaVersion;
   /** Which chain emitted the raw event. */
   sourceChain: RelaySourceChain;
   /** Semantic classification of the event. */
@@ -123,19 +150,46 @@ export interface NormalizedRelayEvent {
  * Build a `NormalizedRelayEvent` with safe defaults for optional fields.
  * All listeners MUST go through this factory rather than constructing the
  * object literal directly — the factory is the enforcement point for the
- * `observedAt` timestamp and the `routingMeta` default.
+ * `schemaVersion`, `observedAt` timestamp, and the `routingMeta` default.
  */
 export function createRelayEvent(
-  input: Omit<NormalizedRelayEvent, 'observedAt' | 'routingMeta'> &
-    Partial<Pick<NormalizedRelayEvent, 'observedAt' | 'routingMeta'>>
+  input: Omit<NormalizedRelayEvent, 'schemaVersion' | 'observedAt' | 'routingMeta'> &
+    Partial<Pick<NormalizedRelayEvent, 'schemaVersion' | 'observedAt' | 'routingMeta'>>
 ): NormalizedRelayEvent {
   return {
+    schemaVersion: RELAY_EVENT_SCHEMA_VERSION,
     sourceChain: input.sourceChain,
     eventKind: input.eventKind,
     orderId: input.orderId,
     txHash: input.txHash ?? null,
     observedAt: input.observedAt ?? Date.now(),
     routingMeta: input.routingMeta ?? {},
+  };
+}
+
+/**
+ * Upgrade a legacy (v0) relay event envelope — one produced before schema
+ * versioning was introduced — to the current {@link NormalizedRelayEvent} shape.
+ *
+ * Pass any object that satisfies the pre-version contract (all fields present
+ * except `schemaVersion`).  The returned event carries
+ * `schemaVersion: RELAY_EVENT_SCHEMA_VERSION` and is safe to process with
+ * version-aware consumers.
+ *
+ * Use this at deserialization boundaries (e.g. when reading from a message
+ * queue that may contain events emitted by an older relayer instance).
+ */
+export function parseLegacyRelayEvent(
+  raw: Omit<NormalizedRelayEvent, 'schemaVersion'> & { schemaVersion?: number }
+): NormalizedRelayEvent {
+  return {
+    schemaVersion: RELAY_EVENT_SCHEMA_VERSION,
+    sourceChain: raw.sourceChain,
+    eventKind: raw.eventKind,
+    orderId: raw.orderId,
+    txHash: raw.txHash ?? null,
+    observedAt: raw.observedAt,
+    routingMeta: raw.routingMeta ?? {},
   };
 }
 
@@ -269,7 +323,15 @@ export function isValidRelaySourceChain(v: unknown): v is RelaySourceChain {
   return typeof v === 'string' && (VALID_CHAINS as string[]).includes(v);
 }
 
-/** True when the object satisfies the NormalizedRelayEvent contract. */
+/**
+ * True when the object satisfies the `NormalizedRelayEvent` contract.
+ *
+ * `schemaVersion` may be absent (legacy v0 events) or a number — both are
+ * accepted so this guard can be used at deserialization boundaries that may
+ * receive events from older relayer instances.  Use
+ * {@link parseLegacyRelayEvent} to normalise v0 events before passing them
+ * to version-aware processing logic.
+ */
 export function isNormalizedRelayEvent(v: unknown): v is NormalizedRelayEvent {
   if (!v || typeof v !== 'object') return false;
   const ev = v as Record<string, unknown>;
@@ -281,6 +343,7 @@ export function isNormalizedRelayEvent(v: unknown): v is NormalizedRelayEvent {
     (ev.txHash === null || typeof ev.txHash === 'string') &&
     typeof ev.observedAt === 'number' &&
     ev.routingMeta !== null &&
-    typeof ev.routingMeta === 'object'
+    typeof ev.routingMeta === 'object' &&
+    (ev.schemaVersion === undefined || typeof ev.schemaVersion === 'number')
   );
 }
