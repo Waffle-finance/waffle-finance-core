@@ -37,7 +37,7 @@ export class StaleCleanupService {
       const batch = stale.slice(0, this.batchSize);
 
       for (const order of batch) {
-        await this.repo.archiveOrder(order.publicId);
+        await this.repo.abandonOrder(order.publicId, "stale:no_src_lock", "stale-cleanup");
       }
 
       const archivedCount = batch.length;
@@ -49,7 +49,7 @@ export class StaleCleanupService {
       if (archivedCount > 0) {
         this.log.info(
           { archivedCount, retentionWindowSeconds: this.retentionWindowSeconds },
-          "stale order cleanup archived records"
+          "stale order cleanup abandoned records"
         );
       }
 

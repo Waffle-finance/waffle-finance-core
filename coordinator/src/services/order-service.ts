@@ -19,6 +19,9 @@ import {
   ordersExpiredSkippedTotal,
   ordersExpiredTerminalSkippedTotal,
   reconciliationEventsSkipped,
+  recordPhaseDwell,
+  recordSwapCompletion,
+  refreshPhaseRatios,
 } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
@@ -44,18 +47,50 @@ export class OrderValidationError extends Error {}
 /* ── Observability helpers ───────────────────────────────────────────────── */
 
 /**
+ * Module-level snapshot of active-order counts per (direction, phase).
+ *
+ * Maintained synchronously alongside the `coordinator_order_current_state`
+ * gauge so `refreshPhaseRatios` can compute normalised ratios on the hot
+ * path without hitting the DB.  Only non-terminal phases are tracked here;
+ * terminal phases don't appear in phase-ratio calculations.
+ *
+ * Key format: `${direction}:${phase}`
+ */
+const _phaseCountSnapshot = new Map<string, number>();
+
+function _snapshotKey(direction: string, phase: string): string {
+  return `${direction}:${phase}`;
+}
+
+function _incrementPhaseSnapshot(direction: string, phase: string, delta: number): void {
+  const key = _snapshotKey(direction, phase);
+  _phaseCountSnapshot.set(key, Math.max((_phaseCountSnapshot.get(key) ?? 0) + delta, 0));
+}
+
+/** Build a per-phase count map for one direction from the snapshot. */
+function _directionCounts(direction: string): Record<string, number> {
+  const PHASES = ['announced', 'src_locked', 'dst_locked', 'secret_revealed', 'expired'];
+  const out: Record<string, number> = {};
+  for (const p of PHASES) {
+    out[p] = _phaseCountSnapshot.get(_snapshotKey(direction, p)) ?? 0;
+  }
+  return out;
+}
+
  * Record lifecycle transition metrics for an order moving from one state
  * to another.  Updates:
  *  - `orderLifecycleTransitions` counter (direction, from, to)
  *  - `orderStateDuration` histogram for the time spent in the previous state
  *  - `orderCurrentState` gauge (+1 for the new state, -1 for the old state)
  *  - `ordersTotal` counter (cumulative count per status)
+ *  - `orderPhaseDwellSeconds` / `orderPhaseTransitionSeconds` histograms
+ *  - `orderPhaseRatio` gauges (normalised distribution across active phases)
  */
 function recordTransition(
   direction: string,
   from: OrderStatus,
   to: OrderStatus,
-  updatedAtSeconds: number
+  updatedAtSeconds: number,
 ): void {
   // Per-transition counter.
   orderLifecycleTransitions.inc({ direction, from, to });
@@ -66,9 +101,17 @@ function recordTransition(
   // `updatedAt` as a proxy for when the order entered `from`.
   orderStateDuration.observe({ direction, state: from }, Math.max(Date.now() / 1000 - updatedAtSeconds, 0));
 
+  // Phase-distribution histograms — record dwell time and transition latency.
+  recordPhaseDwell(direction, from, to, updatedAtSeconds);
+
   // Update instantaneous state distribution.
   orderCurrentState.dec({ direction, state: from });
   orderCurrentState.inc({ direction, state: to });
+
+  // Update module-level snapshot and recompute normalised phase ratios.
+  _incrementPhaseSnapshot(direction, from, -1);
+  _incrementPhaseSnapshot(direction, to, +1);
+  refreshPhaseRatios(direction, _directionCounts(direction));
 }
 
 export class OrderService {
@@ -132,6 +175,10 @@ export class OrderService {
     ordersTotal.inc({ status: "announced", direction: order.direction });
     orderLifecycleTransitions.inc({ direction: order.direction, from: "none", to: "announced" });
     orderCurrentState.inc({ direction: order.direction, state: "announced" });
+
+    // Track the new order in the module-level phase snapshot and refresh ratios.
+    _incrementPhaseSnapshot(order.direction, "announced", +1);
+    refreshPhaseRatios(order.direction, _directionCounts(order.direction));
     
     // Invalidate cache for both source and destination addresses
     this.historyCache.invalidateAddress(order.srcAddress);
@@ -460,6 +507,12 @@ export class OrderService {
     // ── Observability ───────────────────────────────────────────────────
     recordTransition(order.direction, order.status, status, order.updatedAt);
     ordersTotal.inc({ status, direction: order.direction });
+
+    // Record end-to-end swap completion time when an order reaches a terminal
+    // state. `order.createdAt` is unix seconds (as stored in SQLite).
+    if (status === "completed" || status === "refunded" || status === "failed") {
+      recordSwapCompletion(order.direction, status, order.createdAt);
+    }
 
     // ── SSE broadcast ───────────────────────────────────────────────────
     if (status === "refunded") {

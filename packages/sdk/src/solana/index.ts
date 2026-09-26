@@ -60,6 +60,25 @@ import {
   hex32ToBuffer,
 } from "../shared-utils/index.js";
 
+// Account validation utilities (#715).
+import {
+  validateCreateOrderParams,
+  validateClaimOrderParams,
+  validateRefundOrderParams,
+  AccountValidationError,
+} from "./account-validation.js";
+
+export {
+  validateCreateOrderParams,
+  validateClaimOrderParams,
+  validateRefundOrderParams,
+  AccountValidationError,
+} from "./account-validation.js";
+export type {
+  AccountValidationCode,
+  AccountValidationResult,
+} from "./account-validation.js";
+
 /** 0x-prefixed hex string (mirrors viem's HexString). */
 type HexString = `0x${string}`;
 
@@ -72,6 +91,15 @@ export interface SolanaHTLCClientOptions {
   programId: string;
   /** Commitment level for reads/confirmations. */
   commitment?: Commitment;
+  /**
+   * When true, run pre-submission account metadata validation before sending
+   * any transaction (#715).  Throws `AccountValidationError` when the
+   * on-chain account state would cause the transaction to fail.
+   *
+   * Default: false (backward-compatible).
+   * Recommended: true for production to catch misconfigured accounts early.
+   */
+  validateBeforeSubmit?: boolean;
 }
 
 export interface SolanaCreateOrderInput {
@@ -380,11 +408,13 @@ export class SolanaHTLCClient {
   private readonly commitment: Commitment;
   private readonly simulation: boolean;
   private readonly programPk: PublicKey | null;
+  private readonly validateBeforeSubmit: boolean;
 
   constructor(opts: SolanaHTLCClientOptions) {
     this.programId = opts.programId;
     this.commitment = opts.commitment ?? "confirmed";
     this.connection = new Connection(opts.rpcUrl, this.commitment);
+    this.validateBeforeSubmit = opts.validateBeforeSubmit ?? false;
 
     // Enter simulation mode only when no real program id is configured.
     this.simulation = opts.programId === "PLACEHOLDER" || opts.programId === "";
@@ -449,6 +479,9 @@ export class SolanaHTLCClient {
   /**
    * Build, sign, and submit a `create_order` instruction.
    *
+   * When `validateBeforeSubmit` is enabled, validates all addresses and
+   * detects duplicate orders before building the transaction (#715).
+   *
    * @returns The transaction signature and the deterministic order id
    *          (= PDA address derived from the hashlock).
    */
@@ -467,6 +500,31 @@ export class SolanaHTLCClient {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const timelockAbsolute = nowSeconds + input.timelockSeconds;
 
+    // ── Pre-submission account validation (#715) ──────────────────────────
+    if (this.validateBeforeSubmit) {
+      const validation = await validateCreateOrderParams(this.connection, programPk, {
+        sender:        input.sender,
+        beneficiary:   input.beneficiary,
+        refundAddress: input.refundAddress,
+        mint:          input.mint,
+        hashlockBytes,
+      });
+      if (!validation.valid) {
+        const first = validation.errors[0];
+        throw new AccountValidationError(
+          first.code,
+          `create_order validation failed: ${first.message}` +
+          (validation.errors.length > 1
+            ? ` (and ${validation.errors.length - 1} more error(s))`
+            : ""),
+          first.context
+        );
+      }
+      for (const w of validation.warnings) {
+        console.warn("[SolanaHTLCClient] createOrder validation warning:", w);
+      }
+    }
+
     const { instruction, orderPda } = buildCreateOrderInstruction(programPk, {
       payer:         signer.publicKey,
       beneficiary:   new PublicKey(input.beneficiary),
@@ -484,6 +542,9 @@ export class SolanaHTLCClient {
 
   /**
    * Reveal the preimage on-chain to claim the locked funds.
+   *
+   * When `validateBeforeSubmit` is enabled, verifies the escrow account
+   * exists, is owned by the program, and has status=Active (#715).
    *
    * @param orderId    Base-58 PDA address of the order to claim.
    * @param preimage   The secret preimage (0x-prefixed hex, 32 bytes).
@@ -504,6 +565,24 @@ export class SolanaHTLCClient {
     const orderPda = new PublicKey(orderId);
     const preimageBytes = hex32ToBuffer(preimage, "preimage");
 
+    // ── Pre-submission account validation (#715) ──────────────────────────
+    if (this.validateBeforeSubmit) {
+      const validation = await validateClaimOrderParams(this.connection, programPk, {
+        orderId,
+      });
+      if (!validation.valid) {
+        const first = validation.errors[0];
+        throw new AccountValidationError(
+          first.code,
+          `claim_order validation failed: ${first.message}`,
+          first.context
+        );
+      }
+      for (const w of validation.warnings) {
+        console.warn("[SolanaHTLCClient] claimOrder validation warning:", w);
+      }
+    }
+
     const ix = buildClaimOrderInstruction(programPk, {
       claimer:            signer.publicKey,
       orderPda,
@@ -520,6 +599,9 @@ export class SolanaHTLCClient {
   /**
    * Reclaim locked funds after the timelock has expired.
    *
+   * When `validateBeforeSubmit` is enabled, verifies the escrow account
+   * exists and has not already been refunded (#715).
+   *
    * @param orderId  Base-58 PDA address.
    * @param signer   Wallet controlling the refund_address stored in the order.
    */
@@ -535,6 +617,24 @@ export class SolanaHTLCClient {
 
     const programPk = this.programPk!;
     const orderPda = new PublicKey(orderId);
+
+    // ── Pre-submission account validation (#715) ──────────────────────────
+    if (this.validateBeforeSubmit) {
+      const validation = await validateRefundOrderParams(this.connection, programPk, {
+        orderId,
+      });
+      if (!validation.valid) {
+        const first = validation.errors[0];
+        throw new AccountValidationError(
+          first.code,
+          `refund_order validation failed: ${first.message}`,
+          first.context
+        );
+      }
+      for (const w of validation.warnings) {
+        console.warn("[SolanaHTLCClient] refundOrder validation warning:", w);
+      }
+    }
 
     const ix = buildRefundOrderInstruction(programPk, {
       refunder:      signer.publicKey,

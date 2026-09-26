@@ -6,6 +6,7 @@ import { useSolanaWallet } from './hooks/useSolanaWallet'
 import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
+import { useFocusTrap } from './hooks/useFocusTrap'
 import { selectIsMainnetEnabled, selectResolvedNetworkMode, selectCurrentEthereumNetwork, selectCurrentStellarNetwork, selectApiBaseUrl, selectIntroAnimationEnabled, selectDarkVeilEnabled } from './config/selectors';
 
 // Non-critical components are lazy-loaded so the initial bridge form bundle
@@ -35,6 +36,12 @@ function App() {
   const [activeTab, setActiveTab] = useState<'bridge' | 'history'>('bridge');
   const introAllowed = selectIntroAnimationEnabled();
   const darkVeilAllowed = selectDarkVeilEnabled();
+
+  // Ref for the wallet dropdown panel — used by useFocusTrap and the trigger button.
+  const walletMenuRef = useRef<HTMLDivElement>(null);
+  const walletTriggerRef = useRef<HTMLButtonElement>(null);
+  const walletMenuId = 'wallet-menu-dialog';
+  const walletMenuTitleId = 'wallet-menu-title';
 
   const [showIntro, setShowIntro] = useState(() => {
     if (!introAllowed) return false;
@@ -112,6 +119,20 @@ function App() {
       window.clearTimeout(removeTimer);
     };
   }, [showIntro, introLogoReady]);
+
+  // Focus-trap the wallet dropdown while it is open; Escape closes it.
+  useFocusTrap(walletMenuRef, showWalletMenu);
+  useEffect(() => {
+    if (!showWalletMenu) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowWalletMenu(false);
+        walletTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [showWalletMenu]);
 
   // MetaMask connection is handled by useEthereumWallet hook
 

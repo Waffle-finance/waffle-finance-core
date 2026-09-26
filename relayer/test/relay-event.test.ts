@@ -22,6 +22,9 @@ import {
   isNormalizedRelayEvent,
   isValidRelayEventKind,
   isValidRelaySourceChain,
+  parseLegacyRelayEvent,
+  RELAY_EVENT_SCHEMA_VERSION,
+  LEGACY_RELAY_EVENT_SCHEMA_VERSION,
   type NormalizedRelayEvent,
 } from '../src/events/relay-event.js';
 
@@ -282,6 +285,102 @@ describe('isValidRelaySourceChain', () => {
   it('returns false for unknown chains', () => {
     expect(isValidRelaySourceChain('bitcoin')).toBe(false);
     expect(isValidRelaySourceChain('')).toBe(false);
+  });
+});
+
+// ── Schema versioning ─────────────────────────────────────────────────────────
+
+describe('event schema versioning', () => {
+  it('createRelayEvent stamps schemaVersion on every event', () => {
+    const ev = createRelayEvent({
+      sourceChain: 'ethereum',
+      eventKind: 'order_created',
+      orderId: 'order-v',
+      txHash: '0xabc',
+    });
+    expect(ev.schemaVersion).toBe(RELAY_EVENT_SCHEMA_VERSION);
+    expect(ev.schemaVersion).toBe(1);
+  });
+
+  it('all chain-specific factories inherit the current schemaVersion', () => {
+    const events = [
+      createEthOrderCreatedEvent({ orderId: '1', txHash: '0x', blockNumber: 1, hashlock: '0x', timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false }),
+      createEthOrderClaimedEvent({ orderId: '2', txHash: '0x', blockNumber: 1, amount: '0', resolverAddress: '0x' }),
+      createEthOrderRefundedEvent({ orderId: '3', txHash: '0x', blockNumber: 1, amount: '0' }),
+      createStellarSettlementEvent({ orderId: '4', txHash: 'tx', ledgerSequence: 1 }),
+      createSolanaOrderEvent({ orderId: '5', txHash: 'tx', slot: 1, eventKind: 'funds_locked' }),
+    ];
+    for (const ev of events) {
+      expect(ev.schemaVersion).toBe(RELAY_EVENT_SCHEMA_VERSION);
+    }
+  });
+
+  it('LEGACY_RELAY_EVENT_SCHEMA_VERSION is 0', () => {
+    expect(LEGACY_RELAY_EVENT_SCHEMA_VERSION).toBe(0);
+  });
+
+  it('parseLegacyRelayEvent upgrades a v0 event to the current schema version', () => {
+    const legacy = {
+      sourceChain: 'ethereum' as const,
+      eventKind: 'order_created' as const,
+      orderId: 'wf_0xlegacy',
+      txHash: '0xold',
+      observedAt: 1_000_000,
+      routingMeta: { blockNumber: 5 },
+    };
+
+    const upgraded = parseLegacyRelayEvent(legacy);
+
+    expect(upgraded.schemaVersion).toBe(RELAY_EVENT_SCHEMA_VERSION);
+    expect(upgraded.sourceChain).toBe('ethereum');
+    expect(upgraded.eventKind).toBe('order_created');
+    expect(upgraded.orderId).toBe('wf_0xlegacy');
+    expect(upgraded.txHash).toBe('0xold');
+    expect(upgraded.observedAt).toBe(1_000_000);
+    expect(upgraded.routingMeta.blockNumber).toBe(5);
+  });
+
+  it('parseLegacyRelayEvent passes through events that already carry schemaVersion', () => {
+    const modern = createEthOrderCreatedEvent({
+      orderId: 'w', txHash: '0x', blockNumber: 1, hashlock: '0x',
+      timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false,
+    });
+    const result = parseLegacyRelayEvent(modern);
+    expect(result.schemaVersion).toBe(RELAY_EVENT_SCHEMA_VERSION);
+    expect(result.orderId).toBe('w');
+  });
+
+  it('isNormalizedRelayEvent accepts a legacy event missing schemaVersion', () => {
+    const legacy = {
+      sourceChain: 'solana',
+      eventKind: 'order_claimed',
+      orderId: 'legacy-id',
+      txHash: null,
+      observedAt: Date.now(),
+      routingMeta: {},
+    };
+    expect(isNormalizedRelayEvent(legacy)).toBe(true);
+  });
+
+  it('isNormalizedRelayEvent accepts a versioned event with schemaVersion=1', () => {
+    const ev = createEthOrderCreatedEvent({
+      orderId: '1', txHash: '0x', blockNumber: 1, hashlock: '0x',
+      timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false,
+    });
+    expect(isNormalizedRelayEvent(ev)).toBe(true);
+  });
+
+  it('isNormalizedRelayEvent rejects an event with a non-number schemaVersion', () => {
+    const bad = {
+      schemaVersion: 'v1',
+      sourceChain: 'ethereum',
+      eventKind: 'order_created',
+      orderId: 'x',
+      txHash: null,
+      observedAt: Date.now(),
+      routingMeta: {},
+    };
+    expect(isNormalizedRelayEvent(bad)).toBe(false);
   });
 });
 

@@ -708,6 +708,18 @@ export class SorobanListener {
           blockNumber: ev.ledger,
           timelock: decoded.timelock,
         });
+        this.log.info({
+          audit: "src_lock",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          timelock: decoded.timelock,
+          outcome: "src_locked",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order source-locked — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "src_lock");
         return true;
@@ -760,6 +772,17 @@ export class SorobanListener {
             decoded.preimage,
             ev.txHash
           );
+          this.log.info({
+            audit: "settle",
+            chain: "stellar",
+            publicId: byHash.publicId,
+            sorobanOrderId: decoded.orderId.toString(),
+            hashlockPresent: decoded.hashlock.length > 0,
+            outcome: "settled",
+            ledger: ev.ledger,
+            txHash: ev.txHash,
+            path,
+          }, "Soroban order settled — settlement trace");
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "secret_reveal");
           return true;
@@ -782,6 +805,17 @@ export class SorobanListener {
           decoded.preimage,
           ev.txHash
         );
+        this.log.info({
+          audit: "settle",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          outcome: "settled",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order settled — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "secret_reveal");
         return true;
@@ -830,6 +864,18 @@ export class SorobanListener {
           });
           if (!decision.shouldApply) return false;
           await this.orders.markStatus(byHash.publicId, "refunded");
+          this.log.info({
+            audit: "refund",
+            chain: "stellar",
+            publicId: byHash.publicId,
+            sorobanOrderId: decoded.orderId.toString(),
+            hashlockPresent: decoded.hashlock.length > 0,
+            timelockExpired: true,
+            outcome: "refunded",
+            ledger: ev.ledger,
+            txHash: ev.txHash,
+            path,
+          }, "Soroban order refunded — settlement trace");
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "refund");
           return true;
@@ -848,6 +894,18 @@ export class SorobanListener {
         });
         if (!decision.shouldApply) return false;
         await this.orders.markStatus(order.publicId, "refunded");
+        this.log.info({
+          audit: "refund",
+          chain: "stellar",
+          publicId: order.publicId,
+          sorobanOrderId: decoded.orderId.toString(),
+          hashlockPresent: decoded.hashlock.length > 0,
+          timelockExpired: true,
+          outcome: "refunded",
+          ledger: ev.ledger,
+          txHash: ev.txHash,
+          path,
+        }, "Soroban order refunded — settlement trace");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "refund");
         return true;

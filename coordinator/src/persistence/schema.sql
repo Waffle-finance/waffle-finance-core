@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS orders (
     public_id             TEXT    NOT NULL UNIQUE,
 
     direction             TEXT    NOT NULL CHECK (direction IN ('eth_to_xlm', 'xlm_to_eth', 'eth_to_sol', 'sol_to_eth')),
-    status                TEXT    NOT NULL CHECK (status IN ('announced', 'src_locked', 'dst_locked', 'secret_revealed', 'completed', 'refunded', 'failed', 'expired')),
+    status                TEXT    NOT NULL CHECK (status IN ('announced', 'src_locked', 'dst_locked', 'secret_revealed', 'completed', 'refunded', 'failed', 'expired', 'cancelled', 'abandoned')),
 
     -- Cross-chain link.
     hashlock              TEXT    NOT NULL,    -- 0x-prefixed 32-byte hex.
@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS orders (
     last_eth_block        INTEGER,
     last_soroban_ledger   INTEGER,
     last_solana_slot      INTEGER,
+
+    -- Reason this order was cancelled or abandoned (see 012_order_cancellation.sql).
+    cancellation_reason   TEXT,
 
     created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),

@@ -37,6 +37,8 @@ import {
 // The orchestration layer already throws HTLCError for all orchestrated calls.
 // This classifier handles any residual non-orchestrated errors (e.g. getOrder,
 // construction-time failures) that slip through as plain Errors.
+//
+// Classifier order matters: more-specific patterns appear before catch-alls.
 
 function classifySorobanError(err: unknown): HTLCError {
   if (err instanceof HTLCError) return err;
@@ -44,15 +46,45 @@ function classifySorobanError(err: unknown): HTLCError {
   const msg = err instanceof Error ? err.message : String(err);
   const lc = msg.toLowerCase();
 
-  if (lc.includes("simulation failed") || lc.includes("simulation rejected")) {
+  // Network / RPC connectivity failures — always retryable transient errors.
+  if (
+    lc.includes("timeout") ||
+    lc.includes("etimedout") ||
+    lc.includes("econnreset") ||
+    lc.includes("socket hang up") ||
+    lc.includes("network error") ||
+    lc.includes("connection refused") ||
+    lc.includes("econnrefused")
+  ) {
+    return new HTLCError({
+      code: "chain_error",
+      message: "Soroban RPC timeout or connectivity error: " + msg,
+      retryable: true,
+      cause: err,
+    });
+  }
+
+  // Soroban contract host errors (HostError, WasmVm, invoke failures).
+  // These indicate the contract itself rejected the invocation — not retryable.
+  if (
+    lc.includes("simulation failed") ||
+    lc.includes("simulation rejected") ||
+    lc.includes("host error") ||
+    lc.includes("wasm vm") ||
+    lc.includes("wasmvm") ||
+    lc.includes("invoke host") ||
+    lc.includes("hostenvcatch") ||
+    lc.includes("contracterror")
+  ) {
     return new HTLCError({
       code: "simulation_failed",
-      message: "Soroban simulation rejected the call: " + msg,
+      message: "Soroban simulation or contract host error: " + msg,
       retryable: false,
       cause: err,
     });
   }
 
+  // Preimage / hashlock mismatch — logic error, never retryable.
   if (lc.includes("hashlock") || lc.includes("preimage")) {
     return new HTLCError({
       code: "invalid_preimage",
@@ -62,6 +94,7 @@ function classifySorobanError(err: unknown): HTLCError {
     });
   }
 
+  // Timelock not yet expired — caller must wait, never retryable immediately.
   if (lc.includes("timelock")) {
     return new HTLCError({
       code: "timelock_not_expired",
@@ -71,19 +104,68 @@ function classifySorobanError(err: unknown): HTLCError {
     });
   }
 
-  if (lc.includes("submit failed") || lc.includes("tx_rejected") || lc.includes("error")) {
+  // Bad auth or mis-signed transaction — key mismatch, not retryable.
+  if (
+    lc.includes("bad auth") ||
+    lc.includes("tx_bad_auth") ||
+    lc.includes("txbadauth") ||
+    (lc.includes("signature") && lc.includes("invalid"))
+  ) {
     return new HTLCError({
       code: "tx_rejected",
-      message: "Soroban transaction was rejected: " + msg,
-      retryable: lc.includes("timeout") || lc.includes("network"),
+      message: "Soroban transaction rejected: bad auth or invalid signature. " +
+        "Verify the signing key matches the source account: " + msg,
+      retryable: false,
       cause: err,
     });
   }
 
+  // Unknown method / function not found — likely a contract ID mismatch.
+  if (
+    lc.includes("function not found") ||
+    lc.includes("unknown method") ||
+    lc.includes("method not found") ||
+    lc.includes("no such method") ||
+    lc.includes("no such function")
+  ) {
+    return new HTLCError({
+      code: "tx_rejected",
+      message: "Soroban contract method not found — check the contract ID and ABI: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
+  // Malformed XDR or data decode failures.
+  if (
+    lc.includes("xdr decode") ||
+    lc.includes("malformed") ||
+    (lc.includes("parse") && lc.includes("error")) ||
+    lc.includes("decode error")
+  ) {
+    return new HTLCError({
+      code: "tx_rejected",
+      message: "Soroban XDR decode or data malformed — check transaction construction: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
+  // Explicit submission rejection codes.
+  if (lc.includes("submit failed") || lc.includes("tx_rejected")) {
+    return new HTLCError({
+      code: "tx_rejected",
+      message: "Soroban transaction was rejected by the network: " + msg,
+      retryable: false,
+      cause: err,
+    });
+  }
+
+  // Fallback: unknown Soroban or chain error.
   return new HTLCError({
     code: "chain_error",
     message: "Soroban chain error: " + msg,
-    retryable: lc.includes("timeout") || lc.includes("network"),
+    retryable: false,
     cause: err,
   });
 }
