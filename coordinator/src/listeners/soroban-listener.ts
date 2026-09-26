@@ -609,6 +609,7 @@ export class SorobanListener {
         });
         if (!decision.shouldApply) return false;
         await this.orders.recordSrcLock({
+          actor: "soroban_listener",
           publicId: order.publicId,
           orderId: decoded.orderId.toString(),
           txHash: ev.txHash,
@@ -665,7 +666,9 @@ export class SorobanListener {
           await this.orders.recordSecret(
             byHash.publicId,
             decoded.preimage,
-            ev.txHash
+            ev.txHash,
+            null,
+            "soroban_listener"
           );
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "secret_reveal");
@@ -687,7 +690,9 @@ export class SorobanListener {
         await this.orders.recordSecret(
           order.publicId,
           decoded.preimage,
-          ev.txHash
+          ev.txHash,
+          null,
+          "soroban_listener"
         );
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "secret_reveal");
@@ -736,7 +741,7 @@ export class SorobanListener {
             outcome: decision.reason,
           });
           if (!decision.shouldApply) return false;
-          await this.orders.markStatus(byHash.publicId, "refunded");
+          await this.orders.markStatus(byHash.publicId, "refunded", "soroban_listener");
           this.markProcessed(decoded.kind, ev.txHash, discriminator);
           this.onApplied(path, "refund");
           return true;
@@ -754,7 +759,7 @@ export class SorobanListener {
           outcome: decision.reason,
         });
         if (!decision.shouldApply) return false;
-        await this.orders.markStatus(order.publicId, "refunded");
+        await this.orders.markStatus(order.publicId, "refunded", "soroban_listener");
         this.markProcessed(decoded.kind, ev.txHash, discriminator);
         this.onApplied(path, "refund");
         return true;

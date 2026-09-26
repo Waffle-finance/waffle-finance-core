@@ -460,6 +460,20 @@ function openSqliteDatabase(url: string): Database {
   const schema = readFileSync(resolve(__dirname, "schema.sql"), "utf8");
   db.exec(schema);
 
+  // Verify that WAL mode was successfully activated.  PRAGMA journal_mode=WAL
+  // is a no-op on network filesystems (NFS, some Docker volume mounts) and
+  // returns the fallback mode instead.  We fail fast here so the operator
+  // sees a clear error rather than silent read/write lock contention (#747).
+  const walCheck = db.prepare("PRAGMA journal_mode").get() as { journal_mode: string } | undefined;
+  if (walCheck && walCheck.journal_mode !== "wal") {
+    throw new FatalStartupError(
+      `SQLite WAL mode could not be activated — journal_mode is "${walCheck.journal_mode}". ` +
+      `WAL mode is required for concurrent read/write access. ` +
+      `Ensure the database file is on a local filesystem that supports WAL (not NFS or some Docker volume types). ` +
+      `See coordinator/docs/database-durability.md for details.`
+    );
+  }
+
   // Apply incremental column additions for pre-existing databases.
   // schema.sql only creates tables IF NOT EXISTS, so new columns must be
   // applied separately on upgrade paths.  Each ALTER TABLE is wrapped in a

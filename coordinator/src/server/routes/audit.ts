@@ -29,6 +29,7 @@ import { Router, type Request, type Response } from "express";
 import type { Logger } from "pino";
 import type { AuditRepository } from "../../audit/audit-repo.js";
 import type { AuditExporter } from "../../audit/audit-exporter.js";
+import type { OrdersRepository } from "../../persistence/orders-repo.js";
 import { AUDIT_EVENT_TYPES, type AuditEventType } from "../../audit/audit-log.js";
 import { validationError } from "../errors.js";
 
@@ -116,6 +117,7 @@ export function auditRoutes(
   repo: AuditRepository,
   exporter: AuditExporter,
   log: Logger,
+  ordersRepo?: OrdersRepository,
 ): Router {
   const router = Router();
 
@@ -209,6 +211,66 @@ export function auditRoutes(
         entries,
         count: entries.length,
       });
+    } catch (err) {
+      log.error({ err }, 'audit timeline query failed');
+      res.status(500).json({ error: 'internal_error', message: 'audit timeline query failed' });
+    }
+  });
+
+  /**
+   * GET /api/audit/orders/:orderId/timeline
+   *
+   * Unified mutation timeline for a specific order, merging both the
+   * high-level `audit_log` entries (service-level, one per state transition)
+   * and the lower-level `order_events` rows (repository-level, includes
+   * no-op records and actor identity).
+   *
+   * The result is sorted oldest-first by timestamp so operators can read
+   * through the exact sequence of events that led to the current state.
+   *
+   * Each entry carries a `source` field:
+   *   "audit"  — from audit_log (carries requestId, actor from detail field)
+   *   "event"  — from order_events (carries actor, outcome, txHash, blockNumber)
+   *
+   * Response 200:
+   *   { orderId, count, entries: [{ source, eventType, createdAt, payload }] }
+   */
+  router.get('/audit/orders/:orderId/timeline', async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { orderId } = req.params;
+      if (!orderId || typeof orderId !== 'string') {
+        res.status(400).json({ error: 'bad_request', message: 'orderId is required' });
+        return;
+      }
+
+      // Fetch from both sources in parallel.
+      const [auditEntries, repoEvents] = await Promise.all([
+        repo.forOrder(orderId),
+        ordersRepo ? ordersRepo.findTransitionEvents(orderId) : Promise.resolve([]),
+      ]);
+
+      // Normalise into a common shape and sort oldest-first.
+      const auditRows = auditEntries.map(e => ({
+        source: 'audit' as const,
+        eventType: e.eventType,
+        createdAt: e.createdAt,
+        payload: JSON.parse(e.payloadJson) as Record<string, unknown>,
+        requestId: e.requestId,
+      }));
+
+      const eventRows = repoEvents.map(e => ({
+        source: 'event' as const,
+        eventType: e.eventType,
+        createdAt: e.createdAt,
+        payload: e.payload,
+        requestId: null,
+      }));
+
+      const merged = [...auditRows, ...eventRows].sort(
+        (a, b) => a.createdAt - b.createdAt
+      );
+
+      res.json({ orderId, count: merged.length, entries: merged });
     } catch (err) {
       log.error({ err }, 'audit timeline query failed');
       res.status(500).json({ error: 'internal_error', message: 'audit timeline query failed' });

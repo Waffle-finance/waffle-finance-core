@@ -13,18 +13,19 @@
  *
  * API error contract (documented for frontend and integrators):
  *
- * | code                 | HTTP | description                                      |
- * | -------------------- | ---- | ------------------------------------------------ |
- * | validation_error     | 400  | Request body or query param failed schema check  |
- * | order_validation_error | 400 | Order-level business rule violation             |
- * | invalid_cursor       | 400  | Pagination cursor is malformed or expired        |
- * | not_found            | 404  | Requested resource does not exist               |
- * | not_revealed         | 404  | Secret has not been revealed for this order     |
- * | unknown_order        | 404  | No order matches the supplied ID                |
- * | unauthorized         | 401  | Missing or malformed authorization header       |
- * | forbidden            | 403  | Valid credentials but insufficient permissions  |
- * | too_many_requests    | 429  | Rate limit exceeded; see Retry-After header     |
- * | internal_error       | 500  | Unexpected server error                         |
+ * | code                   | HTTP | description                                      |
+ * | ---------------------- | ---- | ------------------------------------------------ |
+ * | validation_error       | 400  | Request body or query param failed schema check  |
+ * | order_validation_error | 400  | Order-level business rule violation              |
+ * | order_conflict         | 409  | Concurrent write conflict (optimistic lock fail) |
+ * | invalid_cursor         | 400  | Pagination cursor is malformed or expired        |
+ * | not_found              | 404  | Requested resource does not exist                |
+ * | not_revealed           | 404  | Secret has not been revealed for this order      |
+ * | unknown_order          | 404  | No order matches the supplied ID                 |
+ * | unauthorized           | 401  | Missing or malformed authorization header        |
+ * | forbidden              | 403  | Valid credentials but insufficient permissions   |
+ * | too_many_requests      | 429  | Rate limit exceeded; see Retry-After header      |
+ * | internal_error         | 500  | Unexpected server error                          |
  */
 
 export interface ApiErrorBody {
@@ -40,6 +41,16 @@ export function validationError(details: unknown[], message = "Request validatio
 
 export function orderValidationError(message: string): ApiErrorBody {
   return { error: "order_validation_error", message };
+}
+
+/**
+ * Returned with HTTP 409 when a concurrent write conflict is detected — for
+ * example two resolvers racing on `dst-locked` for the same order, or an
+ * optimistic-concurrency status mismatch.  Clients should treat this as
+ * retryable after re-fetching the current order state.
+ */
+export function conflictError(message: string): ApiErrorBody {
+  return { error: "order_conflict", message, retryable: true };
 }
 
 export function invalidCursorError(message = "The provided cursor is invalid or expired"): ApiErrorBody {

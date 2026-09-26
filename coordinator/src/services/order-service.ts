@@ -39,6 +39,31 @@ import {
 export { announceSchema };
 export type { AnnounceInput };
 
+/**
+ * Identifies the service or operation that triggered an order mutation.
+ *
+ * Used in `audit_log` and `order_events` rows so incident responders can
+ * reconstruct exactly which component caused each state change (#746).
+ *
+ *   ethereum_listener  — live EthereumListener event
+ *   soroban_listener   — live SorobanListener event
+ *   solana_listener    — live SolanaListener event
+ *   reconciler         — reconciler catch-up replay run
+ *   secret_reconciler  — SecretReconciler preimage recovery
+ *   expiry_scan        — scheduled expiry scan
+ *   operator_http      — authenticated operator HTTP call
+ *   system             — coordinator-internal (startup, fallback, etc.)
+ */
+export type MutationActor =
+  | "ethereum_listener"
+  | "soroban_listener"
+  | "solana_listener"
+  | "reconciler"
+  | "secret_reconciler"
+  | "expiry_scan"
+  | "operator_http"
+  | "system";
+
 export class OrderValidationError extends Error {}
 
 /* ── Observability helpers ───────────────────────────────────────────────── */
@@ -219,7 +244,9 @@ export class OrderService {
     txHash: string;
     blockNumber: number;
     timelock: number;
+    actor?: MutationActor;
   }): Promise<void> {
+    const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
 
@@ -279,6 +306,7 @@ export class OrderService {
         dstChain: order.dstChain,
         txHash: input.txHash,
         blockNumber: input.blockNumber,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
@@ -291,7 +319,9 @@ export class OrderService {
     blockNumber: number;
     timelock: number;
     resolver: string | null;
+    actor?: MutationActor;
   }): Promise<void> {
+    const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
 
@@ -368,12 +398,13 @@ export class OrderService {
         txHash: input.txHash,
         blockNumber: input.blockNumber,
         resolverAddress: input.resolver ?? undefined,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
   }
 
-  async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
+  async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null, actor: MutationActor = "system"): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
@@ -426,12 +457,13 @@ export class OrderService {
         srcChain: order.srcChain,
         dstChain: order.dstChain,
         txHash,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
   }
 
-  async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
+  async markStatus(publicId: string, status: OrderRow["status"], actor: MutationActor = "system"): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
@@ -485,6 +517,7 @@ export class OrderService {
         toStatus: status,
         srcChain: order.srcChain,
         dstChain: order.dstChain,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
@@ -645,7 +678,7 @@ export class OrderService {
       }
 
       try {
-        await this.markStatus(order.publicId, "expired");
+        await this.markStatus(order.publicId, "expired", "expiry_scan");
         this.log.info(
           { publicId: order.publicId, status: order.status },
           "order marked expired by timelock (expireStaleOrders)"

@@ -9,7 +9,8 @@ import { historyAddressSchema, orderIdSchema } from "../../validation/address.js
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
-import { validationError, orderValidationError, notFoundError, invalidCursorError } from "../errors.js";
+import { validationError, orderValidationError, conflictError, notFoundError, invalidCursorError } from "../errors.js";
+import { getRequestId } from "../../request-context.js";
 
 /// Strictly parse a query-string integer parameter. Returns `undefined` when
 /// `raw` is omitted so the caller can fall back to a default, but rejects any
@@ -27,16 +28,20 @@ function parseStrictQueryInt(raw: unknown): number | undefined | null {
   return n;
 }
 
-function serialiseOrder(order: OrderRow | null) {
+function serialiseOrder(order: OrderRow | null, requestId?: string | null) {
   if (!order) return null;
-  // `expired` is a soft, non-terminal state: the timelock has passed but no
-  // on-chain refund has been confirmed yet.  Clients may still initiate a
-  // refund — flag this explicitly so UIs can show "Expired — Refund Available"
-  // rather than a locked/disabled state.
+  // `isRefundable` reflects whether the user can still call refund on-chain:
+  //   - expired:    timelock elapsed, on-chain refund not yet confirmed
+  //   - src_locked: src funds locked but resolver hasn't filled yet
+  //   - dst_locked: both sides locked, can be unwound if secret not revealed
+  //   - failed:     terminal, but src funds may still be locked on-chain if
+  //                 the failure was detected before the lock expired — flag
+  //                 so UIs can surface a refund option when srcLockTx is set.
   const isRefundable =
     order.status === "expired" ||
     order.status === "src_locked" ||
-    order.status === "dst_locked";
+    order.status === "dst_locked" ||
+    (order.status === "failed" && order.srcLockTx !== null);
 
   return {
     id: order.publicId,
@@ -72,7 +77,12 @@ function serialiseOrder(order: OrderRow | null) {
     },
     resolver: order.resolverAddress,
     createdAt: order.createdAt,
-    updatedAt: order.updatedAt
+    updatedAt: order.updatedAt,
+    // Operational metadata — correlates this response to server-side logs.
+    meta: {
+      requestId: requestId ?? null,
+      serverTime: Math.floor(Date.now() / 1000),
+    },
   };
 }
 
@@ -99,7 +109,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     try {
       const parsed = announceSchema.parse(req.body);
       const order = await orders.announce(parsed);
-      res.status(201).json(serialiseOrder(order));
+      res.status(201).json(serialiseOrder(order, getRequestId()));
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json(validationError(err.errors));
@@ -148,7 +158,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
         // Cursor-based pagination
         const result = await orders.historyWithCursor(address, limit, cursor);
         res.json({
-          transactions: result.orders.map((o) => serialiseOrder(o)).filter(Boolean),
+          orders: result.orders.map((o) => serialiseOrder(o, getRequestId())).filter(Boolean),
           pagination: {
             limit,
             count: result.orders.length,
@@ -160,7 +170,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
         const finalOffset = offset ?? 0;
         const list = await orders.history(address, limit, finalOffset);
         res.json({
-          transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
+          orders: list.map((o) => serialiseOrder(o, getRequestId())).filter(Boolean),
           pagination: { limit, offset: finalOffset, count: list.length }
         });
       }
@@ -187,7 +197,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
         res.status(404).json(notFoundError("Order not found"));
         return;
       }
-      res.json(serialiseOrder(order));
+      res.json(serialiseOrder(order, getRequestId()));
     } catch (err) {
       next(err);
     }
@@ -211,7 +221,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
       }
       try {
         const body = lockSchema.parse(req.body);
-        await orders.recordSrcLock({ publicId: idResult.data, ...body });
+        await orders.recordSrcLock({ publicId: idResult.data, actor: "operator_http", ...body });
         res.json({ ok: true });
       } catch (err) {
         if (err instanceof z.ZodError) {
@@ -219,6 +229,13 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
           return;
         }
         if (err instanceof OrderValidationError) {
+          // Concurrent write conflicts (two listeners racing on the same lock)
+          // are semantically different from bad input — return 409 so clients
+          // can distinguish and retry with a fresh order fetch (#745).
+          if (err.message.startsWith("conflicting")) {
+            res.status(409).json(conflictError(err.message));
+            return;
+          }
           res.status(400).json(orderValidationError(err.message));
           return;
         }
@@ -240,6 +257,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
         const body = lockSchema.extend({ resolver: z.string().nullable().optional() }).parse(req.body);
         await orders.recordDstLock({
           publicId: idResult.data,
+          actor: "operator_http",
           orderId: body.orderId,
           txHash: body.txHash,
           blockNumber: body.blockNumber,
@@ -253,6 +271,10 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
           return;
         }
         if (err instanceof OrderValidationError) {
+          if (err.message.startsWith("conflicting")) {
+            res.status(409).json(conflictError(err.message));
+            return;
+          }
           res.status(400).json(orderValidationError(err.message));
           return;
         }

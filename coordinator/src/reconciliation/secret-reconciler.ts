@@ -164,7 +164,7 @@ export class SecretReconciler {
     }
 
     try {
-      await this.orders.recordSecret(order.publicId, preimage, txHash);
+      await this.orders.recordSecret(order.publicId, preimage, txHash, null, "secret_reconciler");
     } catch (err: any) {
       if (err?.message?.includes("cannot record")) {
         secretRecoveryOutcomeTotal.inc({ outcome: "state_conflict" });

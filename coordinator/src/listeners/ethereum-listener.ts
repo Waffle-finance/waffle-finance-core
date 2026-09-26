@@ -503,6 +503,7 @@ export class EthereumListener {
 
         try {
           await this.orders.recordSrcLock({
+            actor: "ethereum_listener",
             publicId: order.publicId,
             orderId: log.args.orderId!.toString(),
             txHash: log.transactionHash,
@@ -600,6 +601,7 @@ export class EthereumListener {
 
     try {
       await this.orders.recordSrcLock({
+        actor: "ethereum_listener",
         publicId,
         orderId: rawOrderId.toString(),
         txHash,

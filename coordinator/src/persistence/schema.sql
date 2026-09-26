@@ -53,18 +53,15 @@ CREATE TABLE IF NOT EXISTS orders (
     resolver_address      TEXT,
 
     -- Per-order reconciler high-water marks (see 011_order_ledger_cursors.sql).
+    -- These advance independently per chain as the reconciler processes events
+    -- so each order's scan window is as narrow as possible.
     last_eth_block        INTEGER,
     last_soroban_ledger   INTEGER,
     last_solana_slot      INTEGER,
 
     created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    archived_at           INTEGER,
-
-    -- Per-order high-water marks for reconciler (see TD-043).
-    last_eth_block        INTEGER,
-    last_soroban_ledger   INTEGER,
-    last_solana_slot      INTEGER
+    archived_at           INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_hashlock         ON orders (hashlock);

@@ -321,6 +321,7 @@ async function main(): Promise<void> {
     quotes,
     auditRepo,
     sseBroker,
+    ordersRepo: repo,
     getReconciliationStatus: () => reconciler.getStatus(),
     getReadinessChecks: createReadinessChecks({
       cfg,
@@ -389,6 +390,9 @@ async function main(): Promise<void> {
       lag: Math.max(0, (cfg.pollIntervalMs ?? 15000) - 15000),
       failureRate: 0.05,
     });
+    // Propagate the pressure decision into the scheduler so that STALE_CLEANUP
+    // jobs are gated when the queue is overloaded (#744).
+    backlog.setPressureMode(pressureController.getMode() as "normal" | "restrained");
   };
 
   // First reconciliation: enqueue as a REPLAY_JOB so it runs before any
@@ -426,40 +430,10 @@ async function main(): Promise<void> {
     void backlog.run();
   }, cfg.pollIntervalMs * 4);
 
-  // Expiry scan: every pollIntervalMs × 4 (default ~60 s)
-  const runExpiry = (): void => {
-    applyPressurePolicy();
-    backlog.enqueue({
-      name: 'expiry-scan',
-      priority: Priority.REPLAY_JOB,
-      execute: async () => {
-        const n = await orders.expireStaleOrders();
-        if (n > 0) log.info({ count: n }, 'expired stale orders by timelock');
-      },
-    });
-    void backlog.run();
-  };
-  void runExpiry();
-  const expiryInterval = setInterval(runExpiry, cfg.pollIntervalMs * 4);
-
-  // Stale-order archival: every pollIntervalMs × 240 (default ~60 min)
-  // Routed as STALE_CLEANUP — lowest priority.  Both old StaleCleanupService
-  // and the new ArchivalPolicy run here so the metrics for each are preserved.
-  const runStaleCleanup = (): void => {
-    applyPressurePolicy();
-    backlog.enqueue({
-      name: 'stale-cleanup',
-      priority: Priority.STALE_CLEANUP,
-      execute: () => staleCleanup.run().then(() => undefined),
-    });
-    backlog.enqueue({
-      name: 'archival-policy',
-      priority: Priority.STALE_CLEANUP,
-      execute: () => archivalPolicy.runArchival().then(() => undefined),
-    });
-    void backlog.run();
-  };
-  const staleCleanupInterval = setInterval(runStaleCleanup, cfg.pollIntervalMs * 240);
+  // NOTE: expiry_scan, stale_cleanup, and archival_policy are all driven by
+  // MaintenanceScheduler.start() below.  The raw setInterval calls that
+  // previously duplicated expiry and stale-cleanup scheduling have been
+  // removed (#744) — MaintenanceScheduler is the single owner of those jobs.
 
   // Cache verification runs every ~60 reconciliation cycles (roughly once per
   // hour at the default 15 s poll interval × 4 multiplier).  It is read-only
@@ -530,6 +504,8 @@ async function main(): Promise<void> {
 
     clearInterval(reconcileInterval);
     clearInterval(cacheVerifyInterval);
+    // expiryInterval and staleCleanupInterval were removed in #744 —
+    // those jobs are now exclusively owned by MaintenanceScheduler.
     ethListener.stop();
     sorobanListener.stop();
     solanaListener.stop();
