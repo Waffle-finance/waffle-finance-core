@@ -10,6 +10,7 @@ import {
   listenerLastEventTimestampSeconds,
   activeListeners,
 } from "../metrics.js";
+import { globalStalenessMonitor } from "../telemetry.js";
 import { SorobanCursorStore } from "../utils/cursor-store.js";
 import {
   decodeSorobanHtlcEvent,
@@ -194,6 +195,8 @@ export class SorobanListener {
 
     activeListeners.set({ chain: CHAIN }, 1);
 
+    globalStalenessMonitor.recordStarted(CHAIN);
+
     const tick = async () => {
       if (this.stopped) return;
       const endTimer = listenerPollDurationSeconds.startTimer({ chain: CHAIN });
@@ -201,10 +204,16 @@ export class SorobanListener {
         await this.fetchAndProcess(contractId, handlers);
         endTimer();
         listenerPollRunsTotal.inc({ chain: CHAIN, result: "success" });
+        // Record a healthy tick so the staleness monitor can reset consecutive-failure
+        // counters and update the health-state gauge to "healthy".
+        globalStalenessMonitor.recordHealthyTick(CHAIN);
       } catch (err) {
         endTimer();
         listenerPollRunsTotal.inc({ chain: CHAIN, result: "failure" });
         listenerErrorsTotal.inc({ chain: CHAIN, error_type: "poll_error" });
+        // Record the failure so the staleness monitor can accumulate consecutive
+        // failures and flip the health-state gauge to "degraded" after threshold.
+        globalStalenessMonitor.recordFailure(CHAIN);
         this.log.warn({ err }, "Soroban poll failed");
       } finally {
         if (!this.stopped) {
@@ -272,6 +281,11 @@ export class SorobanListener {
           "Soroban history-window overflow: persisted cursor is older than RPC retention window. " +
           "Clamping to current ledger head — events emitted during the gap may have been missed.",
         );
+
+        // Record the missed batch in the staleness monitor so the health state
+        // reflects that events may have been lost, and the missed-events counter
+        // is incremented for alerting.
+        globalStalenessMonitor.recordMissedBatch(CHAIN, "history_window_overflow");
 
         // Clear the stale cursor so we start fresh from the clamped ledger.
         this.cursor = undefined;
@@ -439,6 +453,7 @@ export class SorobanListener {
       this.timeoutId = undefined;
     }
     activeListeners.set({ chain: CHAIN }, 0);
+    globalStalenessMonitor.recordStopped(CHAIN);
   }
 
   /** Expose current in-memory cursor (useful in tests). */

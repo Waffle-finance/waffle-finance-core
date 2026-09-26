@@ -13,6 +13,7 @@ import {
   listenerLastEventTimestampSeconds,
   activeListeners,
 } from "../metrics.js";
+import { globalStalenessMonitor } from "../telemetry.js";
 
 const CHAIN = "ethereum";
 
@@ -51,6 +52,7 @@ export class EthereumListener {
     const address = this.cfg.ethereum.htlcEscrow;
     this.log.info({ chainId: this.cfg.ethereum.chainId, contract: address }, "starting Ethereum listener");
     activeListeners.set({ chain: CHAIN }, 1);
+    globalStalenessMonitor.recordStarted(CHAIN);
 
     const orderCreated = parseAbiItem(
       "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
@@ -69,6 +71,7 @@ export class EthereumListener {
         for (const log of logs) {
           eventsTotal.inc({ chain: CHAIN, event_type: "order_created" });
           listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          globalStalenessMonitor.recordHealthyTick(CHAIN);
           try {
             handlers.onOrderCreated({
               orderId: log.args.orderId!,
@@ -97,6 +100,7 @@ export class EthereumListener {
         for (const log of logs) {
           eventsTotal.inc({ chain: CHAIN, event_type: "order_claimed" });
           listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          globalStalenessMonitor.recordHealthyTick(CHAIN);
           try {
             handlers.onOrderClaimed({
               orderId: log.args.orderId!,
@@ -120,6 +124,7 @@ export class EthereumListener {
         for (const log of logs) {
           eventsTotal.inc({ chain: CHAIN, event_type: "order_refunded" });
           listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+          globalStalenessMonitor.recordHealthyTick(CHAIN);
           try {
             handlers.onOrderRefunded({
               orderId: log.args.orderId!,
@@ -141,6 +146,7 @@ export class EthereumListener {
     this.unwatchOrderClaimed?.();
     this.unwatchOrderRefunded?.();
     activeListeners.set({ chain: CHAIN }, 0);
+    globalStalenessMonitor.recordStopped(CHAIN);
   }
 }
 

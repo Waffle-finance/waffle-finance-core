@@ -49,6 +49,129 @@ export const activeListeners = new Gauge({
   registers: [registry],
 });
 
+// ── Missed-event and staleness metrics (issue #769) ───────────────────────────
+
+/**
+ * Incremented whenever the listener detects it has skipped a window of events
+ * it should have processed — either because the RPC history window overflowed
+ * (cursor too old) or because a reconnect dropped an event batch.
+ *
+ * Alert threshold recommendation: any non-zero value in a 5-minute window
+ * should page on-call — it means the resolver may have silently missed a
+ * preimage reveal and a user's settlement is delayed.
+ */
+export const missedEventsTotal = new Counter({
+  name: "resolver_missed_events_total",
+  help: "Total number of event batches dropped due to RPC history-window overflow or reconnect gaps, by chain",
+  labelNames: ["chain", "reason"] as const,
+  registers: [registry],
+});
+
+/**
+ * Set to the unix-seconds timestamp when a chain's listener was last confirmed
+ * healthy (i.e. successfully completed a poll or received a live event).
+ * A value of 0 means the chain has never reported a healthy tick since startup.
+ *
+ * Used by the staleness check in telemetry.ts: if
+ *   now - resolver_listener_last_healthy_timestamp_seconds{chain} > staleAfterSeconds
+ * the chain is considered stale.
+ *
+ * Alert threshold recommendation: stale after 5 minutes (300 s) for Soroban
+ * (poll-based) and after 2 minutes (120 s) for Ethereum (subscription-based).
+ */
+export const listenerLastHealthyTimestampSeconds = new Gauge({
+  name: "resolver_listener_last_healthy_timestamp_seconds",
+  help: "Unix timestamp of the most recent successful poll tick or live event per chain. 0 if the chain has never had a healthy tick since startup.",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Current staleness window in seconds per chain — how long since the last
+ * healthy tick. A snapshot gauge so dashboards can read the lag directly
+ * without computing `now - last_healthy_timestamp`.
+ *
+ * Updated by the telemetry collector on every /telemetry request and on every
+ * scheduled staleness check (see telemetry.ts: StalenessMonitor).
+ *
+ * Alert threshold recommendation: page when > 300 s (5 minutes).
+ */
+export const listenerStalenessSeconds = new Gauge({
+  name: "resolver_listener_staleness_seconds",
+  help: "Seconds since the last healthy poll tick or event per chain. Updated by the telemetry collector.",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Health state of each chain listener as an enum-style gauge.
+ * Exactly one (chain, state) series is 1 at a time; all others for that
+ * chain are 0.
+ *
+ * States:
+ *   healthy   — listener is running and making progress within the staleness window.
+ *   stale     — listener has not reported a healthy tick within staleAfterSeconds.
+ *   stopped   — listener is not running (activeListeners{chain}=0).
+ *   degraded  — listener is running but accumulating errors or missing events.
+ *
+ * Alert threshold recommendation: alert when state != "healthy" for > 3 minutes.
+ */
+export const listenerHealthState = new Gauge({
+  name: "resolver_listener_health_state",
+  help: "Health state of each chain listener (1 = current state, 0 = other states). States: healthy, stale, stopped, degraded.",
+  labelNames: ["chain", "state"] as const,
+  registers: [registry],
+});
+
+/**
+ * Total number of consecutive poll failures before the most recent recovery.
+ * Reset to 0 on any successful poll. Accumulates across restarts within a
+ * supervisor lifecycle.
+ *
+ * Alert threshold recommendation: alert when > 3 consecutive failures on the
+ * same chain — indicates persistent RPC degradation that will not self-heal
+ * quickly.
+ */
+export const listenerConsecutiveFailures = new Gauge({
+  name: "resolver_listener_consecutive_failures",
+  help: "Number of consecutive poll failures on each chain since the last successful tick.",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Event processing lag in seconds — the difference between the on-chain event
+ * timestamp and the time the resolver processed it. A high lag indicates the
+ * listener is behind the chain tip, which can cause settlement delays.
+ *
+ * Only emitted when the event carries a ledger/block timestamp. Chains that
+ * do not include a reliable timestamp in their event payloads (e.g. Ethereum
+ * watchEvent) emit lag = 0 as a sentinel.
+ *
+ * Alert threshold recommendation: alert when p95 lag > 60 s.
+ */
+export const eventProcessingLagSeconds = new Histogram({
+  name: "resolver_event_processing_lag_seconds",
+  help: "Seconds between the on-chain event timestamp and the resolver processing it, per chain.",
+  labelNames: ["chain"] as const,
+  buckets: [0, 1, 5, 10, 30, 60, 120, 300, 600],
+  registers: [registry],
+});
+
+/**
+ * Health-transition events: incremented each time a chain transitions between
+ * health states (healthy → stale, stale → healthy, healthy → degraded, etc.).
+ *
+ * Label `from` and `to` carry the previous and new states so dashboards can
+ * chart recovery rate and alert on specific bad transitions (e.g. healthy → stale).
+ */
+export const listenerHealthTransitionsTotal = new Counter({
+  name: "resolver_listener_health_transitions_total",
+  help: "Total health-state transitions per chain listener.",
+  labelNames: ["chain", "from", "to"] as const,
+  registers: [registry],
+});
+
 // ── Registration / participation metrics ──────────────────────────────────────
 
 export const registrationInfo = new Gauge({
@@ -151,6 +274,14 @@ export const resolverMetrics = {
   listenerPollRunsTotal,
   listenerLastEventTimestampSeconds,
   activeListeners,
+  // missed-event / staleness metrics (issue #769)
+  missedEventsTotal,
+  listenerLastHealthyTimestampSeconds,
+  listenerStalenessSeconds,
+  listenerHealthState,
+  listenerConsecutiveFailures,
+  eventProcessingLagSeconds,
+  listenerHealthTransitionsTotal,
   registrationInfo,
   resolverLifecycleState,
   registrationChangesTotal,

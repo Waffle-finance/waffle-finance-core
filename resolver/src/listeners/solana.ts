@@ -9,6 +9,7 @@ import {
   listenerLastEventTimestampSeconds,
   activeListeners,
 } from "../metrics.js";
+import { globalStalenessMonitor } from "../telemetry.js";
 
 const CHAIN = "solana";
 
@@ -260,6 +261,7 @@ export class SolanaListener {
     );
 
     activeListeners.set({ chain: CHAIN }, 1);
+    globalStalenessMonitor.recordStarted(CHAIN);
 
     const tick = async () => {
       if (this.stopped) return;
@@ -268,10 +270,16 @@ export class SolanaListener {
         await this.poll(new PublicKey(programId), handlers);
         endTimer();
         listenerPollRunsTotal.inc({ chain: CHAIN, result: "success" });
+        // Healthy tick — resets consecutive-failure counter and flips the
+        // health-state gauge back to "healthy" via the staleness monitor.
+        globalStalenessMonitor.recordHealthyTick(CHAIN);
       } catch (err) {
         endTimer();
         listenerPollRunsTotal.inc({ chain: CHAIN, result: "failure" });
         listenerErrorsTotal.inc({ chain: CHAIN, error_type: "poll_error" });
+        // Failure tick — accumulates consecutive failures; after threshold=3
+        // the health-state gauge transitions to "degraded".
+        globalStalenessMonitor.recordFailure(CHAIN);
         this.log.warn({ err }, "Solana poll failed");
       } finally {
         if (!this.stopped) {
@@ -290,6 +298,7 @@ export class SolanaListener {
       this.timeoutId = undefined;
     }
     activeListeners.set({ chain: CHAIN }, 0);
+    globalStalenessMonitor.recordStopped(CHAIN);
   }
 
   // ---------------------------------------------------------------------------
@@ -417,6 +426,9 @@ export class SolanaListener {
         { regressionStart, regressionEnd, dropped },
         "dropped pending transactions in regressed slot range",
       );
+      // Record dropped batches as missed events so the staleness monitor can
+      // reflect that events may have been lost during the fork.
+      globalStalenessMonitor.recordMissedBatch(CHAIN, "slot_regression");
     }
 
     this.lastSlot = newConfirmedSlot;
