@@ -244,6 +244,23 @@ export {
   type AccountValidationResult,
 } from "./solana/account-validation.js";
 
+// Solana — production readiness audit, gating checks, and operations checklist (#718)
+export {
+  assessSolanaProductionReadiness,
+  assertSolanaProductionReady,
+  SolanaProductionGatingError,
+  DEVNET_TOKEN_MINTS,
+  MAINNET_TOKEN_MINTS,
+  PUBLIC_DEVNET_RPC_ENDPOINTS,
+  SOLANA_SETTLEMENT_OPERATIONS_CHECKLIST,
+  type SolanaEnvironment,
+  type ReadinessCheckStatus,
+  type ReadinessCheckCategory,
+  type SolanaReadinessCheck,
+  type SolanaProductionReadinessReport,
+  type SolanaReadinessOptions,
+} from "./solana/production-readiness.js";
+
 // Shared utilities for hex conversion, order ID handling, and serialisation
 export {
   hexToBuffer,

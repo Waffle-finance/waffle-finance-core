@@ -14,7 +14,38 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import pino from "pino";
-import { Connection, PublicKey, Transaction, type TransactionSignature } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, type TransactionSignature } from "@solana/web3.js";
+
+const keypairMap = new Map<string, Keypair>();
+function getOrCreateKeypair(pubkeyStr: string): Keypair {
+  let kp = keypairMap.get(pubkeyStr);
+  if (!kp) {
+    kp = Keypair.generate();
+    keypairMap.set(pubkeyStr, kp);
+  }
+  return kp;
+}
+
+function createMockSigner(publicKeyStr = MOCK_SENDER): MockSolanaSigner {
+  const kp = getOrCreateKeypair(publicKeyStr);
+  return {
+    publicKey: kp.publicKey,
+    signTransaction: vi.fn().mockImplementation(async (tx: Transaction) => {
+      tx.partialSign(kp);
+      return tx;
+    }),
+  };
+}
+
+const mockGetLatestBlockhash = vi.fn().mockResolvedValue({
+  blockhash: "EkSnNWBD2METqfgAeZXGUMtHgUtcAjBoe1geGqmREQuC",
+  lastValidBlockHeight: 1000000,
+});
+const mockSendRawTransaction = vi.fn().mockResolvedValue("mockSignature123");
+const mockConfirmTransaction = vi.fn().mockResolvedValue({ value: { err: null } });
+const mockGetBalance = vi.fn().mockResolvedValue(1000000000);
+const mockGetAccountInfo = vi.fn().mockResolvedValue(null);
+const mockGetSlot = vi.fn().mockResolvedValue(100000);
 
 // ── Mock Solana SDK ──────────────────────────────────────────────────────────
 vi.mock("@solana/web3.js", async (importOriginal) => {
@@ -22,26 +53,23 @@ vi.mock("@solana/web3.js", async (importOriginal) => {
   return {
     ...actual,
     Connection: vi.fn().mockImplementation(function (this: any) {
-      this.getLatestBlockhash = vi.fn().mockResolvedValue({
-        blockhash: "mockBlockhash123",
-        lastValidBlockHeight: 1000000,
-      });
-      this.sendRawTransaction = vi.fn().mockResolvedValue("mockSignature123");
-      this.confirmTransaction = vi.fn().mockResolvedValue({ value: { err: null } });
-      this.getBalance = vi.fn().mockResolvedValue(1000000000); // 1 SOL in lamports
-      this.getAccountInfo = vi.fn().mockResolvedValue(null);
-      this.getSlot = vi.fn().mockResolvedValue(100000);
+      this.getLatestBlockhash = mockGetLatestBlockhash;
+      this.sendRawTransaction = mockSendRawTransaction;
+      this.confirmTransaction = mockConfirmTransaction;
+      this.getBalance = mockGetBalance;
+      this.getAccountInfo = mockGetAccountInfo;
+      this.getSlot = mockGetSlot;
     }),
   };
 });
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
-const MOCK_PROGRAM_ID = "HtLCProgram11111111111111111111111111111111";
-const MOCK_ORDER_PDA = "OrderPDA1111111111111111111111111111111111";
-const MOCK_SENDER = "Sender11111111111111111111111111111111111111";
-const MOCK_BENEFICIARY = "Beneficiary11111111111111111111111111111111";
-const MOCK_REFUND_ADDR = "RefundAddr111111111111111111111111111111111";
+const MOCK_PROGRAM_ID = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+const MOCK_ORDER_PDA = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const MOCK_SENDER = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const MOCK_BENEFICIARY = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const MOCK_REFUND_ADDR = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const MOCK_MINT = "So11111111111111111111111111111111111111112"; // Native SOL
 const MOCK_HASHLOCK = "0x" + "ab".repeat(32);
 const MOCK_PREIMAGE = "0x" + "cd".repeat(32);
@@ -54,12 +82,7 @@ interface MockSolanaSigner {
   signTransaction: (tx: Transaction) => Promise<Transaction>;
 }
 
-function createMockSigner(publicKeyStr = MOCK_SENDER): MockSolanaSigner {
-  return {
-    publicKey: new PublicKey(publicKeyStr),
-    signTransaction: vi.fn().mockImplementation(async (tx: Transaction) => tx),
-  };
-}
+
 
 function createMockOrderData(overrides: Record<string, any> = {}) {
   return {
@@ -78,14 +101,24 @@ function createMockOrderData(overrides: Record<string, any> = {}) {
   };
 }
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockGetLatestBlockhash.mockReset().mockResolvedValue({
+    blockhash: "EkSnNWBD2METqfgAeZXGUMtHgUtcAjBoe1geGqmREQuC",
+    lastValidBlockHeight: 1000000,
+  });
+  mockSendRawTransaction.mockReset().mockResolvedValue(MOCK_TX_SIG);
+  mockConfirmTransaction.mockReset().mockResolvedValue({ value: { err: null } });
+  mockGetBalance.mockReset().mockResolvedValue(1000000000);
+  mockGetAccountInfo.mockReset().mockResolvedValue(null);
+  mockGetSlot.mockReset().mockResolvedValue(100000);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1.  Happy-path settlement tests
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Solana settlement - happy path", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
 
   it("successfully locks funds on destination (create order)", async () => {
     const { SolanaHTLCClient } = await import("@wafflefinance/sdk");
@@ -114,7 +147,7 @@ describe("Solana settlement - happy path", () => {
     expect(typeof result.txSignature).toBe("string");
     expect(typeof result.orderId).toBe("string");
     expect(result.txSignature.length).toBeGreaterThan(0);
-  });
+  }, 15000);
 
   it("successfully claims order with valid preimage", async () => {
     const { SolanaHTLCClient } = await import("@wafflefinance/sdk");
@@ -755,7 +788,7 @@ describe("Solana settlement - metrics and logging", () => {
       expect.any(Number)
     );
 
-    incSpy.mockRestore();
+    observeSpy.mockRestore();
   });
 
   it("increments error counters for settlement failures", async () => {

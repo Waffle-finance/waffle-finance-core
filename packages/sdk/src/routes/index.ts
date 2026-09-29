@@ -43,16 +43,7 @@ import {
   type RouteFeePolicy,
 } from "./fee-policy.js";
 
-export {
-  estimateRouteFee,
-  getRouteFeePolicy,
-  ROUTE_FEE_POLICIES,
-} from "./fee-policy.js";
-export type {
-  RouteFeeEstimate,
-  RouteFeeFixture,
-  RouteFeePolicy,
-} from "./fee-policy.js";
+
 import {
   NATIVE_ETH_ADDRESS,
   NATIVE_SOL_MINT,

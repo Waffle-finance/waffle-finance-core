@@ -233,10 +233,6 @@ describe("Solana Integration Contract", () => {
     it("should log explicitly when placeholder mode is chosen", () => {
       const testLog = pino({
         level: "warn",
-        transport: {
-          target: "pino-pretty",
-          options: { destination: 1, colorize: false },
-        },
       });
 
       createSolanaIntegration("PLACEHOLDER", testLog, "https://api.devnet.solana.com");

@@ -63,10 +63,7 @@
       "types": "./dist/approval.d.ts",
       "import": "./dist/approval.js"
     },
-    "./status-display": {
-      "types": "./dist/status-display/index.d.ts",
-      "import": "./dist/status-display/index.js"
-    },
+
     "./ethereum/adapter": {
       "types": "./dist/ethereum/adapter.d.ts",
       "import": "./dist/ethereum/adapter.js"

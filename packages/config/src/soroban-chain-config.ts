@@ -87,6 +87,8 @@ const CONTRACT_PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
   // Solana system program
   "11111111111111111111111111111111",
   // Common dummy ETH addresses
+  "0X0000000000000000000000000000000000000000",
+  "0X1111111111111111111111111111111111111111",
   "0x0000000000000000000000000000000000000000",
   "0x1111111111111111111111111111111111111111",
 ]);
@@ -465,7 +467,7 @@ export function validateSorobanChainConfig(
     );
   } else if (!/^0x[0-9a-fA-F]{40}$/.test(normEthEscrow)) {
     addError("INVALID_ADDRESS", ethEscrowEnv, "ethereum.htlcEscrow",
-      `${ethEscrowEnv} is not a valid 0x-prefixed 20-byte Ethereum address: "${normEthEscrow}". ` +
+      `${ethEscrowEnv} must be a 0x-prefixed 20-byte address (got "${normEthEscrow}"). ` +
       `Provide a correctly checksummed address.`
     );
   }
@@ -478,7 +480,7 @@ export function validateSorobanChainConfig(
     );
   } else if (!/^0x[0-9a-fA-F]{40}$/.test(normEthRegistry)) {
     addError("INVALID_ADDRESS", ethRegistryEnv, "ethereum.resolverRegistry",
-      `${ethRegistryEnv} is not a valid 0x-prefixed 20-byte Ethereum address: "${normEthRegistry}". ` +
+      `${ethRegistryEnv} must be a 0x-prefixed 20-byte address (got "${normEthRegistry}"). ` +
       `Provide a correctly checksummed address.`
     );
   }

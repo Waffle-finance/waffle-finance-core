@@ -220,7 +220,7 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   readonly mode: SolanaConfigStatus = "configured";
   private readonly rpcProvider: SolanaRpcProvider;
   private readonly connection: Connection;
-  private readonly keypair: Keypair;
+  private readonly keypair: Keypair | null;
   private readonly programPk: PublicKey;
   private readonly commitment: Commitment;
 
@@ -237,22 +237,26 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     // Keep a direct Connection for callers that build Transactions themselves.
     this.connection = this.rpcProvider.getConnection();
 
-    // Parse the private key — supports both base-58 and hex formats.
-    let secretKey: Uint8Array;
-    if (privateKey.startsWith("[")) {
-      // JSON array format: [1,2,3,...]
-      secretKey = new Uint8Array(JSON.parse(privateKey));
-    } else if (privateKey.startsWith("0x")) {
-      // Hex format: 0x...
-      const hex = privateKey.slice(2);
-      secretKey = new Uint8Array(Buffer.from(hex, "hex"));
-    } else {
-      // Base-58 format
-      secretKey = Uint8Array.from(
-        Buffer.from(privateKey, "base58")
-      );
+    // Parse the private key — supports base-58, hex, and JSON array formats.
+    let kp: Keypair | null = null;
+    if (privateKey && privateKey.trim().length > 0) {
+      try {
+        let secretKey: Uint8Array;
+        if (privateKey.startsWith("[")) {
+          secretKey = new Uint8Array(JSON.parse(privateKey));
+        } else if (privateKey.startsWith("0x")) {
+          const hex = privateKey.slice(2);
+          secretKey = new Uint8Array(Buffer.from(hex, "hex"));
+        } else {
+          const bs58 = require("bs58");
+          secretKey = bs58.decode(privateKey);
+        }
+        kp = Keypair.fromSecretKey(secretKey);
+      } catch (err) {
+        this.log.warn({ err }, "Failed to parse Solana private key");
+      }
     }
-    this.keypair = Keypair.fromSecretKey(secretKey);
+    this.keypair = kp;
   }
 
   isEnabled(): boolean {
@@ -269,6 +273,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitLock(params: SolanaLockParams): Promise<SolanaLockResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for lock submission but was not provided or is invalid."
+      );
+    }
+
     const hashlockHex = params.hashlock.startsWith("0x")
       ? params.hashlock
       : `0x${params.hashlock}`;
@@ -351,6 +361,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitClaim(params: SolanaClaimParams): Promise<SolanaClaimResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for claim submission but was not provided or is invalid."
+      );
+    }
+
     const preimageHex = params.preimage.startsWith("0x")
       ? params.preimage
       : `0x${params.preimage}`;
@@ -421,6 +437,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitRefund(params: SolanaRefundParams): Promise<SolanaRefundResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for refund submission but was not provided or is invalid."
+      );
+    }
+
     const orderPda = new PublicKey(params.orderId);
 
     this.log.info(

@@ -80,6 +80,37 @@ export type {
   AccountValidationResult,
 } from "./account-validation.js";
 
+// Multi-endpoint RPC provider with automatic failover (#713)
+export {
+  SolanaRpcProvider,
+  createSolanaRpcProvider,
+  SolanaRpcFallbackExhaustedError,
+} from "./rpc-provider.js";
+export type {
+  SolanaRpcProviderOptions,
+  SolanaProviderHealth,
+  EndpointHealth,
+} from "./rpc-provider.js";
+
+// Solana production readiness audit, gating checks, and operations checklist (#718)
+export {
+  assessSolanaProductionReadiness,
+  assertSolanaProductionReady,
+  SolanaProductionGatingError,
+  DEVNET_TOKEN_MINTS,
+  MAINNET_TOKEN_MINTS,
+  PUBLIC_DEVNET_RPC_ENDPOINTS,
+  SOLANA_SETTLEMENT_OPERATIONS_CHECKLIST,
+} from "./production-readiness.js";
+export type {
+  SolanaEnvironment,
+  ReadinessCheckStatus,
+  ReadinessCheckCategory,
+  SolanaReadinessCheck,
+  SolanaProductionReadinessReport,
+  SolanaReadinessOptions,
+} from "./production-readiness.js";
+
 /** 0x-prefixed hex string (mirrors viem's HexString). */
 type HexString = `0x${string}`;
 
@@ -92,6 +123,8 @@ export interface SolanaHTLCClientOptions {
   programId: string;
   /** Commitment level for reads/confirmations. */
   commitment?: Commitment;
+  /** Allow plain HTTP (for local sandboxes/tests). */
+  allowHttp?: boolean;
   /**
    * When true, run pre-submission account metadata validation before sending
    * any transaction (#715).  Throws `AccountValidationError` when the
@@ -412,7 +445,8 @@ export class SolanaHTLCClient {
   private readonly validateBeforeSubmit: boolean;
 
   constructor(opts: SolanaHTLCClientOptions) {
-    const rpcUrl = validateRpcUrl(opts.rpcUrl, "solana.rpcUrl");
+    const allowHttp = opts.allowHttp ?? (typeof opts.rpcUrl === "string" && (opts.rpcUrl.includes("127.0.0.1") || opts.rpcUrl.includes("localhost")));
+    const rpcUrl = validateRpcUrl(opts.rpcUrl, "solana.rpcUrl", { allowHttp });
     const simulation = opts.programId === "PLACEHOLDER";
     const programId = simulation ? opts.programId : validateSolanaAddress(opts.programId, "solana.programId");
     this.programId = programId;

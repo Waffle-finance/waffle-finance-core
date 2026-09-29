@@ -32,6 +32,7 @@ Before deploying contracts or services, complete the following checklist:
    export V2_STAKE_ASSET="0x0000000000000000000000000000000000000000000000000000000000000000"  # ETH or ERC20
    export V2_MIN_STAKE="<min-stake-in-wei>"
    export V2_MIN_SAFETY_DEPOSIT="<min-safety-deposit-in-wei>"  # optional, defaults to 0
+   export SOLANA_HTLC_PROGRAM_MAINNET="<solana-program-pubkey>"
    ```
 
 2. **Verify RPC connectivity:**
@@ -43,14 +44,22 @@ Before deploying contracts or services, complete the following checklist:
 
    # Stellar Horizon
    curl "$STELLAR_HORIZON_URL" | head -1
+
+   # Solana (primary & failover RPCs)
+   curl -X POST $SOLANA_RPC_URL -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
    ```
 
 3. **Check deployer balance:**
    ```bash
-   # Ensure sufficient funds for contract deployment
-   # Mainnet: at least 0.1 ETH
-   # Sepolia: use faucet https://sepoliafaucet.com
+   # Ethereum — Mainnet: at least 0.1 ETH; Sepolia: use faucet https://sepoliafaucet.com
+   # Stellar — Testnet: friendbot; Mainnet: at least 50 XLM
+   # Solana — Devnet: airdrop; Mainnet: at least 2.0 SOL for Program deploy + Order PDA rent buffers
    ```
+
+4. **Review chain operator guides:**
+   - Stellar / Soroban: see [docs/SOROBAN_OPERATOR_GUIDE.md](SOROBAN_OPERATOR_GUIDE.md)
+   - Solana: see [docs/SOLANA_OPERATOR_GUIDE.md](SOLANA_OPERATOR_GUIDE.md) (devnet vs production gap audit, Anchor lifecycle, readiness gating, settlement checklist)
 
 ---
 
