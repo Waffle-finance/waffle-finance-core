@@ -96,6 +96,16 @@ export {
   type SolanaWalletLifecycleOptions,
 } from "./wallet.js";
 
+// The multi-endpoint RPC provider is part of the Solana surface: the relayer and
+// the coordinator both import it from this subpath. It previously existed only
+// on the package root, so `@wafflefinance/sdk/solana` resolved to `undefined`
+// at runtime (`createSolanaRpcProvider is not a function`) even though the
+// TypeScript import looked fine in editors that resolved the root entrypoint.
+export {
+  SolanaRpcProvider,
+  createSolanaRpcProvider,
+} from "./rpc-provider.js";
+
 /** 0x-prefixed hex string (mirrors viem's HexString). */
 type HexString = `0x${string}`;
 
@@ -119,6 +129,35 @@ export interface SolanaHTLCClientOptions {
    * Recommended: true for production to catch misconfigured accounts early.
    */
   validateBeforeSubmit?: boolean;
+  /**
+   * Permit a plain `http://` RPC URL.  `validateRpcUrl` rejects non-TLS
+   * endpoints by default; this flag is the documented escape hatch for local
+   * sandboxes (`solana-test-validator` on 127.0.0.1) and must never be set
+   * against a public endpoint.
+   *
+   * Default: false.
+   */
+  allowHttp?: boolean;
+  /**
+   * Account-initialisation robustness.  These are the safety rails that stop a
+   * mis-sized or under-funded account from failing silently:
+   *
+   *  • `simulateBeforeSend` (default **true**) — run `simulate()` before
+   *    submitting and attach the program logs to any error.  Without it a
+   *    failed `create_order` surfaces as a bare "Custom program error: 0x…"
+   *    with no indication of which on-chain check rejected it.
+   *  • `verifyAfterInit` (default **true**) — after the transaction confirms,
+   *    re-read the created account and check it exists, is owned by the HTLC
+   *    program, has the exact declared data length, and is at or above the
+   *    rent-exempt minimum.  A confirmed transaction is not proof of a correct
+   *    account.
+   *
+   * Setting either to false restores the previous fire-and-forget behaviour and
+   * is only appropriate in tests against mocked connections that do not
+   * implement `simulateTransaction`.
+   */
+  simulateBeforeSend?: boolean;
+  verifyAfterInit?: boolean;
 }
 
 export interface SolanaCreateOrderInput {
@@ -411,6 +450,8 @@ export class SolanaHTLCClient {
   private readonly simulation: boolean;
   private readonly programPk: PublicKey | null;
   private readonly validateBeforeSubmit: boolean;
+  private readonly simulateBeforeSend: boolean;
+  private readonly verifyAfterInit: boolean;
 
   constructor(opts: SolanaHTLCClientOptions) {
     const rpcUrl = validateRpcUrl(opts.rpcUrl, 'solana.rpcUrl', { allowHttp: opts.allowHttp });
@@ -422,6 +463,8 @@ export class SolanaHTLCClient {
     this.commitment = opts.commitment ?? 'confirmed';
     this.connection = new Connection(rpcUrl, this.commitment);
     this.validateBeforeSubmit = opts.validateBeforeSubmit ?? false;
+    this.simulateBeforeSend = opts.simulateBeforeSend ?? true;
+    this.verifyAfterInit = opts.verifyAfterInit ?? true;
 
     // Enter simulation mode only when no real program id is configured.
     this.simulation = simulation;
@@ -487,13 +530,26 @@ export class SolanaHTLCClient {
    * When `validateBeforeSubmit` is enabled, validates all addresses and
    * detects duplicate orders before building the transaction (#715).
    *
-   * @returns The transaction signature and the deterministic order id
-   *          (= PDA address derived from the hashlock).
+   * The preflight (rent from the cluster, payer solvency, target-account state)
+   * and the post-confirmation verification both run unless explicitly disabled.
+   * Both throw a typed `SolanaAccountInitError` naming the account, so a
+   * mis-sized or under-funded order never reaches the cluster as an opaque
+   * "Custom program error: 0x…".
+   *
+   * @returns The transaction signature, the deterministic order id
+   *          (= PDA address derived from the hashlock), and the verified
+   *          on-chain account — or `null` for `account` when
+   *          `verifyAfterInit` is disabled, because an unverified account must
+   *          not be reported as if it had been checked.
    */
   async createOrder(
     input: SolanaCreateOrderInput,
     signer: SolanaSigner
-  ): Promise<{ txSignature: TransactionSignature; orderId: string }> {
+  ): Promise<{
+    txSignature: TransactionSignature;
+    orderId: string;
+    account: VerifiedAccount | null;
+  }> {
     if (this.simulation) {
       const mockSig = 'SIMULATION_' + input.hashlockHex.slice(2, 18);
       console.warn('[SolanaHTLCClient] simulation createOrder →', mockSig);
@@ -542,7 +598,69 @@ export class SolanaHTLCClient {
     });
 
     const sig = await this._buildSignSend([instruction], signer);
-    return { txSignature: sig, orderId: orderPda.toBase58() };
+
+    // ── Post-init verification ────────────────────────────────────────────
+    // `null` — not a fabricated object — when verification is disabled: a
+    // caller must be able to tell "checked and correct" from "not checked".
+    const account = this.verifyAfterInit
+      ? await verifyInitialisedAccount(this.connection, orderPda, "htlcOrder", {
+          expectedOwner: programPk,
+          commitment: this.commitment,
+        })
+      : null;
+
+    return { txSignature: sig, orderId: orderPda.toBase58(), account };
+  }
+
+  /**
+   * Everything that must be true before a `create_order` is worth submitting:
+   * the rent-exempt minimum is computed from the real account size, the payer
+   * is solvent for rent + amount + deposit + fee, and the target PDA is in a
+   * state the program's `init` can legally act on.
+   *
+   * Each failure throws a typed `SolanaAccountInitError` carrying the account,
+   * the expected value, and the observed value.
+   */
+  private async _preflightCreateOrder(args: {
+    programPk: PublicKey;
+    orderPda: PublicKey;
+    payer: PublicKey;
+    amount: bigint;
+    safetyDeposit: bigint;
+  }): Promise<{ rentLamports: bigint }> {
+    const account = args.orderPda.toBase58();
+
+    // 1. Rent exemption, from the real account size and the cluster's table.
+    const rentLamports = await getRentExemptMinimum(
+      this.connection,
+      HTLC_ORDER_ACCOUNT_SIZE
+    );
+
+    // 2. Payer solvency, including rent and the transaction fee.
+    const balanceLamports = BigInt(
+      await this.connection.getBalance(args.payer, this.commitment)
+    );
+    assertPayerCanFund({
+      payer: args.payer,
+      account,
+      rentLamports,
+      amountLamports: args.amount,
+      safetyDepositLamports: args.safetyDeposit,
+      signatureCount: 1,
+      balanceLamports,
+    });
+
+    // 3. The PDA must not already hold an initialised (or pre-funded) account.
+    //    `getAccountInfo` returns null for a zero-lamport account, so a PDA
+    //    that was pre-funded with a stray transfer is indistinguishable from
+    //    "absent" unless it is classified explicitly.
+    const existing = await this.connection.getAccountInfo(args.orderPda, this.commitment);
+    assertAccountIsUninitialised(classifyUninitialisedAccount(existing, args.programPk), {
+      account,
+      programId: args.programPk.toBase58(),
+    });
+
+    return { rentLamports };
   }
 
   /**
@@ -649,7 +767,16 @@ export class SolanaHTLCClient {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  /** Fetch a recent blockhash, build, sign, send, and confirm a transaction. */
+  /**
+   * Fetch a recent blockhash, build, sign, simulate, send, and confirm.
+   *
+   * The simulation is explicit rather than left to `sendRawTransaction`'s
+   * implicit preflight: the implicit one throws without exposing the program
+   * logs, so a rejected `create_order` arrives as an opaque "Custom program
+   * error: 0x…" and there is no way to tell an under-funded payer from a
+   * mis-sized account from a timelock violation. Simulating first puts the
+   * logs in the thrown error.
+   */
   private async _buildSignSend(
     instructions: TransactionInstruction[],
     signer: SolanaSigner

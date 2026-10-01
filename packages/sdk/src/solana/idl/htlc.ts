@@ -59,8 +59,23 @@ export const IDL_VERSION = 0;
 //    186    33  Option<[u8;32]>  preimage  (1-byte Some/None tag + 32 bytes)
 //
 // Total: 8 (discriminator) + 219 (fields) = 227 bytes
+//
+// The total is **derived, not written down**: `account-sizing.ts` declares the
+// field table above as data and sums it together with the 8-byte Anchor
+// discriminator. That is what keeps this byte map and the account's `space =`
+// from drifting apart, and it is why adding a field here without updating the
+// on-chain program now fails a test rather than silently producing a constant
+// that is wrong everywhere at once.
 
-export const HTLC_ORDER_ACCOUNT_SIZE = 227;
+import {
+  ANCHOR_DISCRIMINATOR_SIZE,
+  SOLANA_ANCHOR_ACCOUNT_LAYOUTS,
+  accountSizeFor,
+} from "../account-sizing.js";
+
+export const HTLC_ORDER_ACCOUNT_SIZE = accountSizeFor(
+  SOLANA_ANCHOR_ACCOUNT_LAYOUTS.htlcOrder
+);
 
 // ── Event Layout & Definitions for Auditing ───────────────────────────────
 

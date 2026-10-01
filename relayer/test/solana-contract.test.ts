@@ -302,13 +302,11 @@ describe("Solana Integration Contract", () => {
 
   describe("Factory Decision Path", () => {
     it("should log explicitly when placeholder mode is chosen", () => {
-      const testLog = pino({
-        level: "warn",
-        transport: {
-          target: "pino-pretty",
-          options: { destination: 1, colorize: false },
-        },
-      });
+      // A plain logger, not the `pino-pretty` transport: that package is not a
+      // dependency here, and pino throws "unable to determine transport
+      // target" at construction, which failed this test for reasons that had
+      // nothing to do with the code under test.
+      const testLog = pino({ level: "warn" });
 
       createSolanaIntegration("PLACEHOLDER", testLog, "https://api.devnet.solana.com");
 

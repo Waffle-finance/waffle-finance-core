@@ -455,8 +455,8 @@ describe("validateCreateOrderParams", () => {
     expect(result.errors.some((e) => e.code === "pda_mismatch")).toBe(true);
   });
 
-  it("includes a warning when the PDA already exists", async () => {
-    // Connection returns an existing account at the PDA.
+  it("fails with already_initialized when the PDA already holds an order", async () => {
+    // Connection returns an existing, fully-populated account at the PDA.
     const conn = makeConnectionWith({});
     const result = await validateCreateOrderParams(conn, PROGRAM_PK, {
       sender:        "11111111111111111111111111111111",
@@ -465,8 +465,54 @@ describe("validateCreateOrderParams", () => {
       mint:          NATIVE_SOL_MINT,
       hashlockBytes: HASHLOCK_BYTES,
     });
-    // No hard error, but a warning about the existing account.
-    expect(result.warnings.some((w) => w.includes("already exists"))).toBe(true);
+    // Re-initialisation is refused outright. A warning would still let the
+    // transaction through, spending the fee on a guaranteed revert — or, under
+    // `init_if_needed`, overwriting a live order.
+    expect(result.valid).toBe(false);
+    const err = result.errors.find((e) => e.code === "already_initialized");
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("Refusing to re-initialise");
+  });
+
+  it("fails with unexpected_account_balance when the PDA is pre-funded (lamports, no data)", async () => {
+    // Someone transferred SOL to the future order address: lamports but no
+    // data. `create_account` requires a zero-lamport account, so this would
+    // revert on-chain with "already in use".
+    const conn = makeConnectionWith({
+      data: Buffer.alloc(0),
+      lamports: 1_000_000,
+    });
+    const result = await validateCreateOrderParams(conn, PROGRAM_PK, {
+      sender:        "11111111111111111111111111111111",
+      beneficiary:   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf8Ny8suSzwAh",
+      refundAddress: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJ9",
+      mint:          NATIVE_SOL_MINT,
+      hashlockBytes: HASHLOCK_BYTES,
+    });
+    expect(result.valid).toBe(false);
+    const err = result.errors.find((e) => e.code === "unexpected_account_balance");
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("already in use");
+  });
+
+  it("fails with rpc_unavailable (not a warning) when the duplicate check cannot run", async () => {
+    // The probe cannot prove the account is absent, so submission is refused.
+    // Reporting this as a warning — or as `account_not_found` — would hide the
+    // one case where re-initialisation cannot be ruled out.
+    const conn = {
+      getAccountInfo: vi.fn().mockRejectedValue(new Error("ECONNRESET: rpc down")),
+    } as unknown as Connection;
+    const result = await validateCreateOrderParams(conn, PROGRAM_PK, {
+      sender:        "11111111111111111111111111111111",
+      beneficiary:   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf8Ny8suSzwAh",
+      refundAddress: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJ9",
+      mint:          NATIVE_SOL_MINT,
+      hashlockBytes: HASHLOCK_BYTES,
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.code === "rpc_unavailable")).toBe(true);
+    expect(result.errors.some((e) => e.code === "account_not_found")).toBe(false);
+    expect(result.warnings).toHaveLength(0);
   });
 });
 
