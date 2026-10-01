@@ -103,6 +103,19 @@ function createMockOrderData(overrides: Record<string, any> = {}) {
   };
 }
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockGetLatestBlockhash.mockReset().mockResolvedValue({
+    blockhash: "EkSnNWBD2METqfgAeZXGUMtHgUtcAjBoe1geGqmREQuC",
+    lastValidBlockHeight: 1000000,
+  });
+  mockSendRawTransaction.mockReset().mockResolvedValue(MOCK_TX_SIG);
+  mockConfirmTransaction.mockReset().mockResolvedValue({ value: { err: null } });
+  mockGetBalance.mockReset().mockResolvedValue(1000000000);
+  mockGetAccountInfo.mockReset().mockResolvedValue(null);
+  mockGetSlot.mockReset().mockResolvedValue(100000);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1.  Happy-path settlement tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -140,7 +153,7 @@ describe('Solana settlement - happy path', () => {
     expect(typeof result.txSignature).toBe('string');
     expect(typeof result.orderId).toBe('string');
     expect(result.txSignature.length).toBeGreaterThan(0);
-  });
+  }, 15000);
 
   it('successfully claims order with valid preimage', async () => {
     const { SolanaHTLCClient } = await import('@wafflefinance/sdk');

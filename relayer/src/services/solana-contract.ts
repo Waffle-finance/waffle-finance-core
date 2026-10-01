@@ -569,6 +569,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitLock(params: SolanaLockParams): Promise<SolanaLockResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for lock submission but was not provided or is invalid."
+      );
+    }
+
     const hashlockHex = params.hashlock.startsWith("0x")
       ? params.hashlock
       : `0x${params.hashlock}`;
@@ -709,6 +715,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitClaim(params: SolanaClaimParams): Promise<SolanaClaimResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for claim submission but was not provided or is invalid."
+      );
+    }
+
     const preimageHex = params.preimage.startsWith("0x")
       ? params.preimage
       : `0x${params.preimage}`;
@@ -787,6 +799,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
   }
 
   async submitRefund(params: SolanaRefundParams): Promise<SolanaRefundResult> {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Solana private key is required for refund submission but was not provided or is invalid."
+      );
+    }
+
     const orderPda = new PublicKey(params.orderId);
 
     this.log.info(

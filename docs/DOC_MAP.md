@@ -109,6 +109,7 @@ If you add a new document, add a row here in the same PR.
 | `soroban/README.md` | current | Engineering | Soroban contracts: build, test, deploy, TS bindings |
 | `soroban/docs/` | current | Engineering | Soroban-specific design docs |
 | `docs/SOROBAN_OPERATOR_GUIDE.md` | current | Operations | Soroban trust model, lifecycle, readiness checks, RPC degradation, recovery |
+| `docs/SOLANA_OPERATOR_GUIDE.md` | current | Operations | Solana trust model, devnet vs production gap audit, Anchor lifecycle, readiness gating, settlement checklist |
 | `frontend/CACHING_STRATEGY.md` | current | Engineering | Frontend caching approach |
 | `frontend/FEATURE_FLAGS.md` | current | Engineering | Frontend feature flag usage |
 | `frontend/MAINTAINABILITY.md` | current | Engineering | Frontend code maintainability guidelines |
@@ -132,6 +133,8 @@ If you add a new document, add a row here in the same PR.
 | Debugging a failing service during an incident | `docs/DEBUGGING_GUIDE.md` |
 | Local development setup | `docs/DEVELOPMENT.md` |
 | Production operations | `docs/OPERATIONS.md` |
+| Soroban operations & deployment guide | `docs/SOROBAN_OPERATOR_GUIDE.md` |
+| Solana operations & production readiness guide | `docs/SOLANA_OPERATOR_GUIDE.md` |
 | Health endpoints | `docs/HEALTH_DASHBOARD.md` |
 | Dependency upgrade policy | `docs/DEPENDENCY_POLICY.md` |
 | All CI workflows that actually run | This file — `.github/workflows/` table above |

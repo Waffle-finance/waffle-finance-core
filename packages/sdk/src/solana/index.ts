@@ -106,6 +106,37 @@ export {
   createSolanaRpcProvider,
 } from "./rpc-provider.js";
 
+// Multi-endpoint RPC provider with automatic failover (#713)
+export {
+  SolanaRpcProvider,
+  createSolanaRpcProvider,
+  SolanaRpcFallbackExhaustedError,
+} from "./rpc-provider.js";
+export type {
+  SolanaRpcProviderOptions,
+  SolanaProviderHealth,
+  EndpointHealth,
+} from "./rpc-provider.js";
+
+// Solana production readiness audit, gating checks, and operations checklist (#718)
+export {
+  assessSolanaProductionReadiness,
+  assertSolanaProductionReady,
+  SolanaProductionGatingError,
+  DEVNET_TOKEN_MINTS,
+  MAINNET_TOKEN_MINTS,
+  PUBLIC_DEVNET_RPC_ENDPOINTS,
+  SOLANA_SETTLEMENT_OPERATIONS_CHECKLIST,
+} from "./production-readiness.js";
+export type {
+  SolanaEnvironment,
+  ReadinessCheckStatus,
+  ReadinessCheckCategory,
+  SolanaReadinessCheck,
+  SolanaProductionReadinessReport,
+  SolanaReadinessOptions,
+} from "./production-readiness.js";
+
 /** 0x-prefixed hex string (mirrors viem's HexString). */
 type HexString = `0x${string}`;
 

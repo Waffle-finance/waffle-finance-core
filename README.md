@@ -79,7 +79,7 @@ The coordinator is a metadata service that never signs transactions touching use
 | `ResolverRegistry` | Sepolia | [`0x7D9ce70Aa4…1B6D1D99`](https://sepolia.etherscan.io/address/0x7D9ce70Aa40E144E8BbE266a0dc3b3F91B6D1D99) |
 | `wafflefinance-htlc` | Stellar testnet | [`CDIKSJKV…CTA6JK`](https://stellar.expert/explorer/testnet/contract/CDIKSJKVMXKGBRD3BBEBMF7Q4GQJ52ECU6R6G5HEKXKXVGGWK2CTA6JK) |
 | `wafflefinance-resolver-registry` | Stellar testnet | [`CBSR7Z4M…Z4WGF`](https://stellar.expert/explorer/testnet/contract/CBSR7Z4MHLPMLFFM5K3PK3YLZAVCOMJ4KPVRWO4VPL3FF64MSTIZ4WGF) |
-| Anchor HTLC | Solana devnet | Pending deployment |
+| Anchor HTLC | Solana devnet | Configurable / see [Solana Operator Guide](docs/SOLANA_OPERATOR_GUIDE.md) |
 
 ---
 
