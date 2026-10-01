@@ -128,12 +128,13 @@ export function useSolanaWallet() {
       });
     };
 
-    const handleConnect = (pubkey: { toString(): string } | null) => {
-      if (!pubkey) return;
+    const handleConnect = (pubkey?: { toString(): string } | null) => {
+      const key = pubkey ?? provider.publicKey;
+      if (!key) return;
       setState((prev) =>
         transition(prev, {
           isConnected: true,
-          address: pubkey.toString(),
+          address: key.toString(),
           error: null,
           errorCode: null,
           hint: null,

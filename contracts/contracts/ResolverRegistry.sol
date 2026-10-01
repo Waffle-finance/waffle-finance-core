@@ -168,6 +168,7 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
         if (address(_stakeAsset) == address(0) || _slashBeneficiary == address(0) || _owner == address(0)) {
             revert InvalidAddress();
         }
+        if (_minStake == 0) revert InvalidAmount();
         stakeAsset = _stakeAsset;
         minStake = _minStake;
         slashBeneficiary = _slashBeneficiary;
@@ -354,6 +355,7 @@ contract ResolverRegistry is IResolverRegistry, Ownable2Step, ReentrancyGuard {
     }
 
     function setMinStake(uint256 newMinStake) external onlyOwner {
+        if (newMinStake == 0) revert InvalidAmount();
         emit MinStakeUpdated(minStake, newMinStake);
         minStake = newMinStake;
     }

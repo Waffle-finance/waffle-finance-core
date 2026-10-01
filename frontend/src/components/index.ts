@@ -7,3 +7,5 @@ export { default as TestnetFaucet } from './TestnetFaucet';
 export { ToastContainer, useToast } from './Toast';
 export { default as OrderExport } from './OrderExport';
 export { default as OrderImport } from './OrderImport';
+export { default as WalletStateBanner, useWalletState } from './WalletStateBanner';
+export type { WalletStateResult, WalletBannerEntry, WalletBannerKind } from './WalletStateBanner';

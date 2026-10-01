@@ -5,6 +5,9 @@
 
 import { EventType, EventMessage, EventListener } from './event-handlers.js';
 import FusionEventManager from './event-handlers.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ component: 'client-subscriptions' });
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -190,7 +193,7 @@ export class ClientSubscriptionManager {
     };
 
     this.clients.set(client.id, client);
-    console.log(`👤 Client registered: ${client.id} (${client.connectionType})`);
+    log.info({ clientId: client.id, connectionType: client.connectionType }, 'client registered');
     
     return client.id;
   }
@@ -201,7 +204,7 @@ export class ClientSubscriptionManager {
   unregisterClient(clientId: string): boolean {
     const client = this.clients.get(clientId);
     if (!client) {
-      console.warn(`👤 Unknown client unregistration attempted: ${clientId}`);
+      log.warn({ clientId }, 'unknown client unregistration attempted');
       return false;
     }
 
@@ -215,7 +218,7 @@ export class ClientSubscriptionManager {
 
     // Remove client
     this.clients.delete(clientId);
-    console.log(`👤 Client unregistered: ${clientId}`);
+    log.info({ clientId }, 'client unregistered');
     
     return true;
   }
@@ -294,7 +297,7 @@ export class ClientSubscriptionManager {
       callback: (event) => this.handleEventForSubscription(subscription, event)
     });
 
-    console.log(`📡 Subscription created: ${subscriptionId} for client ${clientId}`);
+    log.info({ subscriptionId, clientId }, 'subscription created');
     return subscriptionId;
   }
 
@@ -339,7 +342,7 @@ export class ClientSubscriptionManager {
 
     subscription.updatedAt = Date.now();
     
-    console.log(`📡 Subscription updated: ${subscription.id}`);
+    log.info({ subscriptionId: subscription.id }, 'subscription updated');
     return true;
   }
 
@@ -367,7 +370,7 @@ export class ClientSubscriptionManager {
     // Remove from delivery queue
     this.deliveryQueue = this.deliveryQueue.filter(item => item.clientId !== clientId);
     
-    console.log(`📡 Subscription cancelled: ${subscription.id}`);
+    log.info({ subscriptionId: subscription.id }, 'subscription cancelled');
     return true;
   }
 
@@ -466,7 +469,7 @@ export class ClientSubscriptionManager {
       // Remove processed items
       this.deliveryQueue = this.deliveryQueue.filter(item => !processedItems.includes(item.id));
       
-      console.log(`📦 Processed ${processedItems.length} queued events in ${Date.now() - startTime}ms`);
+      log.debug({ processedCount: processedItems.length, durationMs: Date.now() - startTime }, 'queued events processed');
     } finally {
       this.processingQueue = false;
     }
@@ -493,7 +496,7 @@ export class ClientSubscriptionManager {
       }
 
       // Simulate event delivery (in real implementation, this would send via WebSocket, SSE, etc.)
-      console.log(`📤 Delivering event ${queuedEvent.event.eventType} to client ${queuedEvent.clientId}`);
+      log.debug({ eventType: queuedEvent.event.eventType, clientId: queuedEvent.clientId }, 'delivering event to client');
       
       // Update statistics
       subscription.statistics.deliverySuccess++;
@@ -508,7 +511,7 @@ export class ClientSubscriptionManager {
       
       return true;
     } catch (error) {
-      console.error(`❌ Failed to deliver event to client ${queuedEvent.clientId}:`, error);
+      log.error({ clientId: queuedEvent.clientId, eventType: queuedEvent.event.eventType, err: error }, 'failed to deliver event to client');
       
       // Update statistics
       subscription.statistics.deliveryFailures++;
@@ -685,7 +688,7 @@ export class ClientSubscriptionManager {
     });
 
     if (toRemove.length > 0) {
-      console.log(`🧹 Cleaned up ${toRemove.length} inactive clients`);
+      log.info({ removedCount: toRemove.length }, 'cleaned up inactive clients');
     }
   }
 
@@ -778,7 +781,7 @@ export class ClientSubscriptionManager {
     this.subscriptions.clear();
     this.deliveryQueue = [];
     
-    console.log('🧹 Client subscription manager cleaned up');
+    log.info('client subscription manager cleaned up');
   }
 }
 

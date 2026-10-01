@@ -14,8 +14,8 @@ remappings = [
 ]
 
 [fuzz]
-runs = 256
+runs = 1024
 
 [invariant]
-runs   = 100
-depth  = 20
+runs   = 1024
+depth  = 50

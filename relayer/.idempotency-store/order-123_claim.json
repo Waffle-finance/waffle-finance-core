@@ -1,0 +1,1 @@
+{"key":"order-123:claim","orderId":"order-123","actionType":"claim","state":"completed","attemptId":"attempt-1790695162877-3wo7jehrb","retryCount":3,"createdAt":1790695162877,"updatedAt":1790695162886,"correlationId":"cid-1","txHash":"0xhash1","minedBlock":100,"savedAt":1790695162886}

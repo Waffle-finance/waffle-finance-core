@@ -246,3 +246,63 @@ Run Postgres-specific migration tests (requires a running Postgres instance):
 ```bash
 TEST_WITH_POSTGRES=true DATABASE_URL=postgres://... npm test
 ```
+
+---
+
+## Kysely ORM Integration (Issue #479 / TD-040)
+
+As of this PR, the coordinator ships with **Kysely** as its ORM layer.
+
+### What changed
+
+| Before | After |
+|--------|-------|
+| Raw SQL strings compiled into `db.prepare()` calls | Kysely type-safe query builder |
+| Hand-rolled `convertSqliteToPostgres()` translating named params and `strftime` | Kysely dialect layer handles this automatically |
+| No compile-time type checking on column names or values | `CoordinatorDatabase` schema types catch errors at compile time |
+| Duplicate SQL for SQLite vs Postgres | Single query builder expression per query |
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `src/persistence/schema-types.ts` | Kysely `CoordinatorDatabase` schema type definitions |
+| `src/persistence/kysely-db.ts` | `createKyselyDb(url)` factory — returns `Kysely<CoordinatorDatabase>` |
+| `src/persistence/kysely-migrations.ts` | `KyselyMigrationRunner` — wraps existing SQL files in Kysely migration interface |
+| `src/persistence/orders-repo-kysely.ts` | Kysely-native `KyselyOrdersRepository` |
+| `src/audit/audit-repo-kysely.ts` | Kysely-native `KyselyAuditRepository` |
+
+### Migration path for existing callers
+
+1. Call `createKyselyDb(DATABASE_URL)` to get a `Kysely<CoordinatorDatabase>` instance.
+2. Pass it to `KyselyOrdersRepository` or `KyselyAuditRepository` instead of `OrdersRepository` / `AuditRepository`.
+3. The legacy `Database` / `PostgresDatabase` interface in `db.ts` continues to work unchanged during the transition window.
+4. `PostgresStatement.convertSqliteToPostgres` is **deprecated** — do not write new code that calls it.
+
+### Writing new migrations with Kysely
+
+New schema changes should use TypeScript Kysely migrations for full dialect portability:
+
+```ts
+// coordinator/migrations/012_my_change.ts
+import type { Kysely } from 'kysely';
+import type { CoordinatorDatabase } from '../src/persistence/schema-types.js';
+
+export async function up(db: Kysely<CoordinatorDatabase>): Promise<void> {
+  await db.schema
+    .alterTable('orders')
+    .addColumn('my_new_column', 'text')
+    .execute();
+}
+
+export async function down(db: Kysely<CoordinatorDatabase>): Promise<void> {
+  await db.schema
+    .alterTable('orders')
+    .dropColumn('my_new_column')
+    .execute();
+}
+```
+
+Register the migration in both `SQLITE_MIGRATIONS` and `POSTGRES_MIGRATION_FILES` in
+`coordinator/src/persistence/db.ts`, bump `CURRENT_SCHEMA_VERSION`, and run the
+`KyselyMigrationRunner` to apply it.

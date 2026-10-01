@@ -8,7 +8,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { useSendTransaction, useSwitchChain } from 'wagmi';
 import { mainnet, sepolia } from 'wagmi/chains';
-import { classifyRpcError } from '@wafflefinance/sdk/shared-utils';
+import { classifyRpcError } from '@wafflefinance/sdk';
 import { isTestnet, getCurrentNetwork } from '../../config/networks';
 import { selectApiBaseUrl, selectIsMockDataEnabled, selectSolanaRoutesEnabled } from '../../config/selectors';
 import { parseHtlcReceipt } from '../../lib/parseHtlcReceipt';
@@ -40,6 +40,8 @@ export interface BridgeFormProps {
   stellarAddress: string;
   solanaAddress?: string;
   signStellarTransaction: (xdr: string, networkPassphrase?: string) => Promise<string>;
+  /** When true, submission is blocked due to a wallet mismatch or disconnection. */
+  walletBlocked?: boolean;
 }
 
 const ETH_TOKEN = { symbol: 'ETH', name: 'Ethereum',      logo: '/images/eth.png', chain: 'Ethereum', decimals: 18 };
@@ -279,7 +281,7 @@ function directionToChains(dir: BridgeDirection): { srcChain: SupportedChain; ds
   return { srcChain: resolve(parts[0]), dstChain: resolve(parts[1]) };
 }
 
-export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, signStellarTransaction }: BridgeFormProps): React.JSX.Element {
+export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, signStellarTransaction, walletBlocked = false }: BridgeFormProps): React.JSX.Element {
   // ── wagmi v2 hooks ──────────────────────────────────────────────────────
   // sendTransactionAsync returns a tx hash immediately after the user signs;
   // we then poll for the receipt exactly as before.
@@ -526,29 +528,32 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
       if (src.symbol === 'ETH' && ethAddress) {
         setBalance('Loading...');
         try {
-          setBalance(await fetchEthBalance(ethAddress));
+          const val = await fetchEthBalance(ethAddress);
+          if (!cancelled) setBalance(val);
         } catch (err) {
           console.warn('ETH balance fetch failed:', classifyRpcError(err).category, classifyRpcError(err).message);
-          setBalance('0');
+          if (!cancelled) setBalance('0');
         }
       } else if (src.symbol === 'XLM' && stellarAddress) {
         setBalance('Loading...');
         try {
-          setBalance(await fetchXlmBalance(stellarAddress));
+          const val = await fetchXlmBalance(stellarAddress);
+          if (!cancelled) setBalance(val);
         } catch (err) {
           console.warn('XLM balance fetch failed:', classifyRpcError(err).category, classifyRpcError(err).message);
-          setBalance('0');
+          if (!cancelled) setBalance('0');
         }
       } else if (src.symbol === 'SOL' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test((solanaAddress ?? '').trim())) {
         setBalance('Loading...');
         try {
-          setBalance(await fetchSolBalance(solanaAddress!));
+          const val = await fetchSolBalance(solanaAddress!);
+          if (!cancelled) setBalance(val);
         } catch (err) {
           console.warn('SOL balance fetch failed:', classifyRpcError(err).category, classifyRpcError(err).message);
-          setBalance('0');
+          if (!cancelled) setBalance('0');
         }
       } else {
-        setBalance('0');
+        if (!cancelled) setBalance('0');
       }
       if (cancelled) return;
     };
@@ -640,6 +645,12 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
     if (ethDropped) dropped.push('Ethereum');
     if (needsStellar && stellarDropped) dropped.push('Stellar');
     if (needsSolana && solanaDropped) dropped.push('Solana');
+
+    const solanaSwitched = Boolean(prevSolanaRef.current) && Boolean(solana) && prevSolanaRef.current !== solana;
+    if (needsSolana && solanaSwitched) {
+      setValidationErrors({});
+      setIsSubmitting(false);
+    }
 
     if (dropped.length === 0) return;
 
@@ -1820,7 +1831,9 @@ export default function BridgeForm({ ethAddress, stellarAddress, solanaAddress, 
                 : 'cursor-not-allowed border border-white/5 bg-slate-700/45 text-slate-400'
             }`}
           >
-            {recoveryNotice
+            {walletBlocked
+              ? 'Fix Wallet Issue Above'
+              : recoveryNotice
               ? 'Reconnect Wallet'
               : !routeValidator.walletsReady
               ? 'Connect Wallet'

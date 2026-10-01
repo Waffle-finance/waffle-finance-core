@@ -49,11 +49,7 @@ export const LEGACY_RELAY_EVENT_SCHEMA_VERSION = 0 as const;
 
 // ── Source chains ─────────────────────────────────────────────────────────────
 
-export type RelaySourceChain =
-  | 'ethereum'
-  | 'solana'
-  | 'stellar'
-  | 'soroban';
+export type RelaySourceChain = 'ethereum' | 'solana' | 'stellar' | 'soroban';
 
 // ── Event kinds ───────────────────────────────────────────────────────────────
 
@@ -108,6 +104,18 @@ export interface RelayEventRoutingMeta {
   amount?: string | null;
   /** Token contract address (for EVM token events). */
   tokenAddress?: string | null;
+  /** Sender/Payer address for order auditability. */
+  sender?: string | null;
+  /** Beneficiary address for order auditability. */
+  beneficiary?: string | null;
+  /** Refund recipient address for order auditability. */
+  refundAddress?: string | null;
+  /** Safety deposit amount for order auditability. */
+  safetyDeposit?: string | null;
+  /** Claimer address for order auditability. */
+  claimer?: string | null;
+  /** Refunder address for order auditability. */
+  refunder?: string | null;
 }
 
 // ── Normalized event ──────────────────────────────────────────────────────────
@@ -288,6 +296,15 @@ export function createSolanaOrderEvent(opts: {
   slot: number;
   eventKind: RelayEventKind;
   hashlock?: string | null;
+  timelock?: number | null;
+  sender?: string | null;
+  beneficiary?: string | null;
+  refundAddress?: string | null;
+  amount?: string | null;
+  mint?: string | null;
+  safetyDeposit?: string | null;
+  claimer?: string | null;
+  refunder?: string | null;
 }): NormalizedRelayEvent {
   return createRelayEvent({
     sourceChain: 'solana',
@@ -297,6 +314,15 @@ export function createSolanaOrderEvent(opts: {
     routingMeta: {
       slot: opts.slot,
       hashlock: opts.hashlock ?? null,
+      timelock: opts.timelock ?? null,
+      ...(opts.sender ? { sender: opts.sender } : {}),
+      ...(opts.beneficiary ? { beneficiary: opts.beneficiary } : {}),
+      ...(opts.refundAddress ? { refundAddress: opts.refundAddress } : {}),
+      ...(opts.amount ? { amount: opts.amount } : {}),
+      ...(opts.mint ? { tokenAddress: opts.mint } : {}),
+      ...(opts.safetyDeposit ? { safetyDeposit: opts.safetyDeposit } : {}),
+      ...(opts.claimer ? { claimer: opts.claimer } : {}),
+      ...(opts.refunder ? { refunder: opts.refunder } : {}),
     },
   });
 }

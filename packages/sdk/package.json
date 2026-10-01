@@ -27,10 +27,6 @@
       "types": "./dist/state-machine/index.d.ts",
       "import": "./dist/state-machine/index.js"
     },
-    "./status-display": {
-      "import": "./dist/status-display/index.js",
-      "types": "./dist/status-display/index.d.ts"
-    },
     "./solana": {
       "types": "./dist/solana/index.d.ts",
       "import": "./dist/solana/index.js"
@@ -63,7 +59,6 @@
       "types": "./dist/approval.d.ts",
       "import": "./dist/approval.js"
     },
-
     "./ethereum/adapter": {
       "types": "./dist/ethereum/adapter.d.ts",
       "import": "./dist/ethereum/adapter.js"
@@ -88,21 +83,17 @@
       "types": "./dist/solana/account-validation.d.ts",
       "import": "./dist/solana/account-validation.js"
     },
+    "./solana/wallet": {
+      "types": "./dist/solana/wallet.d.ts",
+      "import": "./dist/solana/wallet.js"
+    },
     "./solana/idl": {
       "types": "./dist/solana/idl/htlc.d.ts",
       "import": "./dist/solana/idl/htlc.js"
     },
-    "./fixtures": {
+    "./internal/fixtures": {
       "types": "./dist/fixtures/index.d.ts",
       "import": "./dist/fixtures/index.js"
-    },
-    "./guards": {
-      "types": "./dist/guards/index.d.ts",
-      "import": "./dist/guards/index.js"
-    },
-    "./shared-utils": {
-      "types": "./dist/shared-utils/index.d.ts",
-      "import": "./dist/shared-utils/index.js"
     },
     "./coordinator": {
       "types": "./dist/coordinator/index.d.ts",

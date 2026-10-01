@@ -118,7 +118,7 @@
  * USING THESE
  * ─────────────────────────────────────────────────────────────────────────────
  * ```ts
- * import { CROSS_CHAIN_FLOWS, SOLANA_ACCOUNT_BUFFER_FLOW_2_ACTIVE } from '@wafflefinance/sdk/fixtures';
+ * import { CROSS_CHAIN_FLOWS, SOLANA_ACCOUNT_BUFFER_FLOW_2_ACTIVE } from '@wafflefinance/sdk/internal/fixtures';
  *
  * // The four flows, each with its announce body and every lifecycle stage.
  * for (const flow of CROSS_CHAIN_FLOWS) {

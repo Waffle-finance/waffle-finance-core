@@ -22,7 +22,7 @@
  *   is not compiled, not published, and unreachable from `e2e/`, the
  *   frontend, or the coordinator.
  * • `src/fixtures/` **is** compiled into `dist/` and is therefore reachable
- *   from any workspace as `@wafflefinance/sdk/fixtures`, once an `exports`
+ *   from any workspace as `@wafflefinance/sdk/internal/fixtures`, once an `exports`
  *   subpath is added (that entry lives in `package.json`, which this change
  *   does not touch — see the report). That is what makes the fixtures a
  *   *contract benchmark* for new contributors and for other packages,

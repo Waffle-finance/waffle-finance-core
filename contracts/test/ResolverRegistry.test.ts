@@ -1,4 +1,4 @@
-﻿import { expect } from "chai";
+import { expect } from "chai";
 import { ethers } from "hardhat";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import type { ResolverRegistry, TestERC20 } from "../typechain-types";
@@ -709,6 +709,13 @@ describe("ResolverRegistry", () => {
       expect(await registry.minStake()).to.equal(newMin);
     });
 
+    it("setMinStake reverts if newMinStake is zero", async () => {
+      const { owner, registry } = await deploy();
+      await expect(
+        registry.connect(owner).setMinStake(0n)
+      ).to.be.revertedWithCustomError(registry, "InvalidAmount");
+    });
+
     it("setSlashBeneficiary emits SlashBeneficiaryUpdated with old and new addresses in correct order", async () => {
       const [, , newBen] = await ethers.getSigners();
       const { owner, beneficiary, registry } = await deploy();
@@ -960,6 +967,16 @@ describe("ResolverRegistry", () => {
   //  constructor validation
 
   describe("constructor", () => {
+    it("reverts if minStake is zero", async () => {
+      const [owner, beneficiary] = await ethers.getSigners();
+      const Token = await ethers.getContractFactory("TestERC20");
+      const token = await Token.deploy("S", "S", 1n);
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      await expect(
+        Registry.deploy(await token.getAddress(), 0n, beneficiary.address, owner.address)
+      ).to.be.revertedWithCustomError(Registry, "InvalidAmount");
+    });
+
     it("reverts if stakeAsset is the zero address", async () => {
       const [owner, beneficiary] = await ethers.getSigners();
       const Registry = await ethers.getContractFactory("ResolverRegistry");

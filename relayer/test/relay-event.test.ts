@@ -199,6 +199,35 @@ describe('createSolanaOrderEvent', () => {
     expect(ev.routingMeta.slot).toBe(250_000_000);
     expect(ev.routingMeta.hashlock).toBe('0xhash');
   });
+
+  it('includes rich Solana audit metadata in routingMeta when provided', () => {
+    const ev = createSolanaOrderEvent({
+      orderId: 'sol_pda_456',
+      txHash: 'sol_tx_def',
+      slot: 250_000_100,
+      eventKind: 'order_created',
+      hashlock: '0x' + 'aa'.repeat(32),
+      timelock: 1750000000,
+      sender: '5z6jNfCSiruthzMbtzhjuXJ2BAYdY6ayUMpzywcoow7S',
+      beneficiary: '4vNbbQT7CRBrzKuaZfTsoJ5LUYQRegKVWv4YS83SgHgw',
+      refundAddress: 'DZJfXJBVo4ntxMGj1yTKZ2m3zf1tji5q9HVF5Bur18Ke',
+      amount: '1000000000',
+      mint: 'So11111111111111111111111111111111111111112',
+      safetyDeposit: '50000000',
+    });
+
+    expect(ev.sourceChain).toBe('solana');
+    expect(ev.eventKind).toBe('order_created');
+    expect(ev.routingMeta.slot).toBe(250_000_100);
+    expect(ev.routingMeta.hashlock).toBe('0x' + 'aa'.repeat(32));
+    expect(ev.routingMeta.timelock).toBe(1750000000);
+    expect(ev.routingMeta.sender).toBe('5z6jNfCSiruthzMbtzhjuXJ2BAYdY6ayUMpzywcoow7S');
+    expect(ev.routingMeta.beneficiary).toBe('4vNbbQT7CRBrzKuaZfTsoJ5LUYQRegKVWv4YS83SgHgw');
+    expect(ev.routingMeta.refundAddress).toBe('DZJfXJBVo4ntxMGj1yTKZ2m3zf1tji5q9HVF5Bur18Ke');
+    expect(ev.routingMeta.amount).toBe('1000000000');
+    expect(ev.routingMeta.tokenAddress).toBe('So11111111111111111111111111111111111111112');
+    expect(ev.routingMeta.safetyDeposit).toBe('50000000');
+  });
 });
 
 // ── Type guards ───────────────────────────────────────────────────────────────
@@ -224,44 +253,55 @@ describe('isNormalizedRelayEvent', () => {
   });
 
   it('returns false for missing orderId', () => {
-    expect(isNormalizedRelayEvent({
-      sourceChain: 'ethereum',
-      eventKind: 'order_created',
-      orderId: '',
-      txHash: null,
-      observedAt: Date.now(),
-      routingMeta: {},
-    })).toBe(false);
+    expect(
+      isNormalizedRelayEvent({
+        sourceChain: 'ethereum',
+        eventKind: 'order_created',
+        orderId: '',
+        txHash: null,
+        observedAt: Date.now(),
+        routingMeta: {},
+      })
+    ).toBe(false);
   });
 
   it('returns false for unknown sourceChain', () => {
-    expect(isNormalizedRelayEvent({
-      sourceChain: 'bitcoin',
-      eventKind: 'order_created',
-      orderId: 'x',
-      txHash: null,
-      observedAt: Date.now(),
-      routingMeta: {},
-    })).toBe(false);
+    expect(
+      isNormalizedRelayEvent({
+        sourceChain: 'bitcoin',
+        eventKind: 'order_created',
+        orderId: 'x',
+        txHash: null,
+        observedAt: Date.now(),
+        routingMeta: {},
+      })
+    ).toBe(false);
   });
 
   it('returns false for unknown eventKind', () => {
-    expect(isNormalizedRelayEvent({
-      sourceChain: 'ethereum',
-      eventKind: 'unknown_kind',
-      orderId: 'x',
-      txHash: null,
-      observedAt: Date.now(),
-      routingMeta: {},
-    })).toBe(false);
+    expect(
+      isNormalizedRelayEvent({
+        sourceChain: 'ethereum',
+        eventKind: 'unknown_kind',
+        orderId: 'x',
+        txHash: null,
+        observedAt: Date.now(),
+        routingMeta: {},
+      })
+    ).toBe(false);
   });
 });
 
 describe('isValidRelayEventKind', () => {
   it('returns true for all valid kinds', () => {
     const kinds = [
-      'order_created', 'funds_locked', 'secret_revealed',
-      'order_claimed', 'order_expired', 'order_refunded', 'settlement_confirmed',
+      'order_created',
+      'funds_locked',
+      'secret_revealed',
+      'order_claimed',
+      'order_expired',
+      'order_refunded',
+      'settlement_confirmed',
     ];
     for (const k of kinds) {
       expect(isValidRelayEventKind(k)).toBe(true);
@@ -304,8 +344,24 @@ describe('event schema versioning', () => {
 
   it('all chain-specific factories inherit the current schemaVersion', () => {
     const events = [
-      createEthOrderCreatedEvent({ orderId: '1', txHash: '0x', blockNumber: 1, hashlock: '0x', timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false }),
-      createEthOrderClaimedEvent({ orderId: '2', txHash: '0x', blockNumber: 1, amount: '0', resolverAddress: '0x' }),
+      createEthOrderCreatedEvent({
+        orderId: '1',
+        txHash: '0x',
+        blockNumber: 1,
+        hashlock: '0x',
+        timelock: 0,
+        amount: '0',
+        tokenAddress: '0x',
+        feeRateBps: 0,
+        partialFillEnabled: false,
+      }),
+      createEthOrderClaimedEvent({
+        orderId: '2',
+        txHash: '0x',
+        blockNumber: 1,
+        amount: '0',
+        resolverAddress: '0x',
+      }),
       createEthOrderRefundedEvent({ orderId: '3', txHash: '0x', blockNumber: 1, amount: '0' }),
       createStellarSettlementEvent({ orderId: '4', txHash: 'tx', ledgerSequence: 1 }),
       createSolanaOrderEvent({ orderId: '5', txHash: 'tx', slot: 1, eventKind: 'funds_locked' }),
@@ -342,8 +398,15 @@ describe('event schema versioning', () => {
 
   it('parseLegacyRelayEvent passes through events that already carry schemaVersion', () => {
     const modern = createEthOrderCreatedEvent({
-      orderId: 'w', txHash: '0x', blockNumber: 1, hashlock: '0x',
-      timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false,
+      orderId: 'w',
+      txHash: '0x',
+      blockNumber: 1,
+      hashlock: '0x',
+      timelock: 0,
+      amount: '0',
+      tokenAddress: '0x',
+      feeRateBps: 0,
+      partialFillEnabled: false,
     });
     const result = parseLegacyRelayEvent(modern);
     expect(result.schemaVersion).toBe(RELAY_EVENT_SCHEMA_VERSION);
@@ -364,8 +427,15 @@ describe('event schema versioning', () => {
 
   it('isNormalizedRelayEvent accepts a versioned event with schemaVersion=1', () => {
     const ev = createEthOrderCreatedEvent({
-      orderId: '1', txHash: '0x', blockNumber: 1, hashlock: '0x',
-      timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false,
+      orderId: '1',
+      txHash: '0x',
+      blockNumber: 1,
+      hashlock: '0x',
+      timelock: 0,
+      amount: '0',
+      tokenAddress: '0x',
+      feeRateBps: 0,
+      partialFillEnabled: false,
     });
     expect(isNormalizedRelayEvent(ev)).toBe(true);
   });
@@ -389,15 +459,26 @@ describe('event schema versioning', () => {
 describe('events from all chains follow the same schema', () => {
   it('ETH, Stellar, and Solana events all satisfy isNormalizedRelayEvent', () => {
     const eth = createEthOrderCreatedEvent({
-      orderId: '1', txHash: '0xeth', blockNumber: 1,
-      hashlock: '0x', timelock: 0, amount: '0',
-      tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false,
+      orderId: '1',
+      txHash: '0xeth',
+      blockNumber: 1,
+      hashlock: '0x',
+      timelock: 0,
+      amount: '0',
+      tokenAddress: '0x',
+      feeRateBps: 0,
+      partialFillEnabled: false,
     });
     const stellar = createStellarSettlementEvent({
-      orderId: '2', txHash: 'stellar', ledgerSequence: 1,
+      orderId: '2',
+      txHash: 'stellar',
+      ledgerSequence: 1,
     });
     const solana = createSolanaOrderEvent({
-      orderId: '3', txHash: 'sol_tx', slot: 1, eventKind: 'order_created',
+      orderId: '3',
+      txHash: 'sol_tx',
+      slot: 1,
+      eventKind: 'order_created',
     });
 
     expect(isNormalizedRelayEvent(eth)).toBe(true);
@@ -407,7 +488,17 @@ describe('events from all chains follow the same schema', () => {
 
   it('all events have the same required top-level fields', () => {
     const events = [
-      createEthOrderCreatedEvent({ orderId: '1', txHash: '0x', blockNumber: 1, hashlock: '0x', timelock: 0, amount: '0', tokenAddress: '0x', feeRateBps: 0, partialFillEnabled: false }),
+      createEthOrderCreatedEvent({
+        orderId: '1',
+        txHash: '0x',
+        blockNumber: 1,
+        hashlock: '0x',
+        timelock: 0,
+        amount: '0',
+        tokenAddress: '0x',
+        feeRateBps: 0,
+        partialFillEnabled: false,
+      }),
       createStellarSettlementEvent({ orderId: '2', txHash: 'tx', ledgerSequence: 1 }),
       createSolanaOrderEvent({ orderId: '3', txHash: 'tx', slot: 1, eventKind: 'funds_locked' }),
     ];

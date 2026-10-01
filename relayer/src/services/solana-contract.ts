@@ -29,8 +29,20 @@ import {
   buildClaimOrderInstruction,
   buildRefundOrderInstruction,
   NATIVE_SOL_MINT,
+  deserialiseOrderAccount,
+  OrderStatus,
   SolanaRpcProvider,
   createSolanaRpcProvider,
+  SolanaAccountInitError,
+  assertAccountIsUninitialised,
+  assertPayerCanFund,
+  classifyUninitialisedAccount,
+  rentExemptMinimumFor,
+  simulateTransactionOrThrow,
+  verifyInitialisedAccount,
+  type SimulatableTransaction,
+  type SimulationCapableConnection,
+  type SolanaAccountLayoutName,
 } from "@wafflefinance/sdk/solana";
 import {
   isSolanaPlaceholder,
@@ -167,10 +179,174 @@ export class SolanaDisabledError extends Error {
 
 /** Thrown on Solana RPC or transaction submission failures. */
 export class SolanaSubmissionError extends Error {
-  constructor(message: string, public readonly cause?: unknown) {
+  constructor(
+    message: string,
+    public readonly cause?: unknown,
+    public readonly signature?: string
+  ) {
     super(message);
     this.name = "SolanaSubmissionError";
   }
+}
+
+export function assertSolanaTransactionSucceeded(
+  signature: string,
+  operation: "claim" | "refund",
+  transactionError: unknown
+): void {
+  if (transactionError !== null && transactionError !== undefined) {
+    throw new SolanaSubmissionError(
+      `Solana ${operation} transaction ${signature} was confirmed with an on-chain error`,
+      transactionError,
+      signature
+    );
+  }
+}
+
+export type SolanaTerminalOrderStatus =
+  | typeof OrderStatus.Claimed
+  | typeof OrderStatus.Refunded;
+
+export interface SolanaOrderStatusVerificationOptions {
+  orderId: string;
+  signature: string;
+  expectedStatus: SolanaTerminalOrderStatus;
+  readStatus: () => Promise<number | null>;
+  attempts?: number;
+  retryDelayMs?: number;
+}
+
+/**
+ * Wait until the order account reflects the confirmed claim/refund. A
+ * successful send or confirmation response alone is not enough to report a
+ * settlement success to callers.
+ */
+export async function verifySolanaOrderStatus(
+  opts: SolanaOrderStatusVerificationOptions
+): Promise<void> {
+  const attempts = opts.attempts ?? 10;
+  const retryDelayMs = opts.retryDelayMs ?? 500;
+  const expectedName = opts.expectedStatus === OrderStatus.Claimed ? "claimed" : "refunded";
+  let observedStatus: number | null = null;
+  let lastReadError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      observedStatus = await opts.readStatus();
+      lastReadError = undefined;
+
+      if (observedStatus === opts.expectedStatus) return;
+
+      if (
+        observedStatus !== null &&
+        observedStatus !== OrderStatus.Active &&
+        observedStatus !== opts.expectedStatus
+      ) {
+        const actualName = observedStatus === OrderStatus.Claimed ? "claimed" : "refunded";
+        throw new SolanaSubmissionError(
+          `Solana order ${opts.orderId} is ${actualName} on-chain; expected ${expectedName} ` +
+          `(signature ${opts.signature})`,
+          undefined,
+          opts.signature
+        );
+      }
+    } catch (err) {
+      if (err instanceof SolanaSubmissionError) throw err;
+      lastReadError = err;
+    }
+
+    if (attempt < attempts) {
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  const observed = observedStatus === null
+    ? "not yet visible"
+    : observedStatus === OrderStatus.Active
+      ? "still active"
+      : `in unexpected status ${observedStatus}`;
+  throw new SolanaSubmissionError(
+    `Solana ${expectedName} transaction ${opts.signature} was submitted, but order ` +
+    `${opts.orderId} is ${observed} after ${attempts} verification attempt(s)`,
+    lastReadError,
+    opts.signature
+  );
+}
+
+/**
+ * A pre- or post-initialisation safety rail failed: the rent exemption could
+ * not be computed, the payer could not fund it, the target account was in an
+ * illegal state, or the account created did not match the declared layout.
+ *
+ * Re-exported so relayer callers can catch it without depending on the SDK
+ * directly, and so it is distinguishable from a generic submission failure.
+ */
+export { SolanaAccountInitError };
+
+/**
+ * Preflight for a `create_order`, run before any lamports are committed.
+ *
+ * Three checks, in order of cost:
+ *
+ *  1. **Rent from the cluster** for the account's real size. Never a hardcoded
+ *     lamport figure: the rent table is a runtime parameter.
+ *  2. **Payer solvency** for rent + amount + safety deposit + fee. An
+ *     under-funded relayer keypair otherwise fails at execution with an opaque
+ *     "insufficient funds" after the fee is spent.
+ *  3. **Target account state.** `create_account` requires a zero-lamport,
+ *     unallocated account, so an address that already holds lamports — or an
+ *     already-initialised order — would revert with "already in use". Both are
+ *     refused here with the account named in the message.
+ *
+ * Throws a `SolanaAccountInitError` subclass on the first failure. Nothing is
+ * submitted, so a failure cannot leave a half-initialised account behind: the
+ * program is never invoked.
+ */
+async function preflightCreateOrder(args: {
+  connection: Connection;
+  commitment: Commitment;
+  programPk: PublicKey;
+  orderPda: PublicKey;
+  payer: PublicKey;
+  mint: PublicKey;
+  amount: bigint;
+  safetyDeposit: bigint;
+  layout: SolanaAccountLayoutName;
+}): Promise<bigint> {
+  const account = args.orderPda.toBase58();
+
+  // 1. Rent exemption, derived from the account's real size (`layout` is the
+  //    shared field table, not a literal) and asked of the cluster rather than
+  //    hardcoded.
+  const rentLamports = await rentExemptMinimumFor(args.connection, args.layout);
+
+  // 2. Payer solvency: rent + locked funds + the transaction fee. For an SPL
+  //    mint the tokens move from a token account, so only rent and the fee come
+  //    out of the native balance.
+  const balanceLamports = BigInt(
+    await args.connection.getBalance(args.payer, args.commitment)
+  );
+  assertPayerCanFund({
+    payer: args.payer,
+    account,
+    rentLamports,
+    amountLamports: args.mint.toBase58() === NATIVE_SOL_MINT ? args.amount : 0n,
+    safetyDepositLamports: args.safetyDeposit,
+    // create_order is signed by the relayer keypair only.
+    signatureCount: 1,
+    balanceLamports,
+  });
+
+  // 3. The target must be absent. `getAccountInfo` returns null for a
+  //    zero-lamport account, so a stray transfer to a future order address is
+  //    indistinguishable from "does not exist" unless classified explicitly.
+  const existing = await args.connection.getAccountInfo(args.orderPda, args.commitment);
+  assertAccountIsUninitialised(classifyUninitialisedAccount(existing, args.programPk), {
+    account,
+    programId: args.programPk.toBase58(),
+  });
+
+  return rentLamports;
 }
 
 /**
@@ -216,11 +392,121 @@ class PlaceholderSolanaIntegration implements SolanaIntegration {
  * Uses the SDK's instruction builders to construct HTLC transactions and
  * @solana/web3.js to sign and submit them to the network.
  */
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Decode a base-58 string to bytes.
+ *
+ * `Buffer.from(value, "base58")` throws `Unknown encoding: base58` — Node has
+ * no such encoding — so the configured relayer could never load a base-58
+ * `SOLANA_RELAYER_PRIVATE_KEY`, which is the format every Solana wallet and
+ * `solana-keygen` emits. This is the standard bitcoin-alphabet decoder, kept
+ * local so the relayer gains no new dependency.
+ */
+function decodeBase58(input: string): Uint8Array {
+  if (input.length === 0) {
+    throw new SolanaSubmissionError("SOLANA_RELAYER_PRIVATE_KEY is empty");
+  }
+
+  const bytes: number[] = [0];
+  for (const char of input) {
+    const value = BASE58_ALPHABET.indexOf(char);
+    if (value === -1) {
+      // The offending character is not included: it is a byte of the secret.
+      throw new SolanaSubmissionError(
+        "SOLANA_RELAYER_PRIVATE_KEY is not valid base-58: it contains a character outside the base-58 alphabet"
+      );
+    }
+    let carry = value;
+    for (let i = 0; i < bytes.length; i++) {
+      carry += bytes[i] * 58;
+      bytes[i] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+
+  // Each leading "1" is a leading zero byte.
+  for (let i = 0; i < input.length && input[i] === "1"; i++) {
+    bytes.push(0);
+  }
+
+  return Uint8Array.from(bytes.reverse());
+}
+
+/**
+ * Load the relayer signing key, or return `undefined` with a warning.
+ *
+ * Accepts base-58 (what `solana-keygen` and every wallet emit), `0x`-hex, and a
+ * JSON byte array. A missing or malformed key is reported once at startup
+ * rather than thrown: the relayer still needs to boot so the operator can see
+ * the problem, and every submission path fails loudly via `requireSigner`.
+ */
+function loadRelayerKeypair(privateKey: string, log: Logger): Keypair | undefined {
+  const trimmed = privateKey.trim();
+
+  if (trimmed.length === 0) {
+    log.warn(
+      "Solana is configured but SOLANA_RELAYER_PRIVATE_KEY is not set. " +
+        "The relayer will start but cannot sign or settle orders."
+    );
+    return undefined;
+  }
+
+  try {
+    let secretKey: Uint8Array;
+    if (trimmed.startsWith("[")) {
+      // JSON array format: [1,2,3,...]
+      secretKey = new Uint8Array(JSON.parse(trimmed) as number[]);
+    } else if (trimmed.startsWith("0x")) {
+      const hex = trimmed.slice(2);
+      if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) {
+        throw new Error("not valid hex");
+      }
+      secretKey = new Uint8Array(Buffer.from(hex, "hex"));
+    } else {
+      secretKey = decodeBase58(trimmed);
+    }
+
+    // A Solana secret key is exactly 64 bytes (32-byte seed + 32-byte public
+    // key). Reject anything else here, where the cause is still obvious.
+    if (secretKey.length !== 64) {
+      throw new Error(
+        `decoded to ${secretKey.length} bytes, expected 64 — check that this is a ` +
+          "secret key and not a public key or address"
+      );
+    }
+
+    return Keypair.fromSecretKey(secretKey);
+  } catch (error) {
+    // Deliberately NOT logging `error`: a JSON.parse failure in V8 echoes the
+    // offending input into its message, which would put a slice of
+    // SOLANA_RELAYER_PRIVATE_KEY into the logs. The error class is enough to
+    // tell a malformed key from a bad length, and the operator has the source
+    // of the value anyway.
+    log.error(
+      { errorType: error instanceof Error ? error.name : typeof error },
+      "SOLANA_RELAYER_PRIVATE_KEY could not be loaded. The relayer will start " +
+        "but cannot sign or settle orders. Set it to a 64-byte secret key as " +
+        "base-58, 0x-hex, or a JSON byte array."
+    );
+    return undefined;
+  }
+}
+
 class ConfiguredSolanaIntegration implements SolanaIntegration {
   readonly mode: SolanaConfigStatus = "configured";
   private readonly rpcProvider: SolanaRpcProvider;
   private readonly connection: Connection;
-  private readonly keypair: Keypair | null;
+  /**
+   * Undefined when no usable key was configured. Construction must still
+   * succeed so the process can start and report the misconfiguration, but every
+   * submission fails through {@link requireSigner}.
+   */
+  private readonly keypair: Keypair | undefined;
   private readonly programPk: PublicKey;
   private readonly commitment: Commitment;
 
@@ -236,31 +522,41 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     this.rpcProvider = createSolanaRpcProvider(rpcUrl, commitment);
     // Keep a direct Connection for callers that build Transactions themselves.
     this.connection = this.rpcProvider.getConnection();
+    this.keypair = loadRelayerKeypair(privateKey, log);
+  }
 
-    // Parse the private key — supports base-58, hex, and JSON array formats.
-    let kp: Keypair | null = null;
-    if (privateKey && privateKey.trim().length > 0) {
-      try {
-        let secretKey: Uint8Array;
-        if (privateKey.startsWith("[")) {
-          secretKey = new Uint8Array(JSON.parse(privateKey));
-        } else if (privateKey.startsWith("0x")) {
-          const hex = privateKey.slice(2);
-          secretKey = new Uint8Array(Buffer.from(hex, "hex"));
-        } else {
-          const bs58 = require("bs58");
-          secretKey = bs58.decode(privateKey);
-        }
-        kp = Keypair.fromSecretKey(secretKey);
-      } catch (err) {
-        this.log.warn({ err }, "Failed to parse Solana private key");
-      }
+  /**
+   * The signing key, or a clear error explaining how to fix its absence.
+   *
+   * Every `submit*` path goes through here, so a relayer started without a key
+   * fails with an actionable message instead of a `TypeError` on `undefined`.
+   */
+  private requireSigner(): Keypair {
+    if (!this.keypair) {
+      throw new SolanaSubmissionError(
+        "Cannot sign Solana transaction: no usable SOLANA_RELAYER_PRIVATE_KEY was configured. " +
+          "Provide a 64-byte secret key as base-58, 0x-hex, or a JSON byte array. " +
+          "The relayer can start without one, but it cannot settle orders."
+      );
     }
-    this.keypair = kp;
+    return this.keypair;
   }
 
   isEnabled(): boolean {
     return true;
+  }
+
+  private async readOrderStatus(orderId: string): Promise<number | null> {
+    const orderPda = new PublicKey(orderId);
+    const info = await this.rpcProvider.withFallback(
+      (conn) => conn.getAccountInfo(orderPda, this.commitment),
+      `getAccountInfo(${orderId.slice(0, 8)}…)`
+    );
+    if (!info) return null;
+    if (!info.owner.equals(this.programPk)) {
+      throw new Error(`Solana order ${orderId} is owned by ${info.owner.toBase58()}, not the configured HTLC program`);
+    }
+    return deserialiseOrderAccount(Buffer.from(info.data), orderId).status;
   }
 
   validateAddress(address: string): boolean {
@@ -293,7 +589,7 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
         amount: params.amount.toString(),
         hashlock: params.hashlock,
         timelock: timelockAbsolute,
-        payer: this.keypair.publicKey.toBase58(),
+        payer:         this.requireSigner().publicKey.toBase58(),
       },
       "Submitting Solana lock transaction"
     );
@@ -301,7 +597,7 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     const { instruction, orderPda } = buildCreateOrderInstruction(
       this.programPk,
       {
-        payer: this.keypair.publicKey,
+        payer:         this.requireSigner().publicKey,
         beneficiary: new PublicKey(params.beneficiary),
         refundAddress: new PublicKey(params.refundAddress),
         mint: new PublicKey(mint),
@@ -313,20 +609,51 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     );
 
     try {
+      // ── Preflight ────────────────────────────────────────────────────────
+      // Nothing is submitted until rent is known, the payer is proven solvent,
+      // and the target PDA is proven absent. Runs first so a misconfiguration
+      // costs no fee and creates no half-initialised account.
+      await preflightCreateOrder({
+        connection: this.connection,
+        commitment: this.commitment,
+        programPk: this.programPk,
+        orderPda,
+        payer:         this.requireSigner().publicKey,
+        mint: new PublicKey(mint),
+        amount: params.amount,
+        safetyDeposit: BigInt(0),
+        layout: "htlcOrder",
+      });
+
       const { blockhash } = await this.rpcProvider.withFallback(
         (conn) => conn.getLatestBlockhash(this.commitment),
         "getLatestBlockhash(lock)"
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
-        feePayer: this.keypair.publicKey,
+        feePayer:         this.requireSigner().publicKey,
       });
       tx.add(instruction);
-      tx.partialSign(this.keypair);
+      tx.partialSign(this.requireSigner());
+
+      const serialized = tx.serialize();
+
+      // Explicit simulation rather than relying on sendRawTransaction's
+      // implicit preflight: the implicit one rejects the transaction but
+      // discards the program logs, so a rejected `create_order` arrives as a
+      // bare "Custom program error: 0x…" with no indication of which on-chain
+      // check fired.
+      await simulateTransactionOrThrow(
+        this.connection as unknown as SimulationCapableConnection,
+        tx as unknown as SimulatableTransaction,
+        { account: orderPda.toBase58() }
+      );
 
       const sig = await this.rpcProvider.withFallback(
-        (conn) => conn.sendRawTransaction(tx.serialize(), {
-          skipPreflight: false,
+        (conn) => conn.sendRawTransaction(serialized, {
+          // The simulation above *is* the preflight; repeating it would only
+          // cost a round trip.
+          skipPreflight: true,
           maxRetries: 3,
         }),
         "sendRawTransaction(lock)"
@@ -336,14 +663,32 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
         "confirmTransaction(lock)"
       );
 
+      // ── Post-init verification ──────────────────────────────────────────
+      // A confirmed transaction is not proof of a correct account: the program
+      // can exit successfully having written a truncated or un-funded account.
+      // Re-read it and check owner, exact data length, and rent exemption.
+      const account = await verifyInitialisedAccount(
+        this.connection,
+        orderPda,
+        "htlcOrder",
+        { expectedOwner: this.programPk, commitment: this.commitment }
+      );
+
       const slot = await this.rpcProvider.withFallback(
         (conn) => conn.getSlot(this.commitment),
         "getSlot(lock)"
       );
 
       this.log.info(
-        { signature: sig, orderId: orderPda.toBase58(), slot },
-        "Solana lock transaction confirmed"
+        {
+          signature: sig,
+          orderId: orderPda.toBase58(),
+          slot,
+          accountBytes: account.dataLength,
+          accountLamports: account.lamports.toString(),
+          rentExemptMinimum: account.rentExemptMinimum.toString(),
+        },
+        "Solana lock transaction confirmed and account verified"
       );
 
       return {
@@ -352,10 +697,19 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
         blockNumber: slot,
       };
     } catch (err) {
-      this.log.error({ err, hashlock: params.hashlock }, "Solana lock submission failed");
+      // A rejected simulation carries the program logs; keep them on the error
+      // rather than letting the catch block flatten them into a string.
+      const simulationLogs = err instanceof SolanaAccountInitError
+        ? err.simulationLogs
+        : undefined;
+      this.log.error(
+        { err, hashlock: params.hashlock, simulationLogs },
+        "Solana lock submission failed"
+      );
       throw new SolanaSubmissionError(
         `Solana lock submission failed: ${err instanceof Error ? err.message : String(err)}`,
-        err
+        err,
+        simulationLogs
       );
     }
   }
@@ -383,12 +737,13 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     );
 
     const ix = buildClaimOrderInstruction(this.programPk, {
-      claimer: this.keypair.publicKey,
+      claimer:         this.requireSigner().publicKey,
       orderPda,
-      beneficiaryAccount: this.keypair.publicKey,
+      beneficiaryAccount:         this.requireSigner().publicKey,
       preimageBytes,
     });
 
+    let signature: string | undefined;
     try {
       const { blockhash } = await this.rpcProvider.withFallback(
         (conn) => conn.getLatestBlockhash(this.commitment),
@@ -396,42 +751,49 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
-        feePayer: this.keypair.publicKey,
+        feePayer:         this.requireSigner().publicKey,
       });
       tx.add(ix);
-      tx.partialSign(this.keypair);
+      tx.partialSign(this.requireSigner());
 
-      const sig = await this.rpcProvider.withFallback(
+      const submittedSignature = await this.rpcProvider.withFallback(
         (conn) => conn.sendRawTransaction(tx.serialize(), {
           skipPreflight: false,
           maxRetries: 3,
         }),
         "sendRawTransaction(claim)"
       );
-      await this.rpcProvider.withFallback(
-        (conn) => conn.confirmTransaction(sig, this.commitment),
+      signature = submittedSignature;
+      const confirmation = await this.rpcProvider.withFallback(
+        (conn) => conn.confirmTransaction(submittedSignature, this.commitment),
         "confirmTransaction(claim)"
       );
+      assertSolanaTransactionSucceeded(submittedSignature, "claim", confirmation.value.err);
 
-      const slot = await this.rpcProvider.withFallback(
-        (conn) => conn.getSlot(this.commitment),
-        "getSlot(claim)"
-      );
+      await verifySolanaOrderStatus({
+        orderId: params.orderId,
+        signature: submittedSignature,
+        expectedStatus: OrderStatus.Claimed,
+        readStatus: () => this.readOrderStatus(params.orderId),
+      });
 
       this.log.info(
-        { signature: sig, orderId: params.orderId, slot },
-        "Solana claim transaction confirmed"
+        { signature: submittedSignature, orderId: params.orderId, slot: confirmation.context.slot },
+        "Solana claim transaction confirmed and verified on-chain"
       );
 
       return {
-        signature: sig,
-        blockNumber: slot,
+        signature: submittedSignature,
+        blockNumber: confirmation.context.slot,
       };
     } catch (err) {
       this.log.error({ err, orderId: params.orderId }, "Solana claim submission failed");
+      if (err instanceof SolanaSubmissionError) throw err;
       throw new SolanaSubmissionError(
-        `Solana claim submission failed: ${err instanceof Error ? err.message : String(err)}`,
-        err
+        `Solana claim submission failed${signature ? ` (signature ${signature})` : ""}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+        err,
+        signature
       );
     }
   }
@@ -455,11 +817,12 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
     );
 
     const ix = buildRefundOrderInstruction(this.programPk, {
-      refunder: this.keypair.publicKey,
+      refunder:         this.requireSigner().publicKey,
       orderPda,
-      refundAccount: this.keypair.publicKey,
+      refundAccount:         this.requireSigner().publicKey,
     });
 
+    let signature: string | undefined;
     try {
       const { blockhash } = await this.rpcProvider.withFallback(
         (conn) => conn.getLatestBlockhash(this.commitment),
@@ -467,42 +830,49 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       );
       const tx = new Transaction({
         recentBlockhash: blockhash,
-        feePayer: this.keypair.publicKey,
+        feePayer:         this.requireSigner().publicKey,
       });
       tx.add(ix);
-      tx.partialSign(this.keypair);
+      tx.partialSign(this.requireSigner());
 
-      const sig = await this.rpcProvider.withFallback(
+      const submittedSignature = await this.rpcProvider.withFallback(
         (conn) => conn.sendRawTransaction(tx.serialize(), {
           skipPreflight: false,
           maxRetries: 3,
         }),
         "sendRawTransaction(refund)"
       );
-      await this.rpcProvider.withFallback(
-        (conn) => conn.confirmTransaction(sig, this.commitment),
+      signature = submittedSignature;
+      const confirmation = await this.rpcProvider.withFallback(
+        (conn) => conn.confirmTransaction(submittedSignature, this.commitment),
         "confirmTransaction(refund)"
       );
+      assertSolanaTransactionSucceeded(submittedSignature, "refund", confirmation.value.err);
 
-      const slot = await this.rpcProvider.withFallback(
-        (conn) => conn.getSlot(this.commitment),
-        "getSlot(refund)"
-      );
+      await verifySolanaOrderStatus({
+        orderId: params.orderId,
+        signature: submittedSignature,
+        expectedStatus: OrderStatus.Refunded,
+        readStatus: () => this.readOrderStatus(params.orderId),
+      });
 
       this.log.info(
-        { signature: sig, orderId: params.orderId, slot },
-        "Solana refund transaction confirmed"
+        { signature: submittedSignature, orderId: params.orderId, slot: confirmation.context.slot },
+        "Solana refund transaction confirmed and verified on-chain"
       );
 
       return {
-        signature: sig,
-        blockNumber: slot,
+        signature: submittedSignature,
+        blockNumber: confirmation.context.slot,
       };
     } catch (err) {
       this.log.error({ err, orderId: params.orderId }, "Solana refund submission failed");
+      if (err instanceof SolanaSubmissionError) throw err;
       throw new SolanaSubmissionError(
-        `Solana refund submission failed: ${err instanceof Error ? err.message : String(err)}`,
-        err
+        `Solana refund submission failed${signature ? ` (signature ${signature})` : ""}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+        err,
+        signature
       );
     }
   }

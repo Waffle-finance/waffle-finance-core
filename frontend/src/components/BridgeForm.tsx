@@ -15,5 +15,4 @@ import BridgeFormContainer, {
 export default function BridgeForm(props: BridgeFormProps): React.JSX.Element {
   return <BridgeFormContainer {...props} />;
 }
-
 export { getUnsupportedRouteReason };

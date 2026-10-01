@@ -57,6 +57,7 @@ If you add a new document, add a row here in the same PR.
 | `docs/BUG_TRIAGE.md` | current | Engineering | Bug severity definitions and triage workflow |
 | `docs/PERFORMANCE_BASELINE.md` | current | Engineering | Latency and throughput baselines per service |
 | `docs/RPC_DEGRADATION_TEST_MATRIX.md` | current | Engineering | RPC failure modes and expected service behaviour |
+| `docs/SOLANA_ACCOUNT_INIT_RENT_AUDIT.md` | current | Engineering | **Solana account initialisation & rent audit** — per-account size tables, rent assumptions, and the centralised sizing/rent/verification helpers that replaced them |
 | `docs/postmortem/` | current | Engineering | Post-mortem reports; each file is a permanent record of a specific incident |
 
 ---

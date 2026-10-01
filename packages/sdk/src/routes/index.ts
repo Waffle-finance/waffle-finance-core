@@ -33,7 +33,7 @@
  * here, then extend the tests in `test/routes.test.ts`.
  */
 
-import type { Chain, Direction, ExternalBridgeKind } from "../types/index.js";
+import type { Chain, Direction, ExternalBridgeKind } from '../types/index.js';
 import {
   estimateRouteFee,
   getRouteFeePolicy,
@@ -41,8 +41,7 @@ import {
   type RouteFeeEstimate,
   type RouteFeeFixture,
   type RouteFeePolicy,
-} from "./fee-policy.js";
-
+} from './fee-policy.js';
 
 import {
   NATIVE_ETH_ADDRESS,
@@ -55,7 +54,7 @@ import {
   normalizeSolanaMint,
   normalizeStellarAssetKey,
   type AssetMappingNetwork,
-} from "../assets/index.js";
+} from '../assets/index.js';
 
 // #731: the fee policy is part of the route registry's public surface — the
 // root barrel (`src/index.ts`) and the `./routes` subpath both re-export these
@@ -69,7 +68,7 @@ export {
   type RouteFeeEstimate,
   type RouteFeeFixture,
   type RouteFeePolicy,
-} from "./fee-policy.js";
+} from './fee-policy.js';
 
 // ── Axis 1: chain direction ──────────────────────────────────────────────────
 
@@ -81,17 +80,17 @@ export {
  * via {@link chainsForDirection}) rather than parsing the direction slug.
  */
 export const ROUTE_CHAIN_DIRECTIONS: Readonly<Record<Direction, { src: Chain; dst: Chain }>> = {
-  eth_to_xlm: { src: "ethereum", dst: "stellar" },
-  xlm_to_eth: { src: "stellar", dst: "ethereum" },
-  eth_to_sol: { src: "ethereum", dst: "solana" },
-  sol_to_eth: { src: "solana", dst: "ethereum" },
-  xlm_to_sol: { src: "stellar", dst: "solana" },
-  sol_to_xlm: { src: "solana", dst: "stellar" },
+  eth_to_xlm: { src: 'ethereum', dst: 'stellar' },
+  xlm_to_eth: { src: 'stellar', dst: 'ethereum' },
+  eth_to_sol: { src: 'ethereum', dst: 'solana' },
+  sol_to_eth: { src: 'solana', dst: 'ethereum' },
+  xlm_to_sol: { src: 'stellar', dst: 'solana' },
+  sol_to_xlm: { src: 'solana', dst: 'stellar' },
 };
 
 /** Every direction in {@link ROUTE_CHAIN_DIRECTIONS}, including planned ones. */
 export const ROUTE_DIRECTIONS: ReadonlyArray<Direction> = Object.keys(
-  ROUTE_CHAIN_DIRECTIONS,
+  ROUTE_CHAIN_DIRECTIONS
 ) as Direction[];
 
 /**
@@ -99,14 +98,14 @@ export const ROUTE_DIRECTIONS: ReadonlyArray<Direction> = Object.keys(
  * coordinator accepting announces). `CoordinatorDirection` is an alias of this
  * union — the coordinator wire contract deliberately tracks the registry.
  */
-export type LiveRouteDirection = "eth_to_xlm" | "xlm_to_eth" | "eth_to_sol" | "sol_to_eth";
+export type LiveRouteDirection = 'eth_to_xlm' | 'xlm_to_eth' | 'eth_to_sol' | 'sol_to_eth';
 
 /** The live directions, in a stable declaration order. */
 export const LIVE_ROUTE_DIRECTIONS: ReadonlyArray<LiveRouteDirection> = [
-  "eth_to_xlm",
-  "xlm_to_eth",
-  "eth_to_sol",
-  "sol_to_eth",
+  'eth_to_xlm',
+  'xlm_to_eth',
+  'eth_to_sol',
+  'sol_to_eth',
 ];
 
 /**
@@ -125,7 +124,7 @@ export const LIVE_DIRECTION_CHAINS: Readonly<
 
 /** Every chain that appears on at least one declared route. */
 export const SUPPORTED_CHAINS: ReadonlyArray<Chain> = Array.from(
-  new Set(Object.values(ROUTE_CHAIN_DIRECTIONS).flatMap((d) => [d.src, d.dst])),
+  new Set(Object.values(ROUTE_CHAIN_DIRECTIONS).flatMap(d => [d.src, d.dst]))
 );
 
 // ── Axis 2: token group ──────────────────────────────────────────────────────
@@ -135,10 +134,10 @@ export const SUPPORTED_CHAINS: ReadonlyArray<Chain> = Array.from(
  * concrete per-chain identifiers for each group live in `assets/index.ts` and
  * that module stays the source of truth for them.
  */
-export type TokenGroup = "native" | "usdc";
+export type TokenGroup = 'native' | 'usdc';
 
 /** All declared token groups. */
-export const TOKEN_GROUPS: ReadonlyArray<TokenGroup> = ["native", "usdc"];
+export const TOKEN_GROUPS: ReadonlyArray<TokenGroup> = ['native', 'usdc'];
 
 // ── Axis 3: bridge mode ──────────────────────────────────────────────────────
 
@@ -150,13 +149,13 @@ export type BridgeMode = ExternalBridgeKind;
 
 /** All declared bridge modes, including the ones with no adapter yet. */
 export const BRIDGE_MODES: ReadonlyArray<BridgeMode> = [
-  "wafflefinance-htlc",
-  "cctp-v2",
-  "axelar-its",
+  'wafflefinance-htlc',
+  'cctp-v2',
+  'axelar-its',
 ];
 
 /** The mode assumed when a caller does not name one. */
-export const DEFAULT_BRIDGE_MODE: BridgeMode = "wafflefinance-htlc";
+export const DEFAULT_BRIDGE_MODE: BridgeMode = 'wafflefinance-htlc';
 
 // ── Axis 4: quote model ──────────────────────────────────────────────────────
 
@@ -174,13 +173,13 @@ export const DEFAULT_BRIDGE_MODE: BridgeMode = "wafflefinance-htlc";
  *   wrapped-mint        — value is locked on the source chain and a wrapped
  *                         representation is minted by a validator set.
  */
-export type QuoteModel = "atomic-htlc" | "attested-burn-mint" | "wrapped-mint";
+export type QuoteModel = 'atomic-htlc' | 'attested-burn-mint' | 'wrapped-mint';
 
 /** All declared quote models. */
 export const QUOTE_MODELS: ReadonlyArray<QuoteModel> = [
-  "atomic-htlc",
-  "attested-burn-mint",
-  "wrapped-mint",
+  'atomic-htlc',
+  'attested-burn-mint',
+  'wrapped-mint',
 ];
 
 // ── Route identity ───────────────────────────────────────────────────────────
@@ -203,7 +202,7 @@ export interface RouteIdParts {
 }
 
 /** Whether a route can be used today, or is declared but not yet enabled. */
-export type RouteStatus = "live" | "planned";
+export type RouteStatus = 'live' | 'planned';
 
 /** A single supported (or declared-but-planned) bridge route. */
 export interface RouteDefinition extends RouteIdParts {
@@ -243,7 +242,7 @@ export function formatRouteId(parts: RouteIdParts): RouteId {
  * {@link getRoute} for that.
  */
 export function parseRouteId(id: string): RouteIdParts | null {
-  const segments = id.split(":");
+  const segments = id.split(':');
   if (segments.length !== 3) return null;
 
   const [direction, tokenGroup, bridgeMode] = segments as [string, string, string];
@@ -260,7 +259,7 @@ export function parseRouteId(id: string): RouteIdParts | null {
 
 /** True when `value` is a well-formed route id for declared slugs. */
 export function isRouteId(value: unknown): value is RouteId {
-  return typeof value === "string" && parseRouteId(value) !== null;
+  return typeof value === 'string' && parseRouteId(value) !== null;
 }
 
 // ── The registry ─────────────────────────────────────────────────────────────
@@ -272,7 +271,7 @@ function define(
   quoteModel: QuoteModel,
   networks: ReadonlyArray<AssetMappingNetwork>,
   status: RouteStatus,
-  label: string,
+  label: string
 ): RouteDefinition {
   const { src, dst } = ROUTE_CHAIN_DIRECTIONS[direction];
   return {
@@ -289,8 +288,8 @@ function define(
   };
 }
 
-const BOTH_NETWORKS: ReadonlyArray<AssetMappingNetwork> = ["testnet", "mainnet"];
-const TESTNET_ONLY: ReadonlyArray<AssetMappingNetwork> = ["testnet"];
+const BOTH_NETWORKS: ReadonlyArray<AssetMappingNetwork> = ['testnet', 'mainnet'];
+const TESTNET_ONLY: ReadonlyArray<AssetMappingNetwork> = ['testnet'];
 const NO_NETWORKS: ReadonlyArray<AssetMappingNetwork> = [];
 
 /**
@@ -304,51 +303,121 @@ const NO_NETWORKS: ReadonlyArray<AssetMappingNetwork> = [];
  */
 export const ROUTE_REGISTRY: ReadonlyArray<RouteDefinition> = [
   // ── Ethereum ↔ Stellar ─────────────────────────────────────────────────
-  define("eth_to_xlm", "native", "wafflefinance-htlc", "atomic-htlc", BOTH_NETWORKS, "live",
-    "ETH → XLM (WaffleFinance HTLC)"),
-  define("eth_to_xlm", "usdc", "wafflefinance-htlc", "atomic-htlc", TESTNET_ONLY, "live",
-    "USDC Ethereum → Stellar (WaffleFinance HTLC)"),
-  define("xlm_to_eth", "native", "wafflefinance-htlc", "atomic-htlc", BOTH_NETWORKS, "live",
-    "XLM → ETH (WaffleFinance HTLC)"),
-  define("xlm_to_eth", "usdc", "wafflefinance-htlc", "atomic-htlc", TESTNET_ONLY, "live",
-    "USDC Stellar → Ethereum (WaffleFinance HTLC)"),
+  define(
+    'eth_to_xlm',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    BOTH_NETWORKS,
+    'live',
+    'ETH → XLM (WaffleFinance HTLC)'
+  ),
+  define(
+    'eth_to_xlm',
+    'usdc',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    TESTNET_ONLY,
+    'live',
+    'USDC Ethereum → Stellar (WaffleFinance HTLC)'
+  ),
+  define(
+    'xlm_to_eth',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    BOTH_NETWORKS,
+    'live',
+    'XLM → ETH (WaffleFinance HTLC)'
+  ),
+  define(
+    'xlm_to_eth',
+    'usdc',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    TESTNET_ONLY,
+    'live',
+    'USDC Stellar → Ethereum (WaffleFinance HTLC)'
+  ),
 
   // ── Ethereum ↔ Solana ──────────────────────────────────────────────────
-  define("eth_to_sol", "native", "wafflefinance-htlc", "atomic-htlc", BOTH_NETWORKS, "live",
-    "ETH → SOL (WaffleFinance HTLC)"),
-  define("eth_to_sol", "usdc", "wafflefinance-htlc", "atomic-htlc", TESTNET_ONLY, "live",
-    "USDC Ethereum → Solana (WaffleFinance HTLC)"),
-  define("sol_to_eth", "native", "wafflefinance-htlc", "atomic-htlc", BOTH_NETWORKS, "live",
-    "SOL → ETH (WaffleFinance HTLC)"),
-  define("sol_to_eth", "usdc", "wafflefinance-htlc", "atomic-htlc", TESTNET_ONLY, "live",
-    "USDC Solana → Ethereum (WaffleFinance HTLC)"),
+  define(
+    'eth_to_sol',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    BOTH_NETWORKS,
+    'live',
+    'ETH → SOL (WaffleFinance HTLC)'
+  ),
+  define(
+    'eth_to_sol',
+    'usdc',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    TESTNET_ONLY,
+    'live',
+    'USDC Ethereum → Solana (WaffleFinance HTLC)'
+  ),
+  define(
+    'sol_to_eth',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    BOTH_NETWORKS,
+    'live',
+    'SOL → ETH (WaffleFinance HTLC)'
+  ),
+  define(
+    'sol_to_eth',
+    'usdc',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    TESTNET_ONLY,
+    'live',
+    'USDC Solana → Ethereum (WaffleFinance HTLC)'
+  ),
 
   // ── Stellar ↔ Solana — declared, not enabled ───────────────────────────
-  define("xlm_to_sol", "native", "wafflefinance-htlc", "atomic-htlc", NO_NETWORKS, "planned",
-    "XLM → SOL (planned)"),
-  define("sol_to_xlm", "native", "wafflefinance-htlc", "atomic-htlc", NO_NETWORKS, "planned",
-    "SOL → XLM (planned)"),
+  define(
+    'xlm_to_sol',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    NO_NETWORKS,
+    'planned',
+    'XLM → SOL (planned)'
+  ),
+  define(
+    'sol_to_xlm',
+    'native',
+    'wafflefinance-htlc',
+    'atomic-htlc',
+    NO_NETWORKS,
+    'planned',
+    'SOL → XLM (planned)'
+  ),
 ];
 
 const ROUTES_BY_ID: ReadonlyMap<string, RouteDefinition> = new Map(
-  ROUTE_REGISTRY.map((route) => [route.id, route]),
+  ROUTE_REGISTRY.map(route => [route.id, route])
 );
 
 /** Every declared route id, in registry order. */
-export const ROUTE_IDS: ReadonlyArray<RouteId> = ROUTE_REGISTRY.map((r) => r.id);
+export const ROUTE_IDS: ReadonlyArray<RouteId> = ROUTE_REGISTRY.map(r => r.id);
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /** Why a route lookup failed. Stable codes — safe to branch on. */
 export type UnknownRouteReason =
   /** The route id was malformed or named an undeclared slug. */
-  | "malformed_route_id"
+  | 'malformed_route_id'
   /** No registry entry for this direction / token group / bridge mode combo. */
-  | "unknown_route"
+  | 'unknown_route'
   /** The route is declared but not enabled yet. */
-  | "route_not_live"
+  | 'route_not_live'
   /** The route is live, but not on the requested network. */
-  | "route_not_on_network";
+  | 'route_not_on_network';
 
 /**
  * Thrown by {@link assertSupportedRoute} when a route cannot be used.
@@ -362,10 +431,10 @@ export class UnknownRouteError extends Error {
     /** The route id or selector description that failed to resolve. */
     public readonly route: string,
     public readonly reason: UnknownRouteReason,
-    message?: string,
+    message?: string
   ) {
     super(message ?? `Unsupported route "${route}" (${reason})`);
-    this.name = "UnknownRouteError";
+    this.name = 'UnknownRouteError';
   }
 }
 
@@ -395,28 +464,28 @@ export function getRoute(id: string): RouteDefinition | undefined {
  * check in the SDK is built on.
  */
 export function resolveRoute(
-  selector: RouteSelector,
+  selector: RouteSelector
 ): { ok: true; route: RouteDefinition } | { ok: false; reason: UnknownRouteReason; route: string } {
   const parts = parseRouteId(
     formatRouteId({
       direction: selector.direction as Direction,
-      tokenGroup: (selector.tokenGroup ?? "native") as TokenGroup,
+      tokenGroup: (selector.tokenGroup ?? 'native') as TokenGroup,
       bridgeMode: (selector.bridgeMode ?? DEFAULT_BRIDGE_MODE) as BridgeMode,
-    }),
+    })
   );
   if (!parts) {
-    const described = `${selector.direction}:${selector.tokenGroup ?? "native"}:${
+    const described = `${selector.direction}:${selector.tokenGroup ?? 'native'}:${
       selector.bridgeMode ?? DEFAULT_BRIDGE_MODE
     }`;
-    return { ok: false, reason: "malformed_route_id", route: described };
+    return { ok: false, reason: 'malformed_route_id', route: described };
   }
 
   const id = formatRouteId(parts);
   const route = ROUTES_BY_ID.get(id);
-  if (!route) return { ok: false, reason: "unknown_route", route: id };
-  if (route.status !== "live") return { ok: false, reason: "route_not_live", route: id };
+  if (!route) return { ok: false, reason: 'unknown_route', route: id };
+  if (route.status !== 'live') return { ok: false, reason: 'route_not_live', route: id };
   if (selector.network && !route.networks.includes(selector.network)) {
-    return { ok: false, reason: "route_not_on_network", route: id };
+    return { ok: false, reason: 'route_not_on_network', route: id };
   }
 
   return { ok: true, route };
@@ -457,7 +526,7 @@ export interface RouteFilter {
  * With no filter, returns every declared route including planned ones.
  */
 export function listRoutes(filter: RouteFilter = {}): RouteDefinition[] {
-  return ROUTE_REGISTRY.filter((route) => {
+  return ROUTE_REGISTRY.filter(route => {
     if (filter.direction && route.direction !== filter.direction) return false;
     if (filter.tokenGroup && route.tokenGroup !== filter.tokenGroup) return false;
     if (filter.bridgeMode && route.bridgeMode !== filter.bridgeMode) return false;
@@ -470,7 +539,7 @@ export function listRoutes(filter: RouteFilter = {}): RouteDefinition[] {
 
 /** Every live route on `network` — the set a token/route picker should show. */
 export function listRoutesForNetwork(network: AssetMappingNetwork): RouteDefinition[] {
-  return listRoutes({ status: "live", network });
+  return listRoutes({ status: 'live', network });
 }
 
 /** src/dst chains for a direction, or null if the direction is not declared. */
@@ -492,10 +561,7 @@ export function directionForChains(src: string, dst: string): Direction | null {
 
 /** True when `direction` is declared and live. */
 export function isLiveDirection(direction: unknown): direction is LiveRouteDirection {
-  return (
-    typeof direction === "string" &&
-    (LIVE_ROUTE_DIRECTIONS as string[]).includes(direction)
-  );
+  return typeof direction === 'string' && (LIVE_ROUTE_DIRECTIONS as string[]).includes(direction);
 }
 
 /**
@@ -509,7 +575,7 @@ export function networksForRoute(id: string): ReadonlyArray<AssetMappingNetwork>
 /** True when the declared route is live on `network`. */
 export function isRouteOnNetwork(id: string, network: AssetMappingNetwork): boolean {
   const route = getRoute(id);
-  return route?.status === "live" && route.networks.includes(network);
+  return route?.status === 'live' && route.networks.includes(network);
 }
 
 // ── Token-group resolution ───────────────────────────────────────────────────
@@ -524,21 +590,23 @@ function isMappedAsset(
   leg: Chain,
   counterpart: Chain,
   asset: string,
-  network: AssetMappingNetwork,
+  network: AssetMappingNetwork
 ): boolean {
-  if (leg === "ethereum" && counterpart === "stellar") return isSupportedEthToStellar(asset, network);
-  if (leg === "ethereum" && counterpart === "solana") return isSupportedEthToSolana(asset, network);
-  if (leg === "stellar" && counterpart === "ethereum") return isSupportedStellarToEth(asset, network);
-  if (leg === "solana" && counterpart === "ethereum") return isSupportedSolanaToEth(asset, network);
+  if (leg === 'ethereum' && counterpart === 'stellar')
+    return isSupportedEthToStellar(asset, network);
+  if (leg === 'ethereum' && counterpart === 'solana') return isSupportedEthToSolana(asset, network);
+  if (leg === 'stellar' && counterpart === 'ethereum')
+    return isSupportedStellarToEth(asset, network);
+  if (leg === 'solana' && counterpart === 'ethereum') return isSupportedSolanaToEth(asset, network);
   // Stellar↔Solana has no mapping table yet; planned routes resolve to null.
   return false;
 }
 
 /** True when `asset` is the native asset of `chain`. */
 function isNativeAsset(chain: Chain, asset: string): boolean {
-  if (chain === "ethereum") return normalizeEthereumAddress(asset) === NATIVE_ETH_ADDRESS;
-  if (chain === "stellar") return normalizeStellarAssetKey(asset) === "XLM";
-  if (chain === "solana") return normalizeSolanaMint(asset) === NATIVE_SOL_MINT;
+  if (chain === 'ethereum') return normalizeEthereumAddress(asset) === NATIVE_ETH_ADDRESS;
+  if (chain === 'stellar') return normalizeStellarAssetKey(asset) === 'XLM';
+  if (chain === 'solana') return normalizeSolanaMint(asset) === NATIVE_SOL_MINT;
   return false;
 }
 
@@ -554,18 +622,18 @@ function isNativeAsset(chain: Chain, asset: string): boolean {
  */
 export function tokenGroupForAsset(
   direction: string,
-  side: "src" | "dst",
+  side: 'src' | 'dst',
   asset: string,
-  network: AssetMappingNetwork = "testnet",
+  network: AssetMappingNetwork = 'testnet'
 ): TokenGroup | null {
   const chains = chainsForDirection(direction);
   if (!chains) return null;
 
-  const leg = side === "src" ? chains.src : chains.dst;
-  const counterpart = side === "src" ? chains.dst : chains.src;
+  const leg = side === 'src' ? chains.src : chains.dst;
+  const counterpart = side === 'src' ? chains.dst : chains.src;
 
-  if (isNativeAsset(leg, asset)) return "native";
-  if (isMappedAsset(leg, counterpart, asset, network)) return "usdc";
+  if (isNativeAsset(leg, asset)) return 'native';
+  if (isMappedAsset(leg, counterpart, asset, network)) return 'usdc';
   return null;
 }
 
@@ -593,13 +661,13 @@ export interface RouteIdentitySource {
  */
 export function routeIdForOrder(
   order: RouteIdentitySource,
-  network: AssetMappingNetwork = "testnet",
+  network: AssetMappingNetwork = 'testnet'
 ): RouteId | null {
   const chains = chainsForDirection(order.direction);
   if (!chains) return null;
   if (order.src.chain !== chains.src || order.dst.chain !== chains.dst) return null;
 
-  const tokenGroup = tokenGroupForAsset(order.direction, "src", order.src.asset, network);
+  const tokenGroup = tokenGroupForAsset(order.direction, 'src', order.src.asset, network);
   if (!tokenGroup) return null;
 
   return formatRouteId({
@@ -620,7 +688,7 @@ export function routeIdForOrder(
 export function sameRoute(
   a: RouteIdentitySource,
   b: RouteIdentitySource,
-  network: AssetMappingNetwork = "testnet",
+  network: AssetMappingNetwork = 'testnet'
 ): boolean {
   const left = routeIdForOrder(a, network);
   const right = routeIdForOrder(b, network);

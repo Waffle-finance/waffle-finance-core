@@ -8,6 +8,7 @@ import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
 import { useFocusTrap } from './hooks/useFocusTrap'
 import { selectIsMainnetEnabled, selectResolvedNetworkMode, selectCurrentEthereumNetwork, selectCurrentStellarNetwork, selectApiBaseUrl, selectIntroAnimationEnabled, selectDarkVeilEnabled } from './config/selectors';
+import WalletStateBanner, { useWalletState } from './components/WalletStateBanner';
 
 // Non-critical components are lazy-loaded so the initial bridge form bundle
 // stays as small as possible. Suspense boundaries provide invisible fallbacks
@@ -210,6 +211,39 @@ function App() {
     `Freighter: ${stellarPhase}${stellarErrorCode ? ` (${stellarErrorCode})` : ''}`,
     `Phantom: ${solanaPhase}${solanaErrorCode ? ` (${solanaErrorCode})` : ''}`,
   ];
+
+  // ── Centralized wallet-state UX (issue #771) ────────────────────────────
+  const walletState = useWalletState({
+    ethWallet: {
+      isConnected: ethWallet.isConnected,
+      address: ethWallet.address,
+      errorCode: ethWallet.errorCode,
+      error: ethWallet.error,
+      hint: ethWallet.hint,
+      phase: ethWallet.phase,
+      switchToExpectedChain: ethWallet.switchToExpectedChain,
+      connect: ethWallet.connect,
+    },
+    freighterState: {
+      isConnected: stellarConnected,
+      address: stellarAddress,
+      errorCode: stellarErrorCode,
+      error: stellarError,
+      hint: stellarHint,
+      phase: stellarPhase,
+      connect: connectFreighter,
+    },
+    solanaWallet: {
+      isConnected: solanaConnected,
+      address: solanaAddress,
+      errorCode: solanaErrorCode,
+      error: solanaError,
+      hint: solanaHint,
+      phase: solanaPhase,
+      connect: connectPhantom,
+    },
+    networkMode: currentNetwork,
+  });
 
   return (
     <div className="app-shell min-h-screen text-white flex flex-col">
@@ -511,6 +545,9 @@ function App() {
         <MainnetVersionBanner networkState={networkState} />
       </Suspense>
 
+      {/* Wallet-state banners: chain mismatch, disconnection, account switch (issue #771) */}
+      <WalletStateBanner walletState={walletState} />
+
       {/* Main Content */}
       <main className="relative z-10 mx-auto grid w-full max-w-7xl flex-1 grid-cols-1 gap-10 px-4 pb-24 pt-10 md:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(420px,540px)] lg:items-start lg:pt-16">
 
@@ -593,6 +630,7 @@ function App() {
               ethAddress={ethAddress}
               stellarAddress={stellarAddress || ''}
               solanaAddress={solanaAddress || undefined}
+              walletBlocked={walletState.isBlocked}
               signStellarTransaction={(xdr, networkPassphrase) =>
                 signStellarTransaction(xdr, networkPassphrase, stellarAddress || undefined)
               }

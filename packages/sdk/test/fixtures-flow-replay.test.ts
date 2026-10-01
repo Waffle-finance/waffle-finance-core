@@ -261,6 +261,7 @@ describe('the Solana leg replays through SolanaHTLCClient', () => {
   it('derives the fixture order id from the hashlock, matching the coordinator payload', () => {
     const client = new SolanaHTLCClient({
       rpcUrl: 'http://127.0.0.1:8899',
+      allowHttp: true,
       programId: SOL_HTLC_PROGRAM_ID,
     });
     // `deriveOrderId` is the pure, network-free path: seeds [b"order", hashlock].
@@ -271,6 +272,7 @@ describe('the Solana leg replays through SolanaHTLCClient', () => {
   it('reads the funded account and reports exactly what the coordinator says', async () => {
     const client = new SolanaHTLCClient({
       rpcUrl: 'http://127.0.0.1:8899',
+      allowHttp: true,
       programId: SOL_HTLC_PROGRAM_ID,
     });
 
@@ -309,6 +311,7 @@ describe('the Solana leg replays through SolanaHTLCClient', () => {
   it('a Solana account is returned as null, not an error, when it does not exist', async () => {
     const client = new SolanaHTLCClient({
       rpcUrl: 'http://127.0.0.1:8899',
+      allowHttp: true,
       programId: SOL_HTLC_PROGRAM_ID,
     });
     const info = vi

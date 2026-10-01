@@ -120,12 +120,16 @@ function makeSigner(pubkeyStr = SYSTEM_PROG): SolanaSigner {
 /** 44-character base58 string that encodes to exactly 32 bytes — valid blockhash shape. */
 const MOCK_BLOCKHASH = "11111111111111111111111111111111"; // 32 '1's → valid base58, 32 bytes decoded
 
+/** Rent-exempt minimum the mock cluster reports for a 227-byte HtlcOrder. */
+const MOCK_RENT_EXEMPT = 2_039_280;
+
 function mockConnection(overrides: {
   getAccountInfo?:       (pk: PublicKey) => Promise<any>;
   sendRawTransaction?:   (raw: Buffer) => Promise<string>;
   confirmTransaction?:   (sig: string) => Promise<void>;
   getBalance?:           (pk: PublicKey) => Promise<number>;
   getMinimumBalanceForRentExemption?: (size: number) => Promise<number>;
+  simulateTransaction?:  (tx: unknown) => Promise<unknown>;
 } = {}) {
   const { Connection: RealConn } = require("@solana/web3.js");
   const { Transaction: RealTx }  = require("@solana/web3.js");
@@ -138,14 +142,69 @@ function mockConnection(overrides: {
 
   // Bypass actual serialization — return a dummy buffer so sendRawTransaction
   // receives bytes without the Transaction needing a fully-signed message.
-  vi.spyOn(RealTx.prototype, "serialize").mockReturnValue(Buffer.from("mocktx"));
+  // Record the writable accounts first: that is how the mock chain learns
+  // which PDA a submission is about to create.
+  const submittedWritable: PublicKey[] = [];
+  vi.spyOn(RealTx.prototype, "serialize").mockImplementation(function (this: Transaction) {
+    for (const ix of this.instructions) {
+      for (const key of ix.keys) {
+        if (key.isWritable && !key.isSigner) submittedWritable.push(key.pubkey);
+      }
+    }
+    return Buffer.from("mocktx");
+  });
 
-  vi.spyOn(RealConn.prototype, "getAccountInfo").mockImplementation(
-    (overrides.getAccountInfo ?? (async () => null)) as any,
+  // The client simulates before sending so a rejected program call surfaces its
+  // logs rather than a bare "Custom program error". Default to success.
+  vi.spyOn(RealConn.prototype, "simulateTransaction").mockImplementation(
+    (overrides.simulateTransaction ??
+      (async () => ({
+        err: null,
+        logs: [
+          `Program ${PROGRAM_ID} invoke [1]`,
+          "Program log: Instruction: CreateOrder",
+          `Program ${PROGRAM_ID} success`,
+        ],
+      }))) as any,
   );
+
+  // The client's default post-init verification re-reads the account it just
+  // created, so the mock chain has to be stateful: the order PDA does not
+  // exist until a transaction has been submitted. Modelling that here (rather
+  // than pinning `getAccountInfo` to a constant) is what lets a test assert
+  // both the "absent before, initialised after" transition and the exact
+  // 227-byte / rent-exempt state the client verifies.
+  const created = new Set<string>();
+  const initialised = () => ({
+    data: buildFakeAccountData(),
+    executable: false,
+    lamports: MOCK_RENT_EXEMPT + Number(ONE_SOL),
+    owner: new PublicKey(PROGRAM_ID),
+    rentEpoch: 361,
+  });
+
+  const sendImpl =
+    overrides.sendRawTransaction ?? (async () => "mocksig123");
   vi.spyOn(RealConn.prototype, "sendRawTransaction").mockImplementation(
-    (overrides.sendRawTransaction ?? (async () => "mocksig123")) as any,
+    (async (raw: Buffer) => {
+      // A real submission materialises every writable account the transaction
+      // touched, so mark them as existing from here on.
+      for (const pk of submittedWritable.splice(0)) created.add(pk.toBase58());
+      return sendImpl(raw);
+    }) as any,
   );
+
+  if (overrides.getAccountInfo) {
+    vi.spyOn(RealConn.prototype, "getAccountInfo").mockImplementation(
+      overrides.getAccountInfo as any,
+    );
+  } else {
+    vi.spyOn(RealConn.prototype, "getAccountInfo").mockImplementation(
+      (async (pk: PublicKey) =>
+        created.has(pk.toBase58()) ? initialised() : null) as any,
+    );
+  }
+
   vi.spyOn(RealConn.prototype, "confirmTransaction").mockImplementation(
     (overrides.confirmTransaction ?? (async () => {})) as any,
   );
@@ -153,7 +212,7 @@ function mockConnection(overrides: {
     (overrides.getBalance ?? (async () => 10_000_000_000)) as any,
   );
   vi.spyOn(RealConn.prototype, "getMinimumBalanceForRentExemption").mockImplementation(
-    (overrides.getMinimumBalanceForRentExemption ?? (async () => 2_039_280)) as any,
+    (overrides.getMinimumBalanceForRentExemption ?? (async () => MOCK_RENT_EXEMPT)) as any,
   );
 }
 
@@ -617,18 +676,30 @@ describe("edge cases — concurrent operations (double-spend guard)", () => {
 
   it("rapid create/claim/refund sequence does not corrupt state", async () => {
     // State machine: first create, then claim immediately — no corruption.
-    let phase = "create";
+    // The account becomes visible as soon as the *creating* transaction is
+    // submitted, and its status advances when the claim lands. An earlier
+    // version of this mock only revealed the account after the claim, which
+    // no real chain does.
+    let phase: "pre-create" | "created" | "claimed" = "pre-create";
     mockConnection({
       sendRawTransaction: async () => {
-        if (phase === "create") { phase = "claim"; return "create_sig"; }
-        if (phase === "claim")  { phase = "done";  return "claim_sig";  }
+        if (phase === "pre-create") { phase = "created"; return "create_sig"; }
+        if (phase === "created")   { phase = "claimed";  return "claim_sig";  }
         return "other_sig";
       },
       getAccountInfo: async () => {
-        if (phase === "done") {
-          return { data: buildFakeAccountData({ status: OrderStatus.Claimed, hasPreimage: true }), executable: false, lamports: 0, owner: new PublicKey(PROGRAM_ID), rentEpoch: 0 };
-        }
-        return null;
+        if (phase === "pre-create") return null;
+        const claimed = phase === "claimed";
+        return {
+          data: buildFakeAccountData({
+            status: claimed ? OrderStatus.Claimed : OrderStatus.Active,
+            hasPreimage: claimed,
+          }),
+          executable: false,
+          lamports: MOCK_RENT_EXEMPT + Number(ONE_SOL),
+          owner: new PublicKey(PROGRAM_ID),
+          rentEpoch: 361,
+        };
       },
     });
     const client = new SolanaHTLCClient({ rpcUrl: "https://api.devnet.solana.com", programId: PROGRAM_ID });
@@ -776,10 +847,7 @@ describe("settlement reconciliation — failure recovery", () => {
   it("manual retry after insufficient balance error succeeds once account is funded", async () => {
     let funded = false;
     mockConnection({
-      sendRawTransaction: async () => {
-        if (!funded) { funded = true; throw new Error("insufficient lamports: account balance too low"); }
-        return "funded_create_sig";
-      },
+      sendRawTransaction: async () => "funded_create_sig",
       getBalance: async () => funded ? 10_000_000_000 : 0,
     });
     const client = new SolanaHTLCClient({ rpcUrl: "https://api.devnet.solana.com", programId: PROGRAM_ID });
@@ -793,6 +861,7 @@ describe("settlement reconciliation — failure recovery", () => {
     }, signer)).rejects.toThrow();
 
     // After funding: retry succeeds
+    funded = true;
     const result = await client.createOrder({
       sender: SYSTEM_PROG, beneficiary: TOKEN_PROG, refundAddress: ATA_PROG,
       mint: NATIVE_SOL_MINT, amount: ONE_SOL, safetyDeposit: BigInt(0),
@@ -900,11 +969,19 @@ describe("network simulation — RPC lag and delayed confirmation", () => {
     vi.spyOn(RealConn.prototype, "getLatestBlockhash").mockResolvedValue({ blockhash: MOCK_BLOCKHASH, lastValidBlockHeight: 9999 });
     vi.spyOn(RealTx.prototype, "serialize").mockReturnValue(Buffer.from("mocktx"));
     vi.spyOn(RealConn.prototype, "sendRawTransaction").mockResolvedValue("lagsig");
+    vi.spyOn(RealConn.prototype, "simulateTransaction").mockResolvedValue({
+      err: null,
+      logs: [`Program ${PROGRAM_ID} success`],
+    } as any);
     vi.spyOn(RealConn.prototype, "confirmTransaction").mockImplementation(
       (() => new Promise((resolve) => setTimeout(resolve, 50))) as any,
     );
 
-    const client = new SolanaHTLCClient({ rpcUrl: "https://api.devnet.solana.com", programId: PROGRAM_ID });
+    const client = new SolanaHTLCClient({
+      rpcUrl: "https://api.devnet.solana.com",
+      programId: PROGRAM_ID,
+      simulateBeforeSend: false,
+    });
     const signer = makeSigner(TOKEN_PROG);
     const [pda]  = PublicKey.findProgramAddressSync([ORDER_SEED, HASHLOCK_BYTES], new PublicKey(PROGRAM_ID));
 
@@ -913,16 +990,12 @@ describe("network simulation — RPC lag and delayed confirmation", () => {
   });
 
   it("handles transaction submitted but not confirmed — client re-polls", async () => {
-    const { Connection: RealConn } = await import("@solana/web3.js");
-    const { Transaction: RealTx }  = await import("@solana/web3.js");
     let confirmedCalled = 0;
-    vi.spyOn(RealConn.prototype, "getLatestBlockhash").mockResolvedValue({ blockhash: MOCK_BLOCKHASH, lastValidBlockHeight: 9999 });
-    vi.spyOn(RealTx.prototype, "serialize").mockReturnValue(Buffer.from("mocktx"));
-    vi.spyOn(RealConn.prototype, "sendRawTransaction").mockResolvedValue("unconfirmed_sig");
-    vi.spyOn(RealConn.prototype, "confirmTransaction").mockImplementation((async () => {
-      confirmedCalled++;
-    }) as any);
-
+    mockConnection({
+      getBalance: async () => 10_000_000_000,
+      sendRawTransaction: async () => "unconfirmed_sig",
+      confirmTransaction: async () => { confirmedCalled++; },
+    });
     const client = new SolanaHTLCClient({ rpcUrl: "https://api.devnet.solana.com", programId: PROGRAM_ID });
     const signer = makeSigner();
 

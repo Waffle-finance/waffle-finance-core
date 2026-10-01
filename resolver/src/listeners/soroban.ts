@@ -1,7 +1,7 @@
-import { rpc } from "@stellar/stellar-sdk";
-import type { Logger } from "pino";
-import type { ResolverConfig } from "../config.js";
-import { retryRpcCall } from "../retry.js";
+import { rpc } from '@stellar/stellar-sdk';
+import type { Logger } from 'pino';
+import type { ResolverConfig } from '../config.js';
+import { retryRpcCall } from '../retry.js';
 import {
   eventsTotal,
   listenerErrorsTotal,
@@ -9,9 +9,9 @@ import {
   listenerPollRunsTotal,
   listenerLastEventTimestampSeconds,
   activeListeners,
-} from "../metrics.js";
-import { globalStalenessMonitor } from "../telemetry.js";
-import { SorobanCursorStore } from "../utils/cursor-store.js";
+} from '../metrics.js';
+import { globalStalenessMonitor } from '../telemetry.js';
+import { SorobanCursorStore } from '../utils/cursor-store.js';
 import {
   decodeSorobanHtlcEvent,
   SorobanEventDecodeError,
@@ -19,7 +19,7 @@ import {
   type SorobanOrderClaimedEvent,
   type SorobanOrderRefundedEvent,
   type SorobanHtlcEvent,
-} from "./soroban-events.js";
+} from './soroban-events.js';
 
 // Re-export all public types so callers can import from one place.
 export type {
@@ -28,9 +28,9 @@ export type {
   SorobanOrderRefundedEvent,
   SorobanHtlcEvent,
   SorobanEventDecodeError,
-} from "./soroban-events.js";
+} from './soroban-events.js';
 
-const CHAIN = "soroban";
+const CHAIN = 'soroban';
 
 /**
  * Maximum number of event keys retained in the deduplication Set before it is
@@ -48,6 +48,9 @@ const DEDUP_MAX_SIZE = 10_000;
  */
 function dedupKey(txHash: string, eventType: string): string {
   return `${txHash}:${eventType}`;
+}
+
+/**
  * Regex patterns that indicate the RPC node's history window no longer
  * covers the ledger we are requesting.  The Soroban RPC returns a plain
  * error string whose exact wording varies by node implementation, so we
@@ -71,7 +74,7 @@ const HISTORY_WINDOW_PATTERNS = [
  */
 function safeErrorString(err: unknown): string {
   if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
+  if (typeof err === 'string') return err;
   try {
     return JSON.stringify(err);
   } catch {
@@ -84,7 +87,7 @@ function safeErrorString(err: unknown): string {
 
 function isHistoryWindowError(err: unknown): boolean {
   const msg = safeErrorString(err);
-  return HISTORY_WINDOW_PATTERNS.some((re) => re.test(msg));
+  return HISTORY_WINDOW_PATTERNS.some(re => re.test(msg));
 }
 
 export interface SorobanListenerOptions {
@@ -150,6 +153,8 @@ export class SorobanListener {
    * Keyed by `txHash:eventType`.
    */
   private readonly processedEvents = new Set<string>();
+
+  /**
    * Deduplication window: tracks the (ledger, txHash, topicHash) of the last
    * N events so that if the listener resumes from a cursor that overlaps with
    * events already dispatched in the previous run, we don't double-fire.
@@ -164,19 +169,16 @@ export class SorobanListener {
     cfg: ResolverConfig,
     pollMs: number,
     log: Logger,
-    options: SorobanListenerOptions = {},
+    options: SorobanListenerOptions = {}
   ) {
     this.cfg = cfg;
     this.pollMs = pollMs;
-    this.log = log.child({ component: "SorobanListener" });
+    this.log = log.child({ component: 'SorobanListener' });
     this.server = new rpc.Server(cfg.soroban.rpcUrl, {
-      allowHttp: cfg.soroban.rpcUrl.startsWith("http://"),
+      allowHttp: cfg.soroban.rpcUrl.startsWith('http://'),
     });
-    this.cursorStore =
-      options.cursorStore ?? new SorobanCursorStore();
-    this.cursorLabel =
-      options.cursorLabel ??
-      `soroban-${cfg.soroban.htlc ?? "unknown"}`;
+    this.cursorStore = options.cursorStore ?? new SorobanCursorStore();
+    this.cursorLabel = options.cursorLabel ?? `soroban-${cfg.soroban.htlc ?? 'unknown'}`;
   }
 
   // ── Deduplication helpers ─────────────────────────────────────────────────
@@ -199,7 +201,7 @@ export class SorobanListener {
         pruned++;
         if (pruned >= half) break;
       }
-      this.log.debug({ pruned, remaining: this.processedEvents.size }, "pruned dedup Set");
+      this.log.debug({ pruned, remaining: this.processedEvents.size }, 'pruned dedup Set');
     }
     this.processedEvents.add(key);
     return false;
@@ -209,9 +211,7 @@ export class SorobanListener {
 
   async start(handlers: SorobanEventHandlers): Promise<void> {
     if (!this.cfg.soroban.htlc) {
-      this.log.warn(
-        "SOROBAN_HTLC contract id not configured — skipping Soroban listener",
-      );
+      this.log.warn('SOROBAN_HTLC contract id not configured — skipping Soroban listener');
       return;
     }
 
@@ -231,13 +231,13 @@ export class SorobanListener {
       this.cursor = persisted;
       this.log.info(
         { contract: contractId, cursor: this.cursor },
-        "resuming Soroban listener from persisted cursor",
+        'resuming Soroban listener from persisted cursor'
       );
     } else {
       this.cursor = undefined;
       this.log.info(
         { contract: contractId, rpc: this.cfg.soroban.rpcUrl },
-        "starting Soroban listener from current ledger head (no persisted cursor)",
+        'starting Soroban listener from current ledger head (no persisted cursor)'
       );
     }
 
@@ -251,18 +251,18 @@ export class SorobanListener {
       try {
         await this.fetchAndProcess(contractId, handlers);
         endTimer();
-        listenerPollRunsTotal.inc({ chain: CHAIN, result: "success" });
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: 'success' });
         // Record a healthy tick so the staleness monitor can reset consecutive-failure
         // counters and update the health-state gauge to "healthy".
         globalStalenessMonitor.recordHealthyTick(CHAIN);
       } catch (err) {
         endTimer();
-        listenerPollRunsTotal.inc({ chain: CHAIN, result: "failure" });
-        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "poll_error" });
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: 'failure' });
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'poll_error' });
         // Record the failure so the staleness monitor can accumulate consecutive
         // failures and flip the health-state gauge to "degraded" after threshold.
         globalStalenessMonitor.recordFailure(CHAIN);
-        this.log.warn({ err }, "Soroban poll failed");
+        this.log.warn({ err }, 'Soroban poll failed');
       } finally {
         if (!this.stopped) {
           this.timeoutId = setTimeout(tick, this.pollMs);
@@ -273,24 +273,18 @@ export class SorobanListener {
     void tick();
   }
 
-  private async fetchAndProcess(
-    contractId: string,
-    handlers: SorobanEventHandlers,
-  ): Promise<void> {
+  private async fetchAndProcess(contractId: string, handlers: SorobanEventHandlers): Promise<void> {
     // When we have no cursor we need a startLedger to anchor the query.
     // Use (latestLedger - 1) so we don't miss in-flight events on the
     // very first poll but also don't replay the entire chain history.
     let startLedger: number | undefined;
     if (this.cursor === undefined) {
-      const latest = await retryRpcCall(
-        () => this.server.getLatestLedger(),
-        { logger: this.log },
-      );
+      const latest = await retryRpcCall(() => this.server.getLatestLedger(), { logger: this.log });
       startLedger = latest.sequence - 1;
     }
 
     const req: rpc.Server.GetEventsRequest = {
-      filters: [{ type: "contract", contractIds: [contractId] }],
+      filters: [{ type: 'contract', contractIds: [contractId] }],
       startLedger,
       cursor: this.cursor,
       limit: 100,
@@ -298,10 +292,7 @@ export class SorobanListener {
 
     let events: Awaited<ReturnType<typeof this.server.getEvents>>;
     try {
-      events = await retryRpcCall(
-        () => this.server.getEvents(req),
-        { logger: this.log },
-      );
+      events = await retryRpcCall(() => this.server.getEvents(req), { logger: this.log });
     } catch (err) {
       // ------------------------------------------------------------------
       // History-window overflow: the persisted cursor (or startLedger) is
@@ -311,12 +302,11 @@ export class SorobanListener {
       // during the outage window.
       // ------------------------------------------------------------------
       if (isHistoryWindowError(err)) {
-        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "history_window_overflow" });
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'history_window_overflow' });
 
-        const latest = await retryRpcCall(
-          () => this.server.getLatestLedger(),
-          { logger: this.log },
-        );
+        const latest = await retryRpcCall(() => this.server.getLatestLedger(), {
+          logger: this.log,
+        });
         const clampedLedger = latest.sequence - 1;
 
         this.log.warn(
@@ -326,14 +316,14 @@ export class SorobanListener {
             clampedLedger,
             latestLedger: latest.sequence,
           },
-          "Soroban history-window overflow: persisted cursor is older than RPC retention window. " +
-          "Clamping to current ledger head — events emitted during the gap may have been missed.",
+          'Soroban history-window overflow: persisted cursor is older than RPC retention window. ' +
+            'Clamping to current ledger head — events emitted during the gap may have been missed.'
         );
 
         // Record the missed batch in the staleness monitor so the health state
         // reflects that events may have been lost, and the missed-events counter
         // is incremented for alerting.
-        globalStalenessMonitor.recordMissedBatch(CHAIN, "history_window_overflow");
+        globalStalenessMonitor.recordMissedBatch(CHAIN, 'history_window_overflow');
 
         // Clear the stale cursor so we start fresh from the clamped ledger.
         this.cursor = undefined;
@@ -342,11 +332,11 @@ export class SorobanListener {
         events = await retryRpcCall(
           () =>
             this.server.getEvents({
-              filters: [{ type: "contract", contractIds: [contractId] }],
+              filters: [{ type: 'contract', contractIds: [contractId] }],
               startLedger: clampedLedger,
               limit: 100,
             }),
-          { logger: this.log },
+          { logger: this.log }
         );
       } else {
         throw err;
@@ -356,7 +346,7 @@ export class SorobanListener {
     for (const ev of events.events) {
       // Build dedup key from ledger + txHash + first topic (cheap).
       const firstTopicRaw = (ev.topic[0] as any)?.toXDR
-        ? (ev.topic[0] as any).toXDR("base64")
+        ? (ev.topic[0] as any).toXDR('base64')
         : String(ev.topic[0]);
       const dedupKey = `${ev.ledger}:${ev.txHash}:${firstTopicRaw}`;
 
@@ -365,24 +355,19 @@ export class SorobanListener {
         // we don't inflate counters for duplicate delivery.
         this.log.debug(
           { ledger: ev.ledger, txHash: ev.txHash },
-          "skipping duplicate Soroban event (dedup)",
+          'skipping duplicate Soroban event (dedup)'
         );
         continue;
       }
 
-      listenerLastEventTimestampSeconds.set(
-        { chain: CHAIN },
-        Math.floor(Date.now() / 1000),
-      );
+      listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
 
       // Serialise topics and value to base64 XDR so the decoder can
       // call xdr.ScVal.fromXDR() on them without needing the raw SDK
       // objects here.
-      const topics: string[] = ev.topic.map((t: any) =>
-        t.toXDR ? t.toXDR("base64") : String(t),
-      );
+      const topics: string[] = ev.topic.map((t: any) => (t.toXDR ? t.toXDR('base64') : String(t)));
       const rawValue: string = (ev.value as any)?.toXDR
-        ? (ev.value as any).toXDR("base64")
+        ? (ev.value as any).toXDR('base64')
         : String(ev.value);
 
       const meta = {
@@ -392,18 +377,14 @@ export class SorobanListener {
       };
 
       try {
-        const typed: SorobanHtlcEvent | null = decodeSorobanHtlcEvent(
-          topics,
-          rawValue,
-          meta,
-        );
+        const typed: SorobanHtlcEvent | null = decodeSorobanHtlcEvent(topics, rawValue, meta);
 
         if (typed === null) {
           // Non-HTLC event (admin transfer, config, etc.).
-          eventsTotal.inc({ chain: CHAIN, event_type: "unknown" });
+          eventsTotal.inc({ chain: CHAIN, event_type: 'unknown' });
           this.log.debug(
             { ledger: meta.ledger, txHash: meta.txHash },
-            "skipping non-HTLC Soroban event",
+            'skipping non-HTLC Soroban event'
           );
           if (handlers.onUnknownEvent) {
             handlers.onUnknownEvent({
@@ -418,34 +399,31 @@ export class SorobanListener {
         }
 
         // ── Deduplication guard ───────────────────────────────────────────
-        const txHash = meta.txHash ?? "";
+        const txHash = meta.txHash ?? '';
         const eventType = typed.type;
         if (this.isDuplicate(txHash, eventType)) {
           this.log.debug(
             { txHash, eventType, ledger: meta.ledger },
-            "duplicate Soroban event dropped (already processed)",
+            'duplicate Soroban event dropped (already processed)'
           );
-          listenerErrorsTotal.inc({ chain: CHAIN, error_type: "duplicate_event" });
+          listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'duplicate_event' });
           continue;
         }
 
-        eventsTotal.inc({ chain: CHAIN, event_type: "contract_event" });
-        listenerLastEventTimestampSeconds.set(
-          { chain: CHAIN },
-          Math.floor(Date.now() / 1000),
-        );
+        eventsTotal.inc({ chain: CHAIN, event_type: 'contract_event' });
+        listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
 
         switch (typed.type) {
-          case "created":
-            eventsTotal.inc({ chain: CHAIN, event_type: "created" });
+          case 'created':
+            eventsTotal.inc({ chain: CHAIN, event_type: 'created' });
             handlers.onOrderCreated(typed);
             break;
-          case "claimed":
-            eventsTotal.inc({ chain: CHAIN, event_type: "claimed" });
+          case 'claimed':
+            eventsTotal.inc({ chain: CHAIN, event_type: 'claimed' });
             handlers.onOrderClaimed(typed);
             break;
-          case "refunded":
-            eventsTotal.inc({ chain: CHAIN, event_type: "refunded" });
+          case 'refunded':
+            eventsTotal.inc({ chain: CHAIN, event_type: 'refunded' });
             handlers.onOrderRefunded(typed);
             break;
         }
@@ -459,7 +437,7 @@ export class SorobanListener {
           // subsequent events rather than crashing the whole poll loop.
           listenerErrorsTotal.inc({
             chain: CHAIN,
-            error_type: "decode_error",
+            error_type: 'decode_error',
           });
           this.log.warn(
             {
@@ -468,16 +446,16 @@ export class SorobanListener {
               ledger: meta.ledger,
               txHash: meta.txHash,
             },
-            "Soroban event decode error — skipping event",
+            'Soroban event decode error — skipping event'
           );
           // Still advance dedup so we don't re-attempt on next poll.
           this._trackDedup(dedupKey);
         } else {
           listenerErrorsTotal.inc({
             chain: CHAIN,
-            error_type: "handler_error",
+            error_type: 'handler_error',
           });
-          this.log.warn({ err }, "Soroban event handler threw");
+          this.log.warn({ err }, 'Soroban event handler threw');
           // Do NOT advance dedup on handler error — allow retry on next poll.
           throw err;
         }
@@ -496,7 +474,7 @@ export class SorobanListener {
         this.cursorStore.save(this.cursorLabel, this.cursor);
       } catch (err) {
         // Non-fatal: worst case we reprocess the batch after a restart.
-        this.log.warn({ err }, "failed to persist Soroban cursor to disk");
+        this.log.warn({ err }, 'failed to persist Soroban cursor to disk');
       }
     }
   }

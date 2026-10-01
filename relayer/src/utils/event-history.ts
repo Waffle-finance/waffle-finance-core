@@ -6,6 +6,9 @@
 import { EventType, EventMessage } from './event-handlers.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ component: 'event-history' });
 
 // Event history storage configuration
 export interface EventHistoryConfig {
@@ -135,7 +138,7 @@ export class EventHistoryManager {
       this.persistOldestEvents();
     }
 
-    console.log(`📚 Event added to history: ${event.eventType} for ${event.metadata.orderHash}`);
+    log.debug({ eventType: event.eventType, orderHash: event.metadata.orderHash }, 'event added to history');
   }
 
   /**
@@ -206,7 +209,7 @@ export class EventHistoryManager {
       sortOrder: 'asc'
     }).events;
 
-    console.log(`🎬 Starting replay ${replayId} with ${events.length} events`);
+    log.info({ replayId, eventCount: events.length }, 'starting replay');
 
     // Calculate timing
     const startTime = Date.now();
@@ -220,7 +223,7 @@ export class EventHistoryManager {
         // Remove timeout from map when complete
         if (index === events.length - 1) {
           this.replayTimeouts.delete(replayId);
-          console.log(`🎬 Replay ${replayId} completed`);
+          log.info({ replayId }, 'replay completed');
         }
       }, eventDelay);
 
@@ -246,7 +249,7 @@ export class EventHistoryManager {
     });
 
     if (stopped) {
-      console.log(`🛑 Replay ${replayId} stopped`);
+      log.info({ replayId }, 'replay stopped');
     }
 
     return stopped;
@@ -282,7 +285,7 @@ export class EventHistoryManager {
     }
 
     writeFileSync(filepath, content);
-    console.log(`📄 Exported ${events.length} events to ${filename}`);
+    log.info({ eventCount: events.length, filename }, 'events exported');
     
     return filepath;
   }
@@ -297,7 +300,7 @@ export class EventHistoryManager {
     const eventsToArchive = this.memoryEvents.filter(event => event.timestamp < cutoffDate);
     
     if (eventsToArchive.length === 0) {
-      console.log('📦 No events to archive');
+      log.debug('no events to archive');
       return;
     }
 
@@ -330,7 +333,7 @@ export class EventHistoryManager {
     // Update index
     this.rebuildIndex();
 
-    console.log(`📦 Archived ${eventsToArchive.length} events to ${archiveFilename}`);
+    log.info({ archivedCount: eventsToArchive.length, archiveFilename }, 'events archived');
   }
 
   /**
@@ -462,7 +465,7 @@ export class EventHistoryManager {
     // Archive remaining events
     this.archiveOldEvents();
 
-    console.log('🧹 Event history manager cleaned up');
+    log.info('event history manager cleaned up');
   }
 
   // Private methods
@@ -677,13 +680,13 @@ export class EventHistoryManager {
     const filepath = join(this.config.storageDirectory, filename);
     
     writeFileSync(filepath, JSON.stringify(eventsToPersist, null, 2));
-    console.log(`💾 Persisted ${eventsToPersist.length} events to ${filename}`);
+    log.debug({ eventCount: eventsToPersist.length, filename }, 'events persisted to disk');
   }
 
   private loadPersistedEvents(): void {
     // Load recent events from disk (simplified implementation)
     // In real implementation, would load most recent persisted events
-    console.log('📂 Loading persisted events...');
+    log.debug('loading persisted events');
   }
 
   private ensureStorageDirectory(): void {

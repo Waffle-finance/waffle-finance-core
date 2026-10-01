@@ -15,8 +15,11 @@
  * 2. Each check produces a structured `AccountValidationError` with a machine-
  *    readable `code` so callers can handle specific cases (e.g. "already claimed"
  *    → attempt recovery; "wrong owner" → operator alert).
- * 3. Validation is best-effort: a check that cannot run (e.g. no RPC) returns
- *    a warning, not a hard error, unless the caller opts into strict mode.
+ * 3. An RPC failure is never downgraded to a warning. "The check could not
+ *    run" and "the check passed" are different answers, and collapsing them is
+ *    how a mis-sized or pre-existing account reaches the chain unnoticed. A
+ *    transport failure yields `rpc_unavailable` — a hard error meaning the
+ *    account's state is UNKNOWN, never `account_not_found`.
  */
 
 import { Connection, PublicKey } from "@solana/web3.js";
@@ -41,11 +44,14 @@ export type AccountValidationCode =
   | "wrong_status"          // generic unexpected status for an operation
   | "idl_version_too_new"   // on-chain account version newer than SDK
   | "account_not_found"     // PDA account does not exist on-chain
+  | "rpc_unavailable"       // the RPC call itself failed — state is UNKNOWN, not absent
   | "insufficient_lamports" // escrow account has fewer lamports than expected
   | "stale_account"         // account data is suspiciously zeroed / stale
   | "program_mismatch"      // programId in order does not match the client's programId
   | "invalid_address"       // address failed Solana public-key validation
-  | "hashlock_mismatch";    // on-chain hashlock does not match the provided value
+  | "hashlock_mismatch"     // on-chain hashlock does not match the provided value
+  | "already_initialized"   // the PDA already holds an initialised order — re-init refused
+  | "unexpected_account_balance"; // PDA holds lamports but no data (pre-funded address)
 
 export class AccountValidationError extends Error {
   constructor(
@@ -170,15 +176,22 @@ export async function validateOrderAccountOnChain(
   }
 
   // ── Fetch account info ──────────────────────────────────────────────────
+  // A transport failure is NOT "the account does not exist". Reporting it as
+  // `account_not_found` would send an operator looking for a missing order when
+  // the RPC is merely unavailable, and — worse — would make the caller retry a
+  // create against an account whose real state is unknown. It gets its own code.
   let accountInfo: Awaited<ReturnType<Connection["getAccountInfo"]>>;
   try {
     accountInfo = await connection.getAccountInfo(orderPdaPk);
   } catch (err) {
     errors.push(
       new AccountValidationError(
-        "account_not_found",
-        `Failed to fetch account info for ${orderId}: ${err instanceof Error ? err.message : String(err)}`,
-        { orderId }
+        "rpc_unavailable",
+        `Failed to fetch account info for ${orderId}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `This is an RPC/transport failure, not a missing account — the order's ` +
+        `on-chain state is unknown. Retry before submitting anything.`,
+        { orderId, rpcError: err instanceof Error ? err.message : String(err) }
       )
     );
     return { valid: false, errors, warnings };
@@ -433,18 +446,69 @@ export async function validateCreateOrderParams(
     );
   }
 
-  // Check for duplicate order (PDA already exists).
+  // ── Duplicate-order check (re-initialisation) ───────────────────────────
+  // An existing PDA is a hard error, not a warning: `create_order` uses
+  // Anchor's `init`, so re-initialising either reverts on-chain (after the fee
+  // is spent) or — if the program ever switches to `init_if_needed` —
+  // silently overwrites a live order's fields. Failing here makes
+  // re-initialisation impossible rather than merely discouraged.
+  //
+  // An RPC failure is *also* a hard error, because the whole point of the
+  // probe is to prove the account is absent, and an unreachable RPC proves
+  // nothing. It carries its own code so it stays distinguishable from a
+  // genuinely existing account.
   try {
     const existing = await connection.getAccountInfo(expectedPda);
     if (existing !== null) {
-      warnings.push(
-        `HTLCOrder PDA ${expectedPda.toBase58()} already exists on-chain. ` +
-        "This create_order will likely fail as the account is already initialised."
-      );
+      const lamports = BigInt(existing.lamports);
+      if (existing.data.length === 0) {
+        // Pre-funded address: `create_account` requires a zero-lamport account,
+        // so this would revert with "already in use" at execution time.
+        errors.push(
+          new AccountValidationError(
+            "unexpected_account_balance",
+            `HTLCOrder PDA ${expectedPda.toBase58()} already holds ${lamports} lamports ` +
+            `but no account data (owner ${existing.owner.toBase58()}). It is a pre-funded ` +
+            `address, so create_order will fail with "already in use" once submitted. ` +
+            `Reclaim the lamports from the address and retry.`,
+            {
+              orderId: expectedPda.toBase58(),
+              lamports: lamports.toString(),
+              owner: existing.owner.toBase58(),
+            }
+          )
+        );
+      } else {
+        errors.push(
+          new AccountValidationError(
+            "already_initialized",
+            `HTLCOrder PDA ${expectedPda.toBase58()} already exists and is initialised ` +
+            `(${existing.data.length} bytes, owner ${existing.owner.toBase58()}, ` +
+            `${lamports} lamports). Refusing to re-initialise it. If this is a different ` +
+            `order, the hashlock used to derive the address must differ.`,
+            {
+              orderId: expectedPda.toBase58(),
+              dataLength: existing.data.length,
+              lamports: lamports.toString(),
+              owner: existing.owner.toBase58(),
+            }
+          )
+        );
+      }
     }
-  } catch {
-    // Best-effort check — RPC failure is non-fatal here.
-    warnings.push("Could not check for duplicate PDA — RPC unavailable");
+  } catch (err) {
+    errors.push(
+      new AccountValidationError(
+        "rpc_unavailable",
+        `Could not check whether HTLCOrder PDA ${expectedPda.toBase58()} already exists: ` +
+        `${err instanceof Error ? err.message : String(err)}. The account's on-chain state ` +
+        `is unknown, so re-initialisation cannot be ruled out — refusing to submit.`,
+        {
+          orderId: expectedPda.toBase58(),
+          rpcError: err instanceof Error ? err.message : String(err),
+        }
+      )
+    );
   }
 
   return { valid: errors.length === 0, errors, warnings };

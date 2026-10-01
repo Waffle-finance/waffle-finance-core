@@ -212,6 +212,20 @@ export {
   type SolanaSigner,
 } from "./solana/index.js";
 
+// Solana wallet lifecycle and Phantom provider (#720)
+export {
+  getPhantomProvider,
+  formatSolanaAddress,
+  createPhantomSigner,
+  SolanaWalletLifecycleManager,
+  INITIAL_SOLANA_WALLET_STATE,
+  type PhantomSolanaProvider,
+  type SolanaConnectionPhase,
+  type SolanaWalletState,
+  type SolanaWalletErrorCode,
+  type SolanaWalletLifecycleOptions,
+} from "./solana/wallet.js";
+
 // Solana — multi-endpoint RPC provider with automatic failover (#713)
 export {
   SolanaRpcProvider,
@@ -278,7 +292,10 @@ export {
   isTimeoutTransition,
   isFailureTransition,
   estimateTimelockRemaining,
+  classifyRpcError,
+  retryAsync,
 } from "./shared-utils/index.js";
+export type { RetryPolicy } from "./shared-utils/index.js";
 
 // Solana — normalised adapter
 export { SolanaHTLCAdapter } from "./solana/adapter.js";

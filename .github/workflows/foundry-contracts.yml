@@ -1,0 +1,88 @@
+name: Foundry Contracts
+
+# Runs the full Foundry test suite (unit, fuzz, invariant, security, gas) for
+# the EVM HTLCEscrow contract on every push to main and every PR that touches
+# the contracts, mocks, interfaces, or foundry configuration.
+#
+# Invariant campaign: 1 024 sequences × 50 depth = up to 51 200 calls per invariant.
+# Fuzz runs:          1 024 per fuzz test.
+# All tests must pass before a PR can be merged.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - ".github/workflows/foundry-contracts.yml"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/foundry-contracts.yml"
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: foundry-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  foundry:
+    name: Forge test (HTLCEscrow invariant + fuzz)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install npm dependencies (OpenZeppelin, forge-std)
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile contracts
+        run: forge build --sizes
+
+      - name: Run unit + fuzz tests
+        run: forge test --match-path "test/foundry/HTLCEscrow.t.sol" -v --color
+        env:
+          FOUNDRY_FUZZ_RUNS: 1024
+
+      - name: Run invariant tests (stateful fuzz campaign)
+        run: forge test --match-contract "InvariantHTLCEscrowTest" -v --color
+        env:
+          FOUNDRY_INVARIANT_RUNS: 1024
+          FOUNDRY_INVARIANT_DEPTH: 50
+
+      - name: Run security tests
+        run: forge test --match-contract "HTLCEscrowSecurityTest" -v --color
+
+      - name: Run gas profiling benchmarks
+        run: forge test --match-contract "InvariantHTLCEscrowTest" --match-test "testGas" -v --color
+
+      - name: Show gas snapshot
+        run: forge snapshot --match-contract "InvariantHTLCEscrowTest" --match-test "testGas" || true
+
+      # On any test failure, print the failing sequence and invariant details.
+      - name: Print failure details on error
+        if: failure()
+        run: |
+          echo "::group::Foundry failure details"
+          forge test -vvvv --match-contract "InvariantHTLCEscrowTest" 2>&1 | tail -200 || true
+          echo "::endgroup::"

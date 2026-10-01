@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { Pool } from "pg";
 import { FatalStartupError } from "../retry.js";
+// ── Kysely re-exports (issue #479) ────────────────────────────────────────────
+export type { CoordinatorDatabase, KyselyCoordinatorDb } from "./schema-types.js";
+export { createKyselyDb, KyselyMigrationRunner } from "./kysely-db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -146,6 +149,18 @@ export class PostgresStatement {
     private sql: string
   ) {}
 
+  /**
+   * @deprecated  (TD-040 / issue #479)
+   *
+   * This method is the fragile hand-rolled SQLite→PostgreSQL translation that
+   * issue #479 was created to eliminate.  All NEW queries must be written
+   * using the Kysely query builder (`createKyselyDb()`) which handles dialect
+   * differences automatically and type-safely.
+   *
+   * This method will be removed once all raw-SQL queries in orders-repo.ts,
+   * reconciler.ts, order-export.ts, and audit-repo.ts have been migrated to
+   * Kysely.  Do NOT add new raw-SQL that relies on this translation.
+   */
   private convertSqliteToPostgres(sql: string, params: any[]): { sql: string; params: any[] } {
     // Convert strftime expressions first.
     let converted = sql.replace(

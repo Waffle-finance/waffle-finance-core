@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import pino from "pino";
 import type { CoordinatorConfig } from "../src/config.js";
 import { SolanaListener } from "../src/listeners/solana-listener.js";
+import { createSolanaRpcProvider } from "@wafflefinance/sdk";
 
 // ── Mock web3.js and SDK ───────────────────────────────────────────────────
 
@@ -278,6 +279,129 @@ describe("SolanaListener — handleLogs dedup prevents double-processing (#714)"
 
     // findByHashlock should have been called exactly once.
     expect((orders.findByHashlock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+  });
+
+  it("retries a claimed event after coordinator persistence fails", async () => {
+    const order = {
+      publicId: "pub-claim-retry",
+      preimage: null,
+      status: "src_locked",
+      srcLockBlock: 90,
+    };
+    const orders = {
+      findBySrcOrderId: vi.fn().mockResolvedValue(order),
+      recordSecret: vi.fn()
+        .mockRejectedValueOnce(new Error("database unavailable"))
+        .mockResolvedValue(undefined),
+      findByHashlock: vi.fn(),
+      recordSrcLock: vi.fn(),
+      markStatus: vi.fn(),
+      rollbackSrcLock: vi.fn(),
+    };
+    const listener = new SolanaListener(BASE_CFG, orders as any, SILENT_LOG);
+    const sig = "sig-claim-persist-retry";
+    const logs = [
+      "Program log: OrderClaimed",
+      'Program log: {"orderId":"sol-order-claim","preimage":"0x' + "ab".repeat(32) + '"}',
+    ];
+
+    await expect((listener as any).handleLogs(sig, logs, 100)).resolves.toBe(false);
+    expect(listener.isDuplicate(sig)).toBe(false);
+
+    await expect((listener as any).handleLogs(sig, logs, 100)).resolves.toBe(true);
+    expect(orders.recordSecret).toHaveBeenCalledTimes(2);
+    expect(listener.isDuplicate(sig)).toBe(true);
+  });
+
+  it("retries a refunded event after coordinator persistence fails", async () => {
+    const order = {
+      publicId: "pub-refund-retry",
+      preimage: null,
+      status: "src_locked",
+      srcLockBlock: 90,
+    };
+    const orders = {
+      findBySrcOrderId: vi.fn().mockResolvedValue(order),
+      markStatus: vi.fn()
+        .mockRejectedValueOnce(new Error("database unavailable"))
+        .mockResolvedValue(undefined),
+      findByHashlock: vi.fn(),
+      recordSrcLock: vi.fn(),
+      recordSecret: vi.fn(),
+      rollbackSrcLock: vi.fn(),
+    };
+    const listener = new SolanaListener(BASE_CFG, orders as any, SILENT_LOG);
+    const sig = "sig-refund-persist-retry";
+    const logs = [
+      "Program log: OrderRefunded",
+      'Program log: {"orderId":"sol-order-refund"}',
+    ];
+
+    await expect((listener as any).handleLogs(sig, logs, 100)).resolves.toBe(false);
+    expect(listener.isDuplicate(sig)).toBe(false);
+
+    await expect((listener as any).handleLogs(sig, logs, 100)).resolves.toBe(true);
+    expect(orders.markStatus).toHaveBeenCalledTimes(2);
+    expect(listener.isDuplicate(sig)).toBe(true);
+  });
+
+  it("keeps a finalized claimed transaction queued until the state write succeeds", async () => {
+    const signature = "sig-claim-poll-retry";
+    const connection = {
+      getSlot: vi.fn().mockResolvedValue(200),
+      getSignaturesForAddress: vi.fn().mockResolvedValue([
+        { signature, slot: 100, err: null },
+      ]),
+      getParsedTransaction: vi.fn().mockResolvedValue({
+        meta: {
+          err: null,
+          logMessages: [
+            "Program log: OrderClaimed",
+            'Program log: {"orderId":"sol-order-claim","preimage":"0x' + "cd".repeat(32) + '"}',
+          ],
+        },
+      }),
+    };
+    const providerMock = vi.mocked(createSolanaRpcProvider);
+    const originalImplementation = providerMock.getMockImplementation();
+    providerMock.mockImplementation(() => ({
+      withFallback: vi.fn(async (callback: (conn: typeof connection) => unknown) => callback(connection)),
+      getConnection: vi.fn(() => connection),
+      getHealth: vi.fn(() => ({ healthy: true, degraded: false, endpoints: [], activeEndpoint: "test" })),
+      getPrimaryUrl: vi.fn(() => "test"),
+    } as any));
+
+    const order = {
+      publicId: "pub-claim-poll-retry",
+      preimage: null,
+      status: "src_locked",
+      srcLockBlock: 90,
+    };
+    const orders = {
+      findBySrcOrderId: vi.fn().mockResolvedValue(order),
+      recordSecret: vi.fn()
+        .mockRejectedValueOnce(new Error("database unavailable"))
+        .mockResolvedValue(undefined),
+      findByHashlock: vi.fn(),
+      recordSrcLock: vi.fn(),
+      markStatus: vi.fn(),
+      rollbackSrcLock: vi.fn(),
+    };
+
+    try {
+      const listener = new SolanaListener(BASE_CFG, orders as any, SILENT_LOG);
+      await (listener as any).poll({} as any);
+      expect((listener as any).pendingSlots.get(100)).toEqual([{ sig: signature }]);
+
+      // The RPC signature page now sits behind lastSlot. The retained event,
+      // rather than the local service response, drives the retry.
+      await (listener as any).poll({} as any);
+      expect((listener as any).pendingSlots.has(100)).toBe(false);
+      expect(orders.recordSecret).toHaveBeenCalledTimes(2);
+      expect(listener.isDuplicate(signature)).toBe(true);
+    } finally {
+      if (originalImplementation) providerMock.mockImplementation(originalImplementation);
+    }
   });
 });
 

@@ -34,7 +34,7 @@
 // Precomputed as: sha256("account:HtlcOrder")[0..8]
 // You can regenerate it with: anchor idl parse …
 export const HTLC_ORDER_DISCRIMINATOR = Buffer.from([
-  0x17, 0x4c, 0x3d, 0x91, 0x5f, 0xa8, 0x2b, 0xe1
+  0x17, 0x4c, 0x3d, 0x91, 0x5f, 0xa8, 0x2b, 0xe1,
 ]);
 
 /** Bump this when the account layout changes. */
@@ -59,8 +59,84 @@ export const IDL_VERSION = 0;
 //    186    33  Option<[u8;32]>  preimage  (1-byte Some/None tag + 32 bytes)
 //
 // Total: 8 (discriminator) + 219 (fields) = 227 bytes
+//
+// The total is **derived, not written down**: `account-sizing.ts` declares the
+// field table above as data and sums it together with the 8-byte Anchor
+// discriminator. That is what keeps this byte map and the account's `space =`
+// from drifting apart, and it is why adding a field here without updating the
+// on-chain program now fails a test rather than silently producing a constant
+// that is wrong everywhere at once.
 
-export const HTLC_ORDER_ACCOUNT_SIZE = 227;
+import {
+  ANCHOR_DISCRIMINATOR_SIZE,
+  SOLANA_ANCHOR_ACCOUNT_LAYOUTS,
+  accountSizeFor,
+} from "../account-sizing.js";
+
+export const HTLC_ORDER_ACCOUNT_SIZE = accountSizeFor(
+  SOLANA_ANCHOR_ACCOUNT_LAYOUTS.htlcOrder
+);
+
+// ── Event Layout & Definitions for Auditing ───────────────────────────────
+
+/**
+ * Anchor program event payloads for WaffleFinance Solana HTLC program.
+ * Emitted as JSON log payloads: `Program log: {"orderId":"...", ...}` or
+ * `Program data: ...`.
+ */
+
+export interface AnchorOrderCreatedEvent {
+  name?: 'OrderCreated';
+  /** On-chain order PDA address (base58). */
+  orderId: string;
+  /** 0x-prefixed 32-byte hex hashlock string. */
+  hashlock: string;
+  /** Absolute Unix timestamp (seconds) after which refund is permitted. */
+  timelock: number;
+  /** Address (Pubkey base58) of the order creator / sender / payer. */
+  sender?: string;
+  /** Address (Pubkey base58) of the beneficiary who can claim funds with preimage. */
+  beneficiary?: string;
+  /** Address (Pubkey base58) of the recipient of refunded funds upon expiry. */
+  refundAddress?: string;
+  /** Token mint address (Pubkey base58), or native SOL mint. */
+  mint?: string;
+  /** Principal order amount (lamports or SPL atomic units). */
+  amount?: string | number | bigint;
+  /** Resolver safety deposit amount (lamports or SPL atomic units). */
+  safetyDeposit?: string | number | bigint;
+}
+
+export interface AnchorOrderClaimedEvent {
+  name?: 'OrderClaimed';
+  /** On-chain order PDA address (base58). */
+  orderId: string;
+  /** 0x-prefixed 32-byte hex preimage string revealed by beneficiary. */
+  preimage: string;
+  /** Address (Pubkey base58) of the claimer / beneficiary. */
+  claimer?: string;
+  /** 0x-prefixed 32-byte hex hashlock string for cross-chain auditing. */
+  hashlock?: string;
+  /** Principal amount transferred upon claim. */
+  amount?: string | number | bigint;
+}
+
+export interface AnchorOrderRefundedEvent {
+  name?: 'OrderRefunded';
+  /** On-chain order PDA address (base58). */
+  orderId: string;
+  /** Address (Pubkey base58) of the refunder. */
+  refunder?: string;
+  /** Address (Pubkey base58) of the refund recipient. */
+  refundAddress?: string;
+  /** 0x-prefixed 32-byte hex hashlock string for cross-chain auditing. */
+  hashlock?: string;
+  /** Amount returned upon refund. */
+  amount?: string | number | bigint;
+}
+
+export type AnchorHtlcEvent =
+  AnchorOrderCreatedEvent | AnchorOrderClaimedEvent | AnchorOrderRefundedEvent;
 
 // ── Status enum ────────────────────────────────────────────────────────────
 
@@ -84,7 +160,7 @@ export const FIELD_OFFSET = {
   hashlock: 145,
   timelock: 177,
   status: 185,
-  preimage: 186,  // 1-byte tag + 32-byte value
+  preimage: 186, // 1-byte tag + 32-byte value
 } as const;
 
 // ── Instruction discriminators ─────────────────────────────────────────────
@@ -93,24 +169,18 @@ export const FIELD_OFFSET = {
 // Precomputed values below; regenerate with: anchor idl parse …
 
 /** sha256("global:create_order")[0..8] */
-export const IX_CREATE_ORDER = Buffer.from([
-  0x9f, 0x04, 0x18, 0xd1, 0x6a, 0x7e, 0x59, 0x3c
-]);
+export const IX_CREATE_ORDER = Buffer.from([0x9f, 0x04, 0x18, 0xd1, 0x6a, 0x7e, 0x59, 0x3c]);
 
 /** sha256("global:claim_order")[0..8] */
-export const IX_CLAIM_ORDER = Buffer.from([
-  0x3c, 0xa0, 0x5f, 0xd2, 0x11, 0x8b, 0x4a, 0xef
-]);
+export const IX_CLAIM_ORDER = Buffer.from([0x3c, 0xa0, 0x5f, 0xd2, 0x11, 0x8b, 0x4a, 0xef]);
 
 /** sha256("global:refund_order")[0..8] */
-export const IX_REFUND_ORDER = Buffer.from([
-  0x5e, 0x2d, 0x87, 0x3f, 0x44, 0xc1, 0x7b, 0x22
-]);
+export const IX_REFUND_ORDER = Buffer.from([0x5e, 0x2d, 0x87, 0x3f, 0x44, 0xc1, 0x7b, 0x22]);
 
 // ── PDA seed constants ─────────────────────────────────────────────────────
 
 /** Seed prefix for HTLCOrder PDAs: [b"order", hashlock_bytes]. */
-export const ORDER_SEED = Buffer.from("order");
+export const ORDER_SEED = Buffer.from('order');
 
 // ── IDL compatibility guard ────────────────────────────────────────────────
 
@@ -149,26 +219,26 @@ export const CANONICAL_ACCOUNT_ORDERING = {
   /** IDL version this table was generated from. */
   idlVersion: IDL_VERSION,
   createOrder: [
-    { name: "payer",           signer: true,  writable: true  },
-    { name: "order_pda",       signer: false, writable: true  },
-    { name: "mint",            signer: false, writable: false },
-    { name: "beneficiary",     signer: false, writable: false },
-    { name: "refund_address",  signer: false, writable: false },
-    { name: "system_program",  signer: false, writable: false },
-    { name: "clock",           signer: false, writable: false },
+    { name: 'payer', signer: true, writable: true },
+    { name: 'order_pda', signer: false, writable: true },
+    { name: 'mint', signer: false, writable: false },
+    { name: 'beneficiary', signer: false, writable: false },
+    { name: 'refund_address', signer: false, writable: false },
+    { name: 'system_program', signer: false, writable: false },
+    { name: 'clock', signer: false, writable: false },
   ],
   claimOrder: [
-    { name: "claimer",                    signer: true,  writable: true  },
-    { name: "order_pda",                  signer: false, writable: true  },
-    { name: "beneficiary_token_account",  signer: false, writable: true  },
-    { name: "system_program",             signer: false, writable: false },
+    { name: 'claimer', signer: true, writable: true },
+    { name: 'order_pda', signer: false, writable: true },
+    { name: 'beneficiary_token_account', signer: false, writable: true },
+    { name: 'system_program', signer: false, writable: false },
   ],
   refundOrder: [
-    { name: "refunder",       signer: true,  writable: true  },
-    { name: "order_pda",      signer: false, writable: true  },
-    { name: "refund_account", signer: false, writable: true  },
-    { name: "system_program", signer: false, writable: false },
-    { name: "clock",          signer: false, writable: false },
+    { name: 'refunder', signer: true, writable: true },
+    { name: 'order_pda', signer: false, writable: true },
+    { name: 'refund_account', signer: false, writable: true },
+    { name: 'system_program', signer: false, writable: false },
+    { name: 'clock', signer: false, writable: false },
   ],
 } as const;
 
@@ -215,7 +285,7 @@ export function assertIdlCompatibility(onChainVersion: number): IdlCompatibility
   if (onChainVersion > IDL_VERSION) {
     errors.push(
       `On-chain account version ${onChainVersion} is newer than SDK IDL version ${IDL_VERSION}. ` +
-      `Update @wafflefinance/sdk to read this account.`
+        `Update @wafflefinance/sdk to read this account.`
     );
   }
 
@@ -223,7 +293,7 @@ export function assertIdlCompatibility(onChainVersion: number): IdlCompatibility
     // Older accounts are still readable — we keep backward compatibility.
     warnings.push(
       `On-chain account version ${onChainVersion} is older than SDK IDL version ${IDL_VERSION}. ` +
-      `The account was created with an older program version; all known fields remain readable.`
+        `The account was created with an older program version; all known fields remain readable.`
     );
   }
 
@@ -245,7 +315,7 @@ export function assertIdlCompatibility(onChainVersion: number): IdlCompatibility
  * instruction-layout drift from silently breaking the Anchor program.
  */
 export function validateInstructionSchema(
-  instruction: "createOrder" | "claimOrder" | "refundOrder",
+  instruction: 'createOrder' | 'claimOrder' | 'refundOrder',
   data: Uint8Array,
   keys: Array<{ isSigner: boolean; isWritable: boolean }>
 ): string[] {
@@ -269,8 +339,8 @@ export function validateInstructionSchema(
   const actualDisc = Buffer.from(data.subarray(0, 8));
   if (!actualDisc.equals(expectedDisc)) {
     errors.push(
-      `${instruction}: discriminator mismatch — expected ${expectedDisc.toString("hex")}, ` +
-      `got ${actualDisc.toString("hex")}`
+      `${instruction}: discriminator mismatch — expected ${expectedDisc.toString('hex')}, ` +
+        `got ${actualDisc.toString('hex')}`
     );
   }
 
@@ -287,13 +357,13 @@ export function validateInstructionSchema(
       if (exp.signer !== act.isSigner) {
         errors.push(
           `${instruction}: account[${i}] (${exp.name}) signer mismatch — ` +
-          `expected ${exp.signer}, got ${act.isSigner}`
+            `expected ${exp.signer}, got ${act.isSigner}`
         );
       }
       if (exp.writable !== act.isWritable) {
         errors.push(
           `${instruction}: account[${i}] (${exp.name}) writable mismatch — ` +
-          `expected ${exp.writable}, got ${act.isWritable}`
+            `expected ${exp.writable}, got ${act.isWritable}`
         );
       }
     }

@@ -255,7 +255,6 @@ point and the reasoning behind the layout (#731).
 | `@wafflefinance/sdk/assets` | Asset resolution/normalisation/validation helpers — see [ASSET_MAPPING_CONTRACT.md](./ASSET_MAPPING_CONTRACT.md). | none |
 | `@wafflefinance/sdk/routes` | Route-identity registry: route validation, serialised route ids, per-network availability — see [ROUTE_REGISTRY.md](./ROUTE_REGISTRY.md). | none |
 | `@wafflefinance/sdk/routes/fee-policy` | `estimateRouteFee`, `getRouteFeePolicy`, `ROUTE_FEE_POLICIES` on their own, without the registry. | none |
-| `@wafflefinance/sdk/shared-utils` | Hex/buffer conversion, order-ID/hashlock helpers, timelock estimation, `classifyRpcError`. | none |
 | `@wafflefinance/sdk/coordinator` | `CoordinatorClient`, `HistoryClient`, `OrderSubscriber`, validation helpers, transforms, wire-contract types, error classes. | none |
 | **Ethereum** | | |
 | `@wafflefinance/sdk/ethereum` | `EthereumHTLCClient`, `HTLC_ESCROW_ABI`. | viem |
