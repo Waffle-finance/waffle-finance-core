@@ -1,4 +1,23 @@
-import { expect } from "chai";
+/**
+ * Unit tests for scripts/validateEnv.ts
+ *
+ * These tests run entirely in-process — no Hardhat network, no RPC calls,
+ * no real private keys. They verify that:
+ *
+ *   1. Each required env var, when missing or malformed, produces the correct
+ *      hard error.
+ *   2. Advisory conditions (zero minSafetyDeposit, low minStake, missing RPC)
+ *      produce warnings but do not block deployment.
+ *   3. A correctly configured environment passes without errors or unexpected
+ *      warnings.
+ *   4. `runPreflightChecks` throws on hard errors and does NOT throw on a
+ *      valid environment.
+ *
+ * CI note: this file is included in `tsc --noEmit` (via tsconfig include glob)
+ * but is NOT run by the CI hardhat test command (which targets only
+ * HTLCEscrow.test.ts and ResolverRegistry.test.ts). It can be run locally
+ * with `pnpm test:validate`.
+ */import { expect } from "chai";
 import { ethers } from "hardhat";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import type { ResolverRegistry, TestERC20 } from "../typechain-types";
