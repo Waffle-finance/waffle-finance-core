@@ -505,6 +505,91 @@ describe("PostgreSQL Database Compatibility", () => {
     expect(allIds.sort()).toEqual(expectedIds.sort());
   });
 
+  // ── #910: focused query matrix for find/list/update/terminal lookups ────
+
+  testBoth("should find orders by status (findByStatus)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "a1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    const announced = await repo.findByStatus("announced", 10);
+    expect(announced.some((o) => o.publicId === order.publicId)).toBe(true);
+
+    const completed = await repo.findByStatus("completed", 10);
+    expect(completed.some((o) => o.publicId === order.publicId)).toBe(false);
+  });
+
+  testBoth("should list orders by address with cursor pagination (findByAddressWithCursor)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const addr = "0x4444444444444444444444444444444444444444";
+    const orders = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        repo.announce({
+          direction: "eth_to_xlm",
+          hashlock: "0x" + (200 + i).toString(16).padStart(64, "0"),
+          srcChain: "ethereum", srcAddress: addr,
+          srcAsset: "native", srcAmount: String(i + 1),
+          srcSafetyDeposit: "1",
+          dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+          dstAsset: "native", dstAmount: "1"
+        })
+      )
+    );
+
+    const page1 = await repo.findByAddressWithCursor(addr, 2);
+    expect(page1.orders).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+
+    const page2 = await repo.findByAddressWithCursor(addr, 2, page1.nextCursor!);
+    expect(page2.orders.length).toBeGreaterThan(0);
+    expect(page2.orders.length).toBeLessThanOrEqual(1);
+
+    const allIds = [...page1.orders, ...page2.orders].map((o) => o.publicId);
+    expect(new Set(allIds)).toEqual(new Set(orders.map((o) => o.publicId)));
+  });
+
+  testBoth("should conditionally update status only when expectedStatus matches (setStatus)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "b1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    // Mismatched expectedStatus should throw and leave status unchanged.
+    await expect(
+      repo.setStatus(order.publicId, "completed", "system", "src_locked")
+    ).rejects.toThrow();
+    expect((await repo.findByPublicId(order.publicId))!.status).toBe("announced");
+
+    // Matching expectedStatus applies the transition.
+    await repo.setStatus(order.publicId, "completed", "system", "announced");
+    expect((await repo.findByPublicId(order.publicId))!.status).toBe("completed");
+  });
+
+  testBoth("should reach a terminal status and keep it retrievable by public id", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "c1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    await repo.setStatus(order.publicId, "failed");
+    const terminal = await repo.findByPublicId(order.publicId);
+    expect(terminal!.status).toBe("failed");
+    expect(await repo.findByPublicId("wf_" + "0".repeat(64))).toBeNull();
+  });
+
   testBoth("should return empty results for non-existent queries", async (db) => {
     const repo = new OrdersRepository(db);
 
