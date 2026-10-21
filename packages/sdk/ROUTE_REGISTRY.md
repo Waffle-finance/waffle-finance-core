@@ -116,6 +116,34 @@ show a useful message:
 | `route_not_live` | Declared with `status: "planned"` — no contracts or asset mappings yet. |
 | `route_not_on_network` | Live, but not enabled on the requested network (e.g. USDC routes on mainnet). |
 
+### Distinguishing "unsupported route" from RPC/address errors (#895)
+
+A route check happens strictly *before* any network call or address parsing —
+`resolveRoute`/`assertSupportedRoute` only ever look at the in-memory
+registry, so an unsupported route fails synchronously and deterministically,
+with no dependency on RPC reachability. This matters for callers building
+error messages:
+
+- An `UnknownRouteError` (above table) means the chain-direction/token/bridge
+  combination itself is not something the SDK will attempt — no transaction
+  is ever constructed, no RPC call is ever made. The fix is to pick a
+  different, supported route (see `listRoutes`/`getRoute` for discovery).
+- An `SdkConfigurationError` from `@wafflefinance/sdk/config-validation`
+  (`invalid_rpc_url`, `invalid_address`, `invalid_chain_id`, ...) means the
+  route itself is fine, but one of the concrete inputs for it (an RPC URL,
+  an address, a chain id) was malformed.
+- A network/provider error surfaced later (timeouts, `eth_call` reverts,
+  etc.) means the route and inputs were both valid, and the failure happened
+  during execution against a live chain.
+
+Because route resolution never touches the network, callers can safely check
+`isSupportedRoute(selector)` up front and short-circuit with a route-specific
+message, instead of discovering non-support only after a confusing RPC or
+address failure downstream. `listRoutes(filter)` and `getRoute(id)` remain
+queryable even for a `planned`/not-live route, so a caller can tell "we know
+about this route but it isn't enabled yet" apart from "this was never a
+route at all".
+
 ## Network switching
 
 Route availability is declared per network rather than inferred, which is what
