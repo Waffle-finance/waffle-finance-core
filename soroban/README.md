@@ -25,10 +25,11 @@ v1 review feedback identified as missing in the legacy design.
 Install the Stellar Soroban toolchain (Rust + the `stellar` CLI):
 
 ```bash
-# Rust + wasm target
-rustup target add wasm32-unknown-unknown
+# Rust + wasm targets
+rustup target add wasm32-unknown-unknown   # vanilla cargo fallback
+rustup target add wasm32v1-none            # target used by current stellar-cli
 
-# Stellar CLI (Soroban)
+# Stellar CLI (Soroban) — scripts/deploy.sh requires stellar-cli >= 22.8
 cargo install --locked stellar-cli
 ```
 
@@ -38,13 +39,63 @@ The contracts target `soroban-sdk = "22.x"` and Rust edition 2021.
 
 ```bash
 cd soroban
+
+# Preferred: stellar CLI, per package (mirrors scripts/deploy.sh)
+stellar contract build --package wafflefinance-htlc
+stellar contract build --package wafflefinance-resolver_registry
+
+# Or the whole workspace at once
 stellar contract build
-# or, with vanilla cargo:
+
+# Vanilla cargo fallback (requires the wasm32-unknown-unknown target above)
 cargo build --release --target wasm32-unknown-unknown
 ```
 
-WASM artefacts land in
-`target/wasm32-unknown-unknown/release/*.wasm`.
+### Output path
+
+Do not hard-code the artefact directory — it depends on how the contract was
+built. Current `stellar contract build` releases land in
+`target/wasm32v1-none/release/`, while the vanilla cargo fallback writes to
+`target/wasm32-unknown-unknown/release/`. Ask the CLI for the directory it
+actually used:
+
+```bash
+TARGET_DIR=$(stellar contract build --print-build-dir)
+ls "$TARGET_DIR"/wafflefinance_*.wasm
+```
+
+This is exactly how `scripts/deploy.sh` locates the artefacts (falling back
+to `target/wasm32v1-none/release` when `--print-build-dir` is unavailable),
+so resolving the path this way always matches what deployment tooling
+consumes: `wafflefinance_htlc.wasm` and
+`wafflefinance_resolver_registry.wasm`.
+
+### Verify the artefact
+
+Record a SHA-256 checksum before deploying or sharing a build — the same
+convention used by the release verification scripts
+(`scripts/verify-release-locally.sh`):
+
+```bash
+TARGET_DIR=$(stellar contract build --print-build-dir)
+sha256sum "$TARGET_DIR"/wafflefinance_htlc.wasm \
+          "$TARGET_DIR"/wafflefinance_resolver_registry.wasm
+```
+
+Cross-check with the upload step: `stellar contract install` prints the
+Wasm hash of the file it installed, which you can compare against a later
+install or deploy of the same file:
+
+```bash
+stellar contract install --network testnet --source deployer \
+    --wasm "$TARGET_DIR/wafflefinance_htlc.wasm"
+# prints the wasm hash — record it alongside the checksum above
+```
+
+The checksum and Wasm hash prove that the file you tested is the file you
+deploy. They do **not** imply byte-identical builds across different
+toolchain versions or hosts — only compare checksums between artefacts built
+with the same `stellar` CLI and Rust versions.
 
 ## Test
 
@@ -73,21 +124,22 @@ Tests use the Soroban `testutils` Env and cover:
 stellar keys generate --global --network testnet deployer
 stellar keys fund deployer --network testnet
 
-# Build (if not already)
+# Build (if not already) and resolve the artefact directory
 stellar contract build
+TARGET_DIR=$(stellar contract build --print-build-dir)
 
 # Install the wasm
 stellar contract install \
     --network testnet \
     --source deployer \
-    --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm
+    --wasm "$TARGET_DIR/wafflefinance_htlc.wasm"
 
 # Deploy (the constructor configures the contract atomically, so
 # there is no separate initialize step to front-run)
 HTLC_ID=$(stellar contract deploy \
     --network testnet \
     --source deployer \
-    --wasm target/wasm32-unknown-unknown/release/wafflefinance_htlc.wasm \
+    --wasm "$TARGET_DIR/wafflefinance_htlc.wasm" \
     -- \
     --admin $(stellar keys address deployer) \
     --min_safety_deposit 1000000)
