@@ -260,7 +260,7 @@ apparent size of the diff.
 | Changed area | Fastest targeted test | Full verification |
 |---|---|---|
 | `contracts/` | `pnpm --filter @wafflefinance/contracts test` | + `forge test` + `verify-release-locally.sh` |
-| `soroban/` | `cargo test` (from `soroban/`) | + `stellar contract build` both packages |
+| `soroban/` | `cargo test` (from `soroban/`) | + `stellar contract build` both packages. `verify-release-locally.sh`/`.ps1` run this stage automatically if `cargo` is on PATH, and otherwise print an explicit "SKIPPED" banner instead of silently omitting it. |
 | `packages/sdk` | `pnpm --filter @wafflefinance/sdk build && pnpm --filter @wafflefinance/sdk test` | + build all 4 consumers |
 | `packages/config` | `pnpm --filter @wafflefinance/config build` | + build all consumers |
 | `coordinator/` | `pnpm --filter @wafflefinance/coordinator test` | + `TEST_WITH_POSTGRES=true` variant |
