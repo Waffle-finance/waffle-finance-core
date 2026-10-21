@@ -285,6 +285,25 @@ success "Frontend typecheck passed"
 echo ""
 
 # ========================================
+# Soroban Contract Test Verification
+# ========================================
+echo "=========================================="
+echo "Soroban Contract Test Verification"
+echo "=========================================="
+echo ""
+
+SOROBAN_STATUS="skipped"
+if command -v cargo &> /dev/null; then
+    info "Running Soroban (Rust) contract tests from soroban/..."
+    (cd soroban && cargo test --workspace --locked)
+    SOROBAN_STATUS="passed"
+    success "Soroban cargo tests passed"
+else
+    warning "SKIPPED: cargo not found - Soroban Rust tests were NOT run. Install the Rust toolchain and re-run this script to verify Soroban contracts."
+fi
+echo ""
+
+# ========================================
 # Final Report
 # ========================================
 echo "=========================================="
@@ -297,6 +316,11 @@ success "Contract artifacts verified"
 success "SDK package verified"
 success "All packages built successfully"
 success "All typechecks passed"
+if [ "$SOROBAN_STATUS" = "passed" ]; then
+    success "Soroban (Rust) tests passed"
+else
+    warning "Soroban (Rust) tests SKIPPED (cargo not found)"
+fi
 echo ""
 echo "Checksums:"
 echo "----------"
