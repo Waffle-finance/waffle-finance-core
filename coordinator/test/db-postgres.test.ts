@@ -1247,6 +1247,97 @@ describe("PostgresStatement SQL Translation", () => {
     );
   });
 
+  // ── #909: quoted-text edge cases for the SQLite→Postgres translator ────
+  //
+  // These lock in current, documented behavior of the regex-based
+  // convertSqliteToPostgres translator around quoted text and comments,
+  // alongside real named parameters in the same statement.
+
+  it("KNOWN LIMITATION: colon-like text inside a single-quoted string is still rewritten as a parameter", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders WHERE cancellation_reason = 'stale:no_src_lock' AND public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-1" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // The real named parameter still converts correctly...
+    expect(sql).toContain("public_id = $2");
+    // ...but the colon inside the quoted literal is also rewritten, and its
+    // "parameter name" (no_src_lock) has no matching key, so it resolves
+    // to undefined rather than failing fast.
+    expect(sql).toContain("'stale$1");
+    expect(sqlParams).toEqual([undefined, "order-1"]);
+  });
+
+  it("KNOWN LIMITATION: an escaped single quote inside a string does not protect the following colon", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders WHERE src_address = 'O''Brien:note' AND public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-2" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    expect(sql).toContain("'O''Brien$1");
+    expect(sqlParams).toEqual([undefined, "order-2"]);
+  });
+
+  it("KNOWN LIMITATION: a colon immediately followed by word characters inside a SQL comment is also rewritten as a parameter", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      -- note: this comment mentions a ratio of 2:1
+      SELECT * FROM orders WHERE public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-3" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // "note:" is followed by a space, so the translator's regex (`:(\w+)`)
+    // does not treat it as a parameter — but "2:1" has no separating space,
+    // so "1" is rewritten as a parameter placeholder.
+    expect(sql).toContain("-- note: this comment mentions a ratio of 2$1");
+    expect(sql).toContain("public_id = $2");
+    // "1" is not a key on the params object, so it resolves to undefined;
+    // the real :publicId parameter still comes through correctly.
+    expect(sqlParams).toEqual([undefined, "order-3"]);
+  });
+
+  it("real named parameters still convert correctly alongside mixed quote styles", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders
+      WHERE direction = "eth_to_xlm"
+        AND src_address = 'addr:placeholder'
+        AND public_id = :publicId
+        AND status = :status
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-4", status: "announced" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // Real bind parameters: converted in order, values intact.
+    expect(sql).toMatch(/public_id = \$2\s+AND status = \$3/);
+    expect(sqlParams[1]).toBe("order-4");
+    expect(sqlParams[2]).toBe("announced");
+    // The quoted "placeholder" text is still rewritten (documented limitation).
+    expect(sql).toContain("'addr$1");
+    expect(sqlParams[0]).toBeUndefined();
+  });
+
   it("should preserve param types through the conversion layer", async () => {
     const stmt = new PostgresStatement(mockPool, `
       INSERT INTO t (txt, num, flag) VALUES (:txt, :num, :flag)
