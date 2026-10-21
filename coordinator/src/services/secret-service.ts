@@ -69,7 +69,15 @@ export class SecretService {
   constructor(
     private readonly orders: OrderService,
     private readonly log: Logger,
-    secretStorageKey?: SecretStorageKeyInput
+    secretStorageKey?: SecretStorageKeyInput,
+    /**
+     * Runtime network mode, taken from the coordinator's existing
+     * `network` config (`"testnet" | "mainnet"`). `"mainnet"` is treated
+     * as production: plaintext preimage storage is not permitted there.
+     * Defaults to `"testnet"` so existing local/dev callers and test
+     * fixtures that omit this argument keep working unchanged.
+     */
+    private readonly network: "testnet" | "mainnet" = "testnet"
   ) {
     const configuredKeys = SecretService.normalizeKeys(secretStorageKey);
 
@@ -78,7 +86,7 @@ export class SecretService {
         this.encKeys = configuredKeys.map((value) => deriveKey(value));
         this.writeKey = this.encKeys[0];
         this.log.info(
-          { keyCount: this.encKeys.length },
+          { keyCount: this.encKeys.length, network: this.network },
           "SecretService: preimage encryption at rest ENABLED (AES-256-GCM)"
         );
       } catch (err) {
@@ -89,9 +97,22 @@ export class SecretService {
         );
       }
     } else {
+      if (this.network === "mainnet") {
+        // Production guard: a mainnet coordinator must never silently
+        // persist preimages in plaintext. Fail startup loudly instead.
+        // (No key material or preimages are included in this message.)
+        throw new Error(
+          "SecretService: SECRET_STORAGE_KEY is required when network=mainnet. " +
+          "Refusing to start in plaintext mode in production. " +
+          "Set SECRET_STORAGE_KEY (or use an explicit documented test config " +
+          "with network=testnet for local/dev)."
+        );
+      }
+
       this.encKeys = [];
       this.writeKey = undefined;
       this.log.warn(
+        { network: this.network },
         "SecretService: SECRET_STORAGE_KEY is not set. " +
         "Preimages will be stored as PLAINTEXT. " +
         "Set SECRET_STORAGE_KEY to enable encryption at rest."

@@ -17,6 +17,9 @@ transport-specific, and what's still internal. If a type or function isn't
 listed here or re-exported from `src/index.ts` / a documented subpath, treat
 it as an implementation detail that may change without notice.
 
+Changes to this package must record a release note entry — see
+[RELEASE_NOTE_ENTRY_TEMPLATE.md](./RELEASE_NOTE_ENTRY_TEMPLATE.md).
+
 ## Installation
 
 ```bash

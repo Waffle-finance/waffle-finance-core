@@ -6,6 +6,7 @@ export {
   normalizeChainId,
   parseBalanceHex,
   rpcCallWithFallback,
+  redactSensitiveText,
 } from "./rpc-compat.js";
 export type {
   RpcError,
