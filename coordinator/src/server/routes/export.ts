@@ -15,8 +15,8 @@
 import { Router, type ErrorRequestHandler } from "express";
 import { z } from "zod";
 import type { Logger } from "pino";
-import type { OrderExportService, OrderLifecycleExport } from "../../services/order-export.js";
-import { validationError, notFoundError } from "../errors.js";
+import { OrderExportService, UnsupportedExportFilterError, type OrderLifecycleExport } from "../../services/order-export.js";
+import { validationError, notFoundError, orderValidationError } from "../errors.js";
 import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 
 /** Supported download formats for the user-facing export endpoint. */
@@ -283,6 +283,10 @@ export function exportRoutes(exportService: OrderExportService, log?: Logger): R
         res.status(400).json(validationError(err.errors));
         return;
       }
+      if (err instanceof UnsupportedExportFilterError) {
+        res.status(400).json(orderValidationError(err.message));
+        return;
+      }
       next(err);
     }
   });
@@ -355,6 +359,10 @@ export function exportRoutes(exportService: OrderExportService, log?: Logger): R
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json(validationError(err.errors));
+        return;
+      }
+      if (err instanceof UnsupportedExportFilterError) {
+        res.status(400).json(orderValidationError(err.message));
         return;
       }
       next(err);

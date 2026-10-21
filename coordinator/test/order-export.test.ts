@@ -16,7 +16,7 @@ import {
   type OrderRow,
 } from "../src/persistence/orders-repo.js";
 import { AuditRepository } from "../src/audit/audit-repo.js";
-import { OrderExportService } from "../src/services/order-export.js";
+import { OrderExportService, UnsupportedExportFilterError } from "../src/services/order-export.js";
 import { buildOrderAuditEntry } from "../src/audit/audit-log.js";
 import { readFileSync } from "fs";
 import { resolve } from "path";
@@ -271,6 +271,55 @@ describe("OrderExportService", () => {
       // Assert
       expect(result.orders).toHaveLength(2);
       expect(result.totalCount).toBe(2);
+    });
+  });
+
+  describe("Status Filter", () => {
+    it("should export orders matching a status filter", async () => {
+      const order = await ordersRepo.announce({
+        direction: "eth_to_xlm",
+        hashlock: "0x" + "e".repeat(64),
+        srcChain: "ethereum",
+        srcAddress: "0xSrcAddress",
+        srcAsset: "ETH",
+        srcAmount: "1000000000000000000",
+        srcSafetyDeposit: "10000000000000000",
+        dstChain: "stellar",
+        dstAddress: "GDST...",
+        dstAsset: "XLM",
+        dstAmount: "10000",
+      });
+
+      const result = await exportService.exportOrders({ status: "announced" });
+
+      expect(result.orders.map((o) => o.orderId)).toContain(order.publicId);
+      expect(result.orders.every((o) => o.status === "announced")).toBe(true);
+    });
+
+    it("should reject unsupported filter combinations instead of returning an empty export", async () => {
+      await ordersRepo.announce({
+        direction: "eth_to_xlm",
+        hashlock: "0x" + "f".repeat(64),
+        srcChain: "ethereum",
+        srcAddress: "0xSrcAddress",
+        srcAsset: "ETH",
+        srcAmount: "1000000000000000000",
+        srcSafetyDeposit: "10000000000000000",
+        dstChain: "stellar",
+        dstAddress: "GDST...",
+        dstAsset: "XLM",
+        dstAmount: "10000",
+      });
+
+      // srcChain alone has no supported repository query path.
+      await expect(
+        exportService.exportOrders({ srcChain: "ethereum" })
+      ).rejects.toThrow(UnsupportedExportFilterError);
+
+      // No orderId/orderIds/status at all is also unsupported.
+      await expect(
+        exportService.exportOrders({ createdAfter: 0 })
+      ).rejects.toThrow(UnsupportedExportFilterError);
     });
   });
 
