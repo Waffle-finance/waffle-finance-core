@@ -12,6 +12,14 @@ import { announceAndTrackOrder, summarizeHistoryRecord } from "../examples/annou
 import { classifySdkError, isRetryable } from "../examples/error-handling.js";
 import { isDirectionLive, resolveDestinationAsset } from "../examples/asset-resolution.js";
 import {
+  createSwapSecret,
+  hashKnownPreimage,
+  hashKnownPreimageBytes,
+  verifyRevealedPreimage,
+  redactSecretForLogging,
+  TEST_VECTOR_PREIMAGE,
+} from "../examples/secrets-walkthrough.js";
+import {
   CoordinatorApiError,
   CoordinatorNetworkError,
   CoordinatorParseError,
@@ -209,5 +217,44 @@ describe("examples/asset-resolution", () => {
     expect(resolveDestinationAsset("sol_to_eth", "So11111111111111111111111111111111111111112")).toBe(
       "0x0000000000000000000000000000000000000000"
     );
+  });
+});
+
+describe("examples/secrets-walkthrough", () => {
+  it("generates a fresh secret with matching sha256/keccak256 digests", () => {
+    const secret = createSwapSecret();
+    expect(secret.preimage).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(secret.sha256).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(secret.keccak256).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("derives the same digests from a deterministic test vector (hex and bytes)", () => {
+    const fromHex = hashKnownPreimage(TEST_VECTOR_PREIMAGE);
+    expect(fromHex.preimage).toBe(TEST_VECTOR_PREIMAGE);
+
+    const bytes = new Uint8Array(32);
+    bytes[31] = 0x2a;
+    const fromBytes = hashKnownPreimageBytes(bytes);
+
+    expect(fromBytes.sha256).toBe(fromHex.sha256);
+    expect(fromBytes.keccak256).toBe(fromHex.keccak256);
+  });
+
+  it("verifies a revealed preimage against either digest convention, and rejects a mismatch", () => {
+    const secret = hashKnownPreimage(TEST_VECTOR_PREIMAGE);
+    expect(verifyRevealedPreimage(secret.preimage, secret.sha256)).toBe("sha256");
+    expect(verifyRevealedPreimage(secret.preimage, secret.keccak256)).toBe("keccak256");
+    expect(
+      verifyRevealedPreimage(secret.preimage, ("0x" + "00".repeat(32)) as `0x${string}`)
+    ).toBeNull();
+  });
+
+  it("redacts the preimage before a secret is logged", () => {
+    const secret = createSwapSecret();
+    const redacted = redactSecretForLogging(secret);
+    expect(redacted.preimage).toBe("[REDACTED]");
+    expect(redacted.sha256).toBe(secret.sha256);
+    expect(redacted.keccak256).toBe(secret.keccak256);
+    expect(JSON.stringify(redacted)).not.toContain(secret.preimage.slice(2));
   });
 });
