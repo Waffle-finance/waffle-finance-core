@@ -1109,6 +1109,105 @@ describe("ResolverRegistry", () => {
     });
   });
 
+  // ─── stake boundary ──────────────────────────────────────────────────────
+  //
+  // These parameterised cases make the exact minStake threshold explicit:
+  //   below-minimum  → StakeBelowMinimum revert, no list entry, no token pull
+  //   at-minimum     → success, active flag true, Registered event with stake = minStake
+  //   above-minimum  → success, active flag true, Registered event with stake = amount
+  //
+  // The three cases share a single helper so the assertion surface is the same
+  // for every row and future threshold changes only touch the table at the top.
+
+  describe("register — stake boundary cases", () => {
+    // Convenience table: [label, stakeDelta, shouldSucceed]
+    const cases: Array<[string, bigint, boolean]> = [
+      ["minStake - 1 (below threshold)", -1n, false],
+      ["minStake exactly (at threshold)", 0n, true],
+      ["minStake + 1 (above threshold)", 1n, true],
+    ];
+
+    for (const [label, delta, shouldSucceed] of cases) {
+      it(`stake = ${label}`, async () => {
+        const [, , , resolver] = await ethers.getSigners();
+        const { token, registry } = await deploy();
+        const stake = MIN_STAKE + delta;
+
+        // Fund enough to cover even the above-minimum case.
+        await fundAndApprove(token, registry, resolver, stake > 0n ? stake : 0n);
+
+        const registryAddr = await registry.getAddress();
+        const registryBalanceBefore = await token.balanceOf(registryAddr);
+
+        if (!shouldSucceed) {
+          // ── Below minimum: must revert before any token transfer ────────────
+          await expect(
+            registry.connect(resolver).register(stake)
+          ).to.be.revertedWithCustomError(registry, "StakeBelowMinimum");
+
+          // No state mutation: list is empty, no tokens moved.
+          await assertInvariants(registry, []);
+          expect(await token.balanceOf(registryAddr)).to.equal(registryBalanceBefore);
+        } else {
+          // ── At or above minimum: must succeed ────────────────────────────────
+          await expect(registry.connect(resolver).register(stake))
+            .to.emit(registry, "Registered")
+            .withArgs(resolver.address, stake);
+
+          // Registration status.
+          expect(await registry.isActive(resolver.address)).to.be.true;
+
+          // Stake recorded matches what was supplied.
+          const info = await registry.get(resolver.address);
+          expect(info.stake).to.equal(stake);
+          expect(info.active).to.be.true;
+          expect(info.resolver).to.equal(resolver.address);
+
+          // Token accounting: exactly `stake` tokens moved to the registry.
+          expect(await token.balanceOf(registryAddr)).to.equal(
+            registryBalanceBefore + stake
+          );
+
+          // List consistency.
+          await assertInvariants(registry, [resolver.address]);
+        }
+      });
+    }
+
+    it("boundary after setMinStake: stake that was valid becomes invalid when minStake is raised", async () => {
+      // Confirm that the boundary shifts when the owner updates minStake.
+      // A resolver registered at exactly the old minimum becomes inactive
+      // (isActive returns false) once minStake is raised past their stake,
+      // and a new registration attempt with the old amount now reverts.
+      const [, , , resolver, resolver2] = await ethers.getSigners();
+      const { owner, token, registry } = await deploy();
+
+      // Register resolver at the current minimum.
+      await fundAndApprove(token, registry, resolver, MIN_STAKE);
+      await registry.connect(resolver).register(MIN_STAKE);
+      expect(await registry.isActive(resolver.address)).to.be.true;
+
+      // Raise minStake: the registered resolver is now below the new threshold.
+      const newMin = MIN_STAKE + 1n;
+      await registry.connect(owner).setMinStake(newMin);
+      expect(await registry.isActive(resolver.address)).to.be.false;
+
+      // A new registration attempt at the old amount (MIN_STAKE) reverts.
+      await fundAndApprove(token, registry, resolver2, MIN_STAKE);
+      await expect(
+        registry.connect(resolver2).register(MIN_STAKE)
+      ).to.be.revertedWithCustomError(registry, "StakeBelowMinimum");
+
+      // A registration at the new minimum succeeds.
+      await token.transfer(resolver2.address, 1n);
+      await token.connect(resolver2).approve(await registry.getAddress(), newMin);
+      await expect(registry.connect(resolver2).register(newMin))
+        .to.emit(registry, "Registered")
+        .withArgs(resolver2.address, newMin);
+      expect(await registry.isActive(resolver2.address)).to.be.true;
+    });
+  });
+
   //  list/mapping invariant sequence
 
   describe("list/mapping invariant sequence", () => {

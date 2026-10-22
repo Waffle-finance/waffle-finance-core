@@ -1915,6 +1915,252 @@ describe("HTLCEscrow v2", () => {
       expect(await token.balanceOf(escrowAddr)).to.equal(0n);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Hostile receiver — gas-stipend exhaustion on claim and refund paths
+  //
+  // These tests exercise the two payout paths (_payoutNative via claimOrder and
+  // refundOrder) against a receiver that exhausts the PAYOUT_GAS_STIPEND (30 000
+  // gas) before the call returns.  The acceptance criteria are:
+  //   1. A stipend-exhausting push finalises the order (status transitions) and
+  //      credits the correct pull-payment account.
+  //   2. A normal EOA receiver still gets a direct push (no credit created).
+  //   3. Contract balance and pending-credit accounting reconcile after both paths.
+  // ---------------------------------------------------------------------------
+  describe("hostile receiver — stipend exhaustion (PAYOUT_GAS_STIPEND = 30 000)", () => {
+    // Re-use the existing Guzzle-mode HTLCReceiverMock: its receive() hook
+    // writes storage 64 times, consuming far more than 30 000 gas, forcing
+    // _payoutNative to fall through to the pull-payment path.
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    async function deployGuzzler() {
+      const F = await ethers.getContractFactory("HTLCReceiverMock");
+      const r = await F.deploy();
+      // MODE_GUZZLE = 2
+      await r.setMode(2);
+      return r;
+    }
+
+    async function createNativeOrder(
+      escrow: HTLCEscrow,
+      sender: any,
+      beneficiary: string,
+      refundAddress: string
+    ) {
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      await escrow.connect(sender).createOrder(
+        beneficiary,
+        refundAddress,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      const orderId = await escrow.nextOrderId() - 1n;
+      return { preimage, hashlock, orderId };
+    }
+
+    // ── claim path ───────────────────────────────────────────────────────────
+
+    it("claim: guzzler beneficiary triggers deferral — order finalised, credit created, balance reconciles", async () => {
+      const [sender, , relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, sender.address
+      );
+
+      const escrowBalanceBefore = await ethers.provider.getBalance(escrowAddr);
+      expect(escrowBalanceBefore).to.equal(AMOUNT + SAFETY_DEPOSIT);
+
+      // claimOrder must succeed (not revert) even though the push fails.
+      const tx = await escrow.connect(relayer).claimOrder(orderId, preimage);
+      await expect(tx)
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(orderId, guzzlerAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderClaimed");
+
+      // Order is irrevocably finalised.
+      const order = await escrow.getOrder(orderId);
+      expect(order.status).to.equal(1); // Claimed
+      expect(order.finalisedAt).to.be.greaterThan(0n);
+
+      // Correct account credited, not the relayer.
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(relayer.address)).to.equal(0n);
+
+      // Safety deposit reached the relayer directly (EOA — no stipend issue).
+      // Contract balance equals only the deferred amount.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
+
+      // ── reconciliation ──────────────────────────────────────────────────
+      // total_funded_before  = AMOUNT + SAFETY_DEPOSIT
+      // safety_deposit_out   = SAFETY_DEPOSIT  (pushed to relayer EOA)
+      // deferred_credit      = AMOUNT          (pendingWithdrawals[guzzler])
+      // contract_balance     = deferred_credit  ✓
+      const contractBal = await ethers.provider.getBalance(escrowAddr);
+      const pendingBal  = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(contractBal).to.equal(pendingBal); // every wei accounted for
+    });
+
+    it("claim: normal EOA beneficiary gets a direct push — no credit created", async () => {
+      const [sender, beneficiary, relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, sender.address
+      );
+
+      const benBefore = await ethers.provider.getBalance(beneficiary.address);
+
+      const tx = await escrow.connect(relayer).claimOrder(orderId, preimage);
+      await expect(tx).to.not.emit(escrow, "PayoutDeferred");
+
+      // Beneficiary received the full amount directly.
+      expect(await ethers.provider.getBalance(beneficiary.address)).to.equal(
+        benBefore + AMOUNT
+      );
+      // No pull-payment credit.
+      expect(await escrow.pendingWithdrawals(beneficiary.address)).to.equal(0n);
+      // Nothing left in escrow.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+    });
+
+    it("claim: guzzler pulls deferred funds via withdraw() (full gas forwarded) — balance zeroed", async () => {
+      const [sender, , relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, sender.address
+      );
+
+      await escrow.connect(relayer).claimOrder(orderId, preimage);
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+
+      // withdraw() forwards all remaining gas — guzzler's receive completes.
+      await expect(guzzler.pull(escrowAddr))
+        .to.emit(escrow, "Withdrawn")
+        .withArgs(guzzlerAddr, AMOUNT);
+
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(0n);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+      // Guzzler now holds the AMOUNT in its own balance.
+      expect(await ethers.provider.getBalance(guzzlerAddr)).to.equal(AMOUNT);
+    });
+
+    // ── refund path ──────────────────────────────────────────────────────────
+
+    it("refund: guzzler refundAddress triggers deferral — order finalised, credit created, balance reconciles", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      // The guzzler is the designated refund recipient.
+      const { orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, guzzlerAddr
+      );
+
+      await time.increase(TIMELOCK + 1);
+
+      const tx = await escrow.connect(caller).refundOrder(orderId);
+      await expect(tx)
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(orderId, guzzlerAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderRefunded");
+
+      // Order is irrevocably finalised.
+      const order = await escrow.getOrder(orderId);
+      expect(order.status).to.equal(2); // Refunded
+      expect(order.finalisedAt).to.be.greaterThan(0n);
+
+      // Correct account credited.
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(caller.address)).to.equal(0n);
+
+      // Safety deposit reached the EOA caller directly.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
+
+      // ── reconciliation ──────────────────────────────────────────────────
+      const contractBal = await ethers.provider.getBalance(escrowAddr);
+      const pendingBal  = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(contractBal).to.equal(pendingBal);
+    });
+
+    it("refund: normal EOA refundAddress gets a direct push — no credit, balance zeroed", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      const { orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, refundAddr
+      );
+
+      await time.increase(TIMELOCK + 1);
+
+      const refundBefore = await ethers.provider.getBalance(refundAddr);
+      const tx = await escrow.connect(caller).refundOrder(orderId);
+      await expect(tx).to.not.emit(escrow, "PayoutDeferred");
+
+      expect(await ethers.provider.getBalance(refundAddr)).to.equal(
+        refundBefore + AMOUNT
+      );
+      expect(await escrow.pendingWithdrawals(refundAddr)).to.equal(0n);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+    });
+
+    it("balance + pending-credit sum = zero after both payout paths complete", async () => {
+      // Create two orders: one claimed against a guzzler, one refunded to an EOA.
+      // After both settle the contract must hold zero ETH.
+      const [sender, eoaBeneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      // Order 1 — claim path, guzzler beneficiary.
+      const { preimage: p1, orderId: id1 } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, refundAddr
+      );
+      // Order 2 — refund path, EOA refund address.
+      const { orderId: id2 } = await createNativeOrder(
+        escrow, sender, eoaBeneficiary.address, refundAddr
+      );
+
+      // Settle order 1 via claim (guzzler defers).
+      await escrow.connect(caller).claimOrder(id1, p1);
+
+      // Settle order 2 via refund (EOA refundAddr gets direct push).
+      await time.increase(TIMELOCK + 1);
+      await escrow.connect(caller).refundOrder(id2);
+
+      // Guzzler's deferred credit.
+      const pendingGuzzler = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(pendingGuzzler).to.equal(AMOUNT); // still pending
+
+      // Contract balance = only the deferred credit.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(pendingGuzzler);
+
+      // Pull the deferred payout — now everything zeros out.
+      await guzzler.pull(escrowAddr);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(0n);
+    });
+  });
 });
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
