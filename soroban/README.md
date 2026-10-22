@@ -152,7 +152,40 @@ in `.env` as `SOROBAN_HTLC_TESTNET` and
 ## TS bindings
 
 After deploy, regenerate the TypeScript bindings that the coordinator
-and frontend consume from `@wafflefinance/sdk`:
+and frontend consume from `@wafflefinance/sdk`.
+
+### Regeneration script
+
+`scripts/regen-bindings.sh` wraps the documented CLI call and validates the
+inputs before touching the committed bindings. It only reads the contract
+interface from the network — it never builds, installs, or deploys a contract,
+so it is safe to run locally against testnet or mainnet.
+
+```bash
+cd soroban
+
+# Contract ID from .env (SOROBAN_HTLC_TESTNET), default output directory
+./scripts/regen-bindings.sh
+
+# Explicit contract ID and output directory
+./scripts/regen-bindings.sh C... ../packages/sdk/src/soroban/htlc-bindings
+```
+
+| Input | Source | Default |
+|---|---|---|
+| Contract ID | first argument, then `SOROBAN_HTLC_TESTNET` (read from the repo-root `.env` when not exported) | — (required) |
+| Output directory | second argument, then `SOROBAN_BINDINGS_OUTPUT` | `packages/sdk/src/soroban/htlc-bindings` |
+| Network | `SOROBAN_NETWORK` | `testnet` |
+| RPC endpoint | `SOROBAN_RPC_URL` | the CLI's `--network` preset |
+
+A missing `stellar` CLI, contract ID, or output parent directory exits
+non-zero **before** the generator runs, so committed bindings are never left
+partially rewritten. Install the CLI with `cargo install --locked stellar-cli`.
+
+### Manual command
+
+The script invokes the same command documented below; run it directly when you
+need to override flags it does not expose:
 
 ```bash
 stellar contract bindings typescript \
