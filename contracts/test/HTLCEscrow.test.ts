@@ -1,47 +1,3 @@
-import { expect } from "chai";
-import { ethers } from "hardhat";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
-import type { HTLCEscrow, TestERC20 } from "../typechain-types";
-import type {
-  ReturnsTrueERC20,
-  NoReturnERC20,
-  ReturnsFalseERC20,
-} from "../typechain-types";
-
-const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-const TIMELOCK = 600; // 10 minutes
-const SAFETY_DEPOSIT = ethers.parseEther("0.001");
-const AMOUNT = ethers.parseEther("0.5");
-
-async function deployEscrow() {
-  const HTLCEscrow = await ethers.getContractFactory("HTLCEscrow");
-  // resolverRegistry = address(0) → permissionless createOrder
-  return (await HTLCEscrow.deploy(ZERO_ADDR, 0)) as unknown as HTLCEscrow;
-}
-
-async function deployToken() {
-  const Token = await ethers.getContractFactory("TestERC20");
-  return (await Token.deploy("MockToken", "MOCK", ethers.parseEther("1000000"))) as unknown as TestERC20;
-}
-
-// Receiver-mock modes (mirrors HTLCReceiverMock.Mode).
-const MODE_ACCEPT = 0;
-const MODE_REJECT = 1;
-const MODE_GUZZLE = 2;
-
-async function deployReceiver() {
-  const F = await ethers.getContractFactory("HTLCReceiverMock");
-  return await F.deploy();
-}
-
-async function deployNoFallbackReceiver() {
-  const F = await ethers.getContractFactory("NoFallbackReceiver");
-  return await F.deploy();
-}
-
-function randomBytes32() {
-  return ethers.hexlify(ethers.randomBytes(32));
-}
 
 describe("HTLCEscrow v2", () => {
   describe("createOrder", () => {
@@ -69,6 +25,14 @@ describe("HTLCEscrow v2", () => {
       expect(orderCreated).to.not.be.undefined;
       const orderId = orderCreated.args.orderId;
       expect(orderId).to.equal(1n);
+      // Consumer-facing OrderCreated fields used by the coordinator/relayer listener.
+      expect(orderCreated.args.hashlock).to.equal(hashlock);
+      expect(orderCreated.args.sender).to.equal(sender.address);
+      expect(orderCreated.args.beneficiary).to.equal(beneficiary.address);
+      expect(orderCreated.args.token).to.equal(ZERO_ADDR);
+      expect(orderCreated.args.amount).to.equal(AMOUNT);
+      expect(orderCreated.args.safetyDeposit).to.equal(SAFETY_DEPOSIT);
+      expect(orderCreated.args.timelock).to.equal(TIMELOCK);
 
       const order = await escrow.getOrder(orderId);
       expect(order.amount).to.equal(AMOUNT);
