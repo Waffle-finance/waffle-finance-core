@@ -37,6 +37,12 @@ Chain direction decomposes into chains in exactly one place,
 chain a swap starts on — call `chainsForDirection(direction)` instead, or
 `directionForChains(src, dst)` for the reverse.
 
+When a consumer starts from source/destination chains, use
+`validateChainPair` from `@wafflefinance/sdk/config-validation`. It delegates to
+`directionForChains` and `assertSupportedRoute`, so frontend checkout,
+coordinator validation, relayer processing, and resolver routing all reject the
+same unsupported pairs with the same reasons.
+
 ## Serialised route identity
 
 A route identity serialises to a `RouteId`:

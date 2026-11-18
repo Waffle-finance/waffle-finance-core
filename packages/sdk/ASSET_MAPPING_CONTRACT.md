@@ -6,6 +6,20 @@ This document defines the canonical source of truth for asset metadata and mappi
 
 ## Canonical Asset Identifiers
 
+Order payloads and contract calls must use chain-local canonical identifiers:
+
+- **Ethereum addresses** are `0x`-prefixed 20-byte hex strings. The SDK
+  canonical form is lowercase for mapping keys and canonical-id serialization.
+- **Stellar assets** are `XLM` for native XLM or `CODE:G...ISSUER` for issued
+  assets. Asset codes are uppercase alphanumeric and at most 12 characters.
+- **Solana mints** are base58 public keys and are case-sensitive. Never
+  lowercase a Solana mint.
+
+Use `assertCanonicalEthereumAddress`, `assertCanonicalStellarAssetKey`,
+`assertCanonicalSolanaMint`, or `toCanonicalId` when building payloads that
+will reach a contract layer. These throw `InvalidAssetIdentifierError` before
+an ambiguous value can be mapped to the wrong chain.
+
 ### Native Assets
 
 - **Ethereum**: `0x0000000000000000000000000000000000000000` (NATIVE_ETH_ADDRESS)
@@ -62,6 +76,10 @@ const normalizedStellar = normalizeStellarAssetKey({ code: "USDC", issuer: "..."
 // Solana mints are case-sensitive but should be trimmed
 const normalizedSolana = normalizeSolanaMint(userInput);
 ```
+
+Normalization is not validation. For settlement-bound payloads, validate the
+normalized value with the corresponding `assertCanonical*` helper and use the
+throwing `assertSupported*` mapping guard before calling a lenient resolver.
 
 ### 2. Check Support Before Resolving
 
@@ -131,6 +149,8 @@ When an asset is not supported:
 - Use `isSupported*()` guards to check before operations
 - Use `assertSupported*()` for strict validation that throws `UnsupportedAssetError`
 - The error includes the asset identifier, network, and direction for debugging
+- Use `assertCanonical*()` for malformed identifiers; these throw
+  `InvalidAssetIdentifierError` before mapping lookup
 
 ## Testing
 

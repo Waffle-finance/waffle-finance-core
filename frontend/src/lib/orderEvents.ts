@@ -85,10 +85,12 @@ const ORDER_EVENT_STATUSES: readonly OrderEventStatus[] = [
 /**
  * Coordinator status union → canonical status.
  *
- * Mirrors `OrderStatus` from `@wafflefinance/sdk/types`. Kept as a plain map
- * rather than an import so this contract has no build-order dependency on the
- * SDK's `dist/`, and so a coordinator-side rename surfaces here as an explicit
- * mapping decision rather than a silent type error.
+ * Mirrors `ORDER_STATUS_TO_DISPLAY` from `@wafflefinance/sdk/status-display`.
+ * Kept as a plain map rather than an import so this contract has no
+ * build-order dependency on the SDK's `dist/`, and so a coordinator-side
+ * rename surfaces here as an explicit mapping decision rather than a silent
+ * type error. The conformance suite (`statusConformance.test.ts`) pins this
+ * map to the SDK's canonical table, so the two cannot drift out of sync.
  *
  * The HTLC lifecycle collapses as follows:
  *  • `announced` / `src_locked` — funds committed on one side only. From the
@@ -107,6 +109,9 @@ const COORDINATOR_STATUS_MAP: Readonly<Record<string, OrderEventStatus>> = {
   refunded: 'refunded',
   failed: 'failed',
   expired: 'expired',
+  cancelled: 'cancelled',
+  // Stale-cleanup path: funds were never locked, so it reads as cancelled.
+  abandoned: 'cancelled',
 };
 
 /** True when `value` is already a canonical status. */

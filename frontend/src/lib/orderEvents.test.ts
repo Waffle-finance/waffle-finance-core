@@ -50,6 +50,8 @@ describe('normalizeOrderStatus', () => {
     expect(normalizeOrderStatus('refunded')).toBe('refunded');
     expect(normalizeOrderStatus('failed')).toBe('failed');
     expect(normalizeOrderStatus('expired')).toBe('expired');
+    expect(normalizeOrderStatus('cancelled')).toBe('cancelled');
+    expect(normalizeOrderStatus('abandoned')).toBe('cancelled');
   });
 
   test('falls back to pending for unrecognised input rather than inventing a failure', () => {

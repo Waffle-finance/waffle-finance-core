@@ -61,6 +61,8 @@ export const RELAYER_CONFIG = {
   },
 };
 
+import { validateRelayerStartup, formatStartupErrors } from './config-validator.js';
+import { assertStartupDependencies, logStartupTransition } from './startup-health-check.js';
 logger.info({ network: DEFAULT_NETWORK_MODE }, 'Default network mode');
 logger.info(
   { escrowFactory: getEscrowFactoryAddress(DEFAULT_NETWORK_MODE, DEFAULT_NETWORK_MODE) },
@@ -100,6 +102,35 @@ async function initializeRelayer() {
   }));
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
+  
+  // Validate configuration
+  validateConfig();
+  logStartupTransition('config_validated');
+
+  // ── Startup dependency health checks ─────────────────────────────────────
+  //
+  // Before the relayer begins processing orders it must confirm that the
+  // coordinator (order-book service) and resolver registry are reachable.
+  // If dependencies are not ready the relayer retries with exponential
+  // back-off.  If max retries are exceeded it exits with a clear error.
+  logStartupTransition('deps_checking', {
+    coordinatorUrl: process.env.COORDINATOR_URL ?? '(not set)',
+    resolverRegistryUrl: process.env.RESOLVER_REGISTRY_URL ?? '(not configured)',
+  });
+  await assertStartupDependencies({
+    coordinatorUrl: process.env.COORDINATOR_URL,
+    resolverRegistryUrl: process.env.RESOLVER_REGISTRY_URL,
+    maxRetries: process.env.RELAYER_STARTUP_MAX_RETRIES
+      ? parseInt(process.env.RELAYER_STARTUP_MAX_RETRIES, 10)
+      : undefined,
+    backoffBaseMs: process.env.RELAYER_STARTUP_BACKOFF_BASE_MS
+      ? parseInt(process.env.RELAYER_STARTUP_BACKOFF_BASE_MS, 10)
+      : undefined,
+    backoffMaxMs: process.env.RELAYER_STARTUP_BACKOFF_MAX_MS
+      ? parseInt(process.env.RELAYER_STARTUP_BACKOFF_MAX_MS, 10)
+      : undefined,
+  });
+  logStartupTransition('deps_ready');
   app.use(requestIdMiddleware);
 
   const errs = validateRelayerStartup(process.env as Record<string, string | undefined>, {
@@ -193,6 +224,14 @@ async function initializeRelayer() {
   if (process.env.NODE_ENV === 'production') app.get('/api/test-transaction', requireAdminAuth(), testTxHandler);
   else app.get('/api/test-transaction', testTxHandler);
 
+  console.log('≡ƒôì DEBUG: Orders endpoints registered successfully');
+
+  // Phase 6.5: EscrowFactory Event Listening (lazy — first swap order only)
+  startChainMonitoring = async () => {
+  logStartupTransition('listeners_starting', { trigger: 'first_swap_order' });
+  console.log('≡ƒöù Chain monitoring starting (swap order in flight)...');
+  
+  // Setup EscrowFactory contract instance for event listening
   try {
     const wNet: NetworkMode = DEFAULT_NETWORK_MODE === 'mainnet' ? 'mainnet' : 'testnet';
     const wHorizon = NETWORK_CONFIG[wNet].stellar.horizonUrl;
@@ -205,6 +244,43 @@ async function initializeRelayer() {
     logger.info({ port: RELAYER_CONFIG.port }, 'HTTP server started');
   });
 
+  console.log('Γ£à Escrow Factory endpoints registered');
+
+  // ≡ƒ¢í∩╕Å Refund watchdog: rescue stuck XLMΓåÆETH orders that the request
+  // loop failed to refund (e.g. user closed the tab, RPC outage past
+  // our retry budget). Best-effort, never throws into the event loop.
+  try {
+    const watchdogNetwork: 'mainnet' | 'testnet' =
+      (DEFAULT_NETWORK_MODE === 'mainnet' ? 'mainnet' : 'testnet');
+    const watchdogHorizon =
+      NETWORK_CONFIG[watchdogNetwork].stellar.horizonUrl;
+    const watchdogSecret =
+      watchdogNetwork === 'mainnet'
+        ? (process.env.RELAYER_STELLAR_SECRET_MAINNET || process.env.RELAYER_STELLAR_SECRET)
+        : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
+
+    if (watchdogSecret) {
+      startRefundWatchdog({
+        horizonUrl: watchdogHorizon,
+        refundSecret: watchdogSecret,
+        networkMode: watchdogNetwork,
+        activeOrders,
+      });
+    } else {
+      console.warn('ΓÜá∩╕Å Refund watchdog disabled: RELAYER_STELLAR_SECRET not configured.');
+    }
+  } catch (watchdogErr) {
+    console.error('Γ¥î Failed to start refund watchdog:', watchdogErr);
+  }
+
+  // Start HTTP server
+  const server = app.listen(RELAYER_CONFIG.port, () => {
+    console.log(`≡ƒîÉ HTTP server started on port ${RELAYER_CONFIG.port}`);
+  });
+  
+  logStartupTransition('ready', { port: RELAYER_CONFIG.port });
+  console.log('Γ£à Relayer service initialized successfully');
+  console.log('≡ƒÄ» Ready to process cross-chain swaps');
   logger.info('Relayer service initialized successfully');
   logger.info('Ready to process cross-chain swaps');
 }

@@ -1,0 +1,39 @@
+name: Repository Validation
+
+# Runs the full pnpm validate suite on every push to main and every pull
+# request.  The suite covers three dependency-free quality gates:
+#
+#   validate:manifests — workspace package-manifest contracts
+#   validate:deps      — cross-package dependency version alignment
+#   validate:docs      — relative link resolution and pnpm script references
+#
+# Because all three validators are dependency-free Node scripts, no
+# pnpm install step is needed — this job stays fast and cannot be broken
+# by a registry outage.
+#
+# See docs/QUALITY_GATE.md for the full check inventory.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate repository contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      # validate:manifests, validate:deps, and validate:docs are all
+      # dependency-free Node scripts — no pnpm install is needed.
+      - name: Validate repository contracts (manifests, deps, docs)
+        run: pnpm validate

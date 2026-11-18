@@ -9,16 +9,16 @@ import {
 describe("route fee policy", () => {
   it("returns deterministic low-fee and high-fee estimates for the same route", () => {
     const lowFee = estimateRouteFee("eth_to_xlm:native:wafflefinance-htlc", {
-      gasPrice: 1n,
-      protocolFeeRateBps: 1n,
-      relayCost: 2n,
+      gasEstimate: 1n,
+      protocolFee: 1n,
+      expectedRelayCost: 2n,
       minSafetyDeposit: 3n,
     });
 
     const highFee = estimateRouteFee("eth_to_xlm:native:wafflefinance-htlc", {
-      gasPrice: 100n,
-      protocolFeeRateBps: 25n,
-      relayCost: 80n,
+      gasEstimate: 100n,
+      protocolFee: 25n,
+      expectedRelayCost: 80n,
       minSafetyDeposit: 50n,
     });
 
@@ -40,9 +40,9 @@ describe("route fee policy", () => {
 
   it("exposes the fee estimate contract to consumers", () => {
     const estimate = estimateRouteFee("eth_to_sol:native:wafflefinance-htlc", {
-      gasPrice: 5n,
-      protocolFeeRateBps: 4n,
-      relayCost: 6n,
+      gasEstimate: 5n,
+      protocolFee: 4n,
+      expectedRelayCost: 6n,
       minSafetyDeposit: 7n,
     });
 
@@ -53,7 +53,7 @@ describe("route fee policy", () => {
       minSafetyDeposit: 7n,
       expectedRelayCost: 6n,
       totalEstimatedCost: 22n,
-      assumptions: ["ethereum submission and solana settlement"],
+      assumptions: ["ethereum submission and solana settlement", "native safety deposit on source leg"],
     };
 
     expect(estimate).toEqual(expected);

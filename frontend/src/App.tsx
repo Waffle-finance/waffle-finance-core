@@ -6,7 +6,9 @@ import { useSolanaWallet } from './hooks/useSolanaWallet'
 import { useEthereumWallet } from './hooks/useEthereumWallet'
 import { useNetworkMode } from './lib/useNetworkMode'
 import { pingBackendWake } from './lib/wakeBackend'
+import { useFocusTrap } from './hooks/useFocusTrap'
 import { selectIsMainnetEnabled, selectResolvedNetworkMode, selectCurrentEthereumNetwork, selectCurrentStellarNetwork, selectApiBaseUrl, selectIntroAnimationEnabled, selectDarkVeilEnabled } from './config/selectors';
+import WalletStateBanner, { useWalletState } from './components/WalletStateBanner';
 
 // Non-critical components are lazy-loaded so the initial bridge form bundle
 // stays as small as possible. Suspense boundaries provide invisible fallbacks
@@ -35,6 +37,12 @@ function App() {
   const [activeTab, setActiveTab] = useState<'bridge' | 'history'>('bridge');
   const introAllowed = selectIntroAnimationEnabled();
   const darkVeilAllowed = selectDarkVeilEnabled();
+
+  // Ref for the wallet dropdown panel — used by useFocusTrap and the trigger button.
+  const walletMenuRef = useRef<HTMLDivElement>(null);
+  const walletTriggerRef = useRef<HTMLButtonElement>(null);
+  const walletMenuId = 'wallet-menu-dialog';
+  const walletMenuTitleId = 'wallet-menu-title';
 
   const [showIntro, setShowIntro] = useState(() => {
     if (!introAllowed) return false;
@@ -113,6 +121,20 @@ function App() {
     };
   }, [showIntro, introLogoReady]);
 
+  // Focus-trap the wallet dropdown while it is open; Escape closes it.
+  useFocusTrap(walletMenuRef, showWalletMenu);
+  useEffect(() => {
+    if (!showWalletMenu) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowWalletMenu(false);
+        walletTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [showWalletMenu]);
+
   // MetaMask connection is handled by useEthereumWallet hook
 
   // Single source of truth for testnet/mainnet across URL + MetaMask + Freighter.
@@ -189,6 +211,39 @@ function App() {
     `Freighter: ${stellarPhase}${stellarErrorCode ? ` (${stellarErrorCode})` : ''}`,
     `Phantom: ${solanaPhase}${solanaErrorCode ? ` (${solanaErrorCode})` : ''}`,
   ];
+
+  // ── Centralized wallet-state UX (issue #771) ────────────────────────────
+  const walletState = useWalletState({
+    ethWallet: {
+      isConnected: ethWallet.isConnected,
+      address: ethWallet.address,
+      errorCode: ethWallet.errorCode,
+      error: ethWallet.error,
+      hint: ethWallet.hint,
+      phase: ethWallet.phase,
+      switchToExpectedChain: ethWallet.switchToExpectedChain,
+      connect: ethWallet.connect,
+    },
+    freighterState: {
+      isConnected: stellarConnected,
+      address: stellarAddress,
+      errorCode: stellarErrorCode,
+      error: stellarError,
+      hint: stellarHint,
+      phase: stellarPhase,
+      connect: connectFreighter,
+    },
+    solanaWallet: {
+      isConnected: solanaConnected,
+      address: solanaAddress,
+      errorCode: solanaErrorCode,
+      error: solanaError,
+      hint: solanaHint,
+      phase: solanaPhase,
+      connect: connectPhantom,
+    },
+    networkMode: currentNetwork,
+  });
 
   return (
     <div className="app-shell min-h-screen text-white flex flex-col">
@@ -490,6 +545,9 @@ function App() {
         <MainnetVersionBanner networkState={networkState} />
       </Suspense>
 
+      {/* Wallet-state banners: chain mismatch, disconnection, account switch (issue #771) */}
+      <WalletStateBanner walletState={walletState} />
+
       {/* Main Content */}
       <main className="relative z-10 mx-auto grid w-full max-w-7xl flex-1 grid-cols-1 gap-10 px-4 pb-24 pt-10 md:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(420px,540px)] lg:items-start lg:pt-16">
 
@@ -572,6 +630,7 @@ function App() {
               ethAddress={ethAddress}
               stellarAddress={stellarAddress || ''}
               solanaAddress={solanaAddress || undefined}
+              walletBlocked={walletState.isBlocked}
               signStellarTransaction={(xdr, networkPassphrase) =>
                 signStellarTransaction(xdr, networkPassphrase, stellarAddress || undefined)
               }

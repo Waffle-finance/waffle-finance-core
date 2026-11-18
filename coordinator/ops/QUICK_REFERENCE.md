@@ -8,13 +8,13 @@
 
 ```bash
 # Check coordinator is running
-curl http://coordinator:3000/health
+curl http://coordinator:3001/health
 
 # View current metrics
-curl http://coordinator:3000/metrics | grep coordinator_
+curl http://coordinator:3001/metrics | grep coordinator_
 
 # Check listener lag (MOST IMPORTANT)
-curl http://coordinator:3000/metrics | grep coordinator_listener_lag_blocks
+curl http://coordinator:3001/metrics | grep coordinator_listener_lag_blocks
 
 # View logs
 docker logs wafflefinance-coordinator | tail -100
@@ -34,13 +34,13 @@ When an alert fires, run these in order:
 
 ```bash
 # 1. Is coordinator running?
-curl http://coordinator:3000/health
+curl http://coordinator:3001/health
 
 # 2. What's the listener lag?
-curl http://coordinator:3000/metrics | grep coordinator_listener_lag_blocks
+curl http://coordinator:3001/metrics | grep coordinator_listener_lag_blocks
 
 # 3. Are reconciliation and DB working?
-curl http://coordinator:3000/metrics | grep -E 'reconciliation|db_query'
+curl http://coordinator:3001/metrics | grep -E 'reconciliation|db_query'
 
 # 4. Check logs for errors
 docker logs wafflefinance-coordinator | tail -50
@@ -69,16 +69,16 @@ docker restart wafflefinance-coordinator
 
 ```bash
 # High listener lag?
-curl -s http://coordinator:3000/metrics | grep 'coordinator_listener_lag_blocks{chain'
+curl -s http://coordinator:3001/metrics | grep 'coordinator_listener_lag_blocks{chain'
 
 # Reconciliation failing?
-curl -s http://coordinator:3000/metrics | grep 'coordinator_reconciliation_runs_total'
+curl -s http://coordinator:3001/metrics | grep 'coordinator_reconciliation_runs_total'
 
 # Active orders stuck?
-curl -s http://coordinator:3000/metrics | grep 'coordinator_active_orders'
+curl -s http://coordinator:3001/metrics | grep 'coordinator_active_orders'
 
 # Database slow?
-curl -s http://coordinator:3000/metrics | grep 'coordinator_db_query_duration_seconds'
+curl -s http://coordinator:3001/metrics | grep 'coordinator_db_query_duration_seconds'
 ```
 
 ---

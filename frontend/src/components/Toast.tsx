@@ -122,9 +122,10 @@ const ToastComponent = ({ toast, onClose }: ToastProps) => {
         <div className="ml-4 flex-shrink-0">
           <button
             onClick={handleClose}
-            className={`inline-flex rounded-md p-1.5 hover:bg-black/10 dark:hover:bg-white/10 ${getTextColor()}`}
+            aria-label={`Dismiss ${toast.type} notification: ${toast.title}`}
+            className={`inline-flex rounded-md p-1.5 hover:bg-black/10 dark:hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current ${getTextColor()}`}
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -140,7 +141,18 @@ interface ToastContainerProps {
 
 export const ToastContainer = ({ toasts, onClose }: ToastContainerProps) => {
   return (
-    <div className="fixed top-4 right-4 z-50 space-y-2">
+    /*
+     * aria-live="polite" + aria-atomic="false" lets screen readers announce
+     * each toast as it is inserted without interrupting ongoing speech.
+     * role="status" is a landmark that AT can navigate to directly.
+     */
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="false"
+      aria-label="Notifications"
+      className="fixed top-4 right-4 z-50 space-y-2"
+    >
       {toasts.map((toast) => (
         <ToastComponent
           key={toast.id}

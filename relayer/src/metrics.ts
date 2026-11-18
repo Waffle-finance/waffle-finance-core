@@ -637,6 +637,98 @@ export const settlementServiceMetrics = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Settlement success counter (#756)
+// ---------------------------------------------------------------------------
+
+/**
+ * Total settlement actions that reached terminal success (txHash confirmed
+ * on the destination chain). Complements settlementAttemptsTotal — success
+ * is identifiable directly without a negative filter on failure_category.
+ */
+export const settlementSuccessTotal = new Counter({
+  name: 'relayer_settlement_success_total',
+  help: 'Total settlement actions that reached terminal success (txHash confirmed)',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
+// Refund latency histogram (#756)
+// ---------------------------------------------------------------------------
+
+/**
+ * Time in seconds from when the watchdog first detects a stale order to when
+ * the XLM refund is confirmed on Stellar.
+ */
+export const refundLatencySeconds = new Histogram({
+  name: 'relayer_refund_latency_seconds',
+  help: 'Time in seconds from stale-order detection to refund confirmation',
+  labelNames: ['chain', 'network_mode'] as const,
+  buckets: [1, 5, 15, 30, 60, 120, 300, 600, 1800],
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
+// Recovery time histogram (#756)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wall-clock time in seconds for a full recovery operation from initiation to
+ * completion (success or failure). Labels distinguish recovery type and outcome.
+ */
+export const recoveryTimeSeconds = new Histogram({
+  name: 'relayer_recovery_time_seconds',
+  help: 'Wall-clock time in seconds for a full recovery operation (initiation to completion)',
+  labelNames: ['recovery_type', 'outcome'] as const,
+  buckets: [0.5, 1, 2, 5, 10, 30, 60, 120, 300],
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
+// RPC error counter (#756)
+// ---------------------------------------------------------------------------
+
+/**
+ * Total RPC call errors by chain and error type. Provides a chain-dimensioned
+ * view of RPC errors that complements the RetryEngine's fault_class label.
+ *
+ * error_type values:
+ *   rpc_timeout       — the RPC call exceeded its timeout budget
+ *   rpc_error         — the RPC returned an error response
+ *   connection_error  — network-level connection failure
+ */
+export const rpcErrorsTotal = new Counter({
+  name: 'relayer_rpc_errors_total',
+  help: 'Total RPC call errors by chain and error type',
+  labelNames: ['chain', 'error_type'] as const,
+  registers: [registry],
+});
+
+// ---------------------------------------------------------------------------
+// Order queue depth by direction gauge (#756)
+// ---------------------------------------------------------------------------
+
+/**
+ * Current number of in-memory active orders broken down by direction.
+ * Enables alerting on a direction-specific backlog (e.g. Stellar-only stall)
+ * without requiring a filter on the aggregate orderQueueDepth gauge.
+ */
+export const orderQueueDepthByDirection = new Gauge({
+  name: 'relayer_order_queue_depth_by_direction',
+  help: 'Current number of in-memory active orders, by direction',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+/** Refund + recovery + rpc metrics bundle — useful for test assertions. */
+export const refundAndRecoveryMetrics = {
+  refundLatency: refundLatencySeconds,
+  recoveryTime: recoveryTimeSeconds,
+  rpcErrors: rpcErrorsTotal,
+  queueDepthByDirection: orderQueueDepthByDirection,
+} as const;
+
+// ---------------------------------------------------------------------------
 // Pipeline metrics (order ingestion, relay decisions, latency)
 // ---------------------------------------------------------------------------
 
@@ -717,3 +809,39 @@ export const pipelineMetrics = {
   droppedOrders:     droppedOrdersTotal,
   chainDelay:        chainDelayGauge,
 } as const;
+
+// ---------------------------------------------------------------------------
+// Coordinator state client metrics (#754)
+// ---------------------------------------------------------------------------
+
+/**
+ * Total coordinator health fetches, by result (success|failure|timeout).
+ * Lets operators detect a relayer that cannot reach its coordinator.
+ */
+export const coordinatorStateFetchTotal = new Counter({
+  name: 'relayer_coordinator_state_fetch_total',
+  help: 'Total coordinator health fetches, by result (success|failure|timeout)',
+  labelNames: ['result'] as const,
+  registers: [registry],
+});
+
+/**
+ * Age in seconds of the last successfully fetched coordinator health check.
+ * An increasing value indicates the coordinator is unreachable.
+ */
+export const coordinatorStalenessSeconds = new Gauge({
+  name: 'relayer_coordinator_staleness_seconds',
+  help: 'Age in seconds of the last successfully fetched coordinator health check',
+  registers: [registry],
+});
+
+/**
+ * Total settlement actions skipped because the coordinator state was stale or
+ * unavailable. Each increment represents a refused on-chain write.
+ */
+export const coordinatorFallbacksTotal = new Counter({
+  name: 'relayer_coordinator_fallbacks_total',
+  help: 'Total settlement actions skipped because coordinator state was stale or unavailable',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});

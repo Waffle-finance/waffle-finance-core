@@ -176,8 +176,8 @@ describe('translateCoordinatorState', () => {
   const coordinatorMapping: Array<[string, OrderStatus]> = [
     ['announced',       'pending'],
     ['src_locked',      'pending'],
-    ['dst_locked',      'pending'],
-    ['secret_revealed', 'pending'],
+    ['dst_locked',      'confirmed'],
+    ['secret_revealed', 'confirmed'],
     ['claim_pending',   'pending'],
     ['processing',      'pending'],
     ['completed',       'completed'],
@@ -188,6 +188,7 @@ describe('translateCoordinatorState', () => {
     ['timed_out',       'timed_out'],
     ['refunded',        'refunded'],
     ['pending',         'pending'],
+    ['abandoned',       'cancelled'],
   ];
 
   it.each(coordinatorMapping)(
@@ -225,6 +226,7 @@ describe('presentCoordinatorPhase — stepLabel completeness', () => {
     'completed',
     'confirmed',
     'cancelled',
+    'abandoned',
     'failed',
     'expired',
     'timed_out',

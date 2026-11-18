@@ -61,6 +61,46 @@ For each chain:
 4. Logs warnings for replay errors
 5. Metrics track events replayed and errors
 
+## Recovery Replay Summary
+
+At the end of every reconciliation run (and once in the startup job right
+after the first run), the coordinator logs a **recovery replay summary** that
+makes the replay window and recovery path explicit for operators. The report is
+built by the pure module `src/reconciliation/recovery-summary.ts` and combines
+each chain's persisted cursor HWM, the observed chain tip, and the window the
+reconciler actually scanned.
+
+**Per-chain outcome** (`src/reconciliation/recovery-summary.ts`):
+
+- `up_to_date` — cursor HWM is equal to the chain tip; nothing to replay.
+- `within_lookback` — catch-up gap fits inside the 48h replay window; events
+  will be replayed from the cursor forward (no loss).
+- `lookback_exceeded` — gap is past the replay window, so the reconciler
+  deterministically fell back to `tip - lookback` (contained in
+  `window=<scanned>/<lookback>`). Events older than the window may be missed.
+- `forced_resync` — gap exceeded 3× the lookback; the reconciler forced a
+  historical re-sync and events before the window may be permanently missed.
+
+**Overall verdict** (aggregated across chains):
+
+- `healthy` — all chains up to date.
+- `recovering` — at least one chain is still catching up within its window.
+- `at_risk` — at least one chain exceeded its lookback (possible silent loss).
+- `intervention_required` — at least one chain forced a historical re-sync.
+
+**Example log block:**
+
+```
+recovery replay summary — overall=recovering
+  ethereum   hwm=1,234,500 tip=1,234,700 gap=200 window=200/14,400 → within_lookback
+  stellar    hwm=100      tip=1,240,000 gap=1,239,900 window=34,560/34,560 → lookback_exceeded
+```
+
+The summary is logged at `info` while `recovering`, `warn` when `at_risk`, and
+`error` when `intervention_required`; healthy runs stay quiet. The same report
+is exposed as `recovery` on the `reconciliation` payload of `GET /health` and
+in `ReconciliationStatus`.
+
 ## Event Processing Guarantees
 
 ### Idempotency

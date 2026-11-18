@@ -321,6 +321,90 @@ describe("ResolverStatusMonitor", () => {
   });
 });
 
+// ── Cache freshness ─────────────────────────────────────────────────────────
+
+describe("ResolverStatusMonitor — status cache freshness", () => {
+  it("marks a fresh successful read as not stale with a freshness timestamp", async () => {
+    const cfg = baseConfig();
+    const evmProbe = vi.fn().mockResolvedValue(info());
+    const monitor = new ResolverStatusMonitor(cfg, log, {
+      evmProbe,
+      sorobanProbe: vi.fn().mockResolvedValue(null),
+      staleAfterMs: 60_000,
+    });
+
+    await monitor.checkNow();
+
+    expect(monitor.getState("ethereum")).toBe("active");
+    expect(monitor.getLastUpdatedAt("ethereum")).toEqual(expect.any(Number));
+    expect(monitor.isStale("ethereum")).toBe(false);
+    // Fresh status counts toward readiness — health may rely on it.
+    expect(monitor.isReady()).toBe(true);
+    const snapshot = monitor.getStatusSnapshot();
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0]).toMatchObject({ chain: "ethereum", state: "active", stale: false });
+    expect(snapshot[0].lastUpdatedAt).toEqual(expect.any(Number));
+  });
+
+  it("marks cached status stale after the threshold without a refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const cfg = baseConfig();
+      const evmProbe = vi.fn().mockResolvedValue(info());
+      const monitor = new ResolverStatusMonitor(cfg, log, {
+        evmProbe,
+        sorobanProbe: vi.fn().mockResolvedValue(null),
+        staleAfterMs: 1_000,
+      });
+
+      await monitor.checkNow();
+      expect(monitor.isStale("ethereum")).toBe(false);
+
+      // Advance past the cache threshold with no further successful read.
+      vi.setSystemTime(Date.now() + 1_001);
+      expect(monitor.isStale("ethereum")).toBe(true);
+      // Stale data is distinguishable from fresh status via the snapshot.
+      const snapshot = monitor.getStatusSnapshot();
+      expect(snapshot[0].stale).toBe(true);
+      expect(snapshot[0].state).toBe("active");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed refresh preserves last-known data and marks it stale rather than overstating readiness", async () => {
+    vi.useFakeTimers();
+    try {
+      const cfg = baseConfig();
+      const evmProbe = vi.fn().mockResolvedValue(info());
+      const monitor = new ResolverStatusMonitor(cfg, log, {
+        evmProbe,
+        sorobanProbe: vi.fn().mockResolvedValue(null),
+        staleAfterMs: 1_000,
+      });
+
+      await monitor.checkNow();
+      const lastUpdated = monitor.getLastUpdatedAt("ethereum");
+      expect(lastUpdated).toEqual(expect.any(Number));
+
+      // Next read rejects (RPC error): last-known value must be preserved
+      // and the freshness clock must NOT reset.
+      evmProbe.mockRejectedValueOnce(new Error("RPC down"));
+      vi.setSystemTime(Date.now() + 1_001);
+      await monitor.checkNow();
+
+      expect(monitor.getState("ethereum")).toBe("active");
+      expect(monitor.getLastUpdatedAt("ethereum")).toBe(lastUpdated);
+      expect(monitor.isStale("ethereum")).toBe(true);
+      // Readiness still reflects the last-known value, but consumers can see
+      // it is stale instead of mistaking it for a current read.
+      expect(monitor.getStatusSnapshot()[0]).toMatchObject({ state: "active", stale: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── toBigIntSafe ──────────────────────────────────────────────────────────────
 
 describe("toBigIntSafe — safe integer range guard", () => {

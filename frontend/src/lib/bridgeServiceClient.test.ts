@@ -206,4 +206,55 @@ describe('BridgeServiceClient', () => {
       }
     });
   });
+
+  describe('coordinator error rendering', () => {
+    it('renders a validation (422) error as user-safe without retry', async () => {
+      const client = new BridgeServiceClient(
+        BASE,
+        makeFetcher({ error: 'amount must be greater than zero' }, 422, false),
+      );
+      const result = await client.createOrder({
+        direction: 'eth_to_xlm',
+        amount: '0',
+        ethAddress: '0xabc',
+        stellarAddress: 'GABC',
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.retryable).toBe(false);
+        expect(result.message).toContain('amount must be greater than zero');
+        expect(result.message).not.toMatch(/stack|api[_-]?key|secret|bearer/i);
+        expect(result.httpStatus).toBe(422);
+      }
+    });
+
+    it('renders a transient (503) error as retryable with wait-and-retry affordance', async () => {
+      const client = new BridgeServiceClient(
+        BASE,
+        makeFetcher({ error: 'coordinator overloaded' }, 503, false),
+      );
+      const result = await client.createOrder({
+        direction: 'eth_to_xlm',
+        amount: '1',
+        ethAddress: '0xabc',
+        stellarAddress: 'GABC',
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.retryable).toBe(true);
+        expect(result.recoverableActions).toContain('wait_and_retry');
+        expect(result.message).not.toMatch(/stack|api[_-]?key|secret|bearer/i);
+        expect(result.httpStatus).toBe(503);
+      }
+    });
+
+    it('settles (no stuck loading) for both success and failure', async () => {
+      const okClient = new BridgeServiceClient(BASE, makeFetcher({ orderId: 'ord-1' }));
+      const errClient = new BridgeServiceClient(BASE, makeFetcher({ error: 'bad' }, 500, false));
+      const params = { direction: 'eth_to_xlm', amount: '1', ethAddress: '0x1', stellarAddress: 'G1' };
+      const [okRes, errRes] = await Promise.all([okClient.createOrder(params), errClient.createOrder(params)]);
+      expect(okRes.ok).toBe(true);
+      expect(errRes.ok).toBe(false);
+    });
+  });
 });

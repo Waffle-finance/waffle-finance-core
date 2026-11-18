@@ -73,6 +73,7 @@ const CONTRACT = {
   // e2e is test-only: it intentionally has no build script (see docs/COMMANDS.md).
   '@wafflefinance/e2e': {
     test: 'vitest run',
+    'test:smoke': 'vitest run',
     'test:watch': 'vitest',
     lint: 'eslint',
   },

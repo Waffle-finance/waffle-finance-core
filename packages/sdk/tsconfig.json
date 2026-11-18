@@ -11,5 +11,10 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // #731: colocated *.test.ts files were inside `include`, so
+  // dist/shared-utils/rpc-compat.test.js shipped in the published tarball —
+  // compiled vitest and all. They are still typechecked, by
+  // tsconfig.typecheck.json.
+  "exclude": ["src/**/*.test.ts", "node_modules", "dist", ".sdk-cost-tmp"]
 }

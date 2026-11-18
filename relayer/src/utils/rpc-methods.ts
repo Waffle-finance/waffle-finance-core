@@ -6,6 +6,9 @@
 import { OrdersService } from './orders.js';
 import ProgressiveFillManager from './partial-fills.js';
 import FusionEventManager, { EventType } from './event-handlers.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ component: 'rpc-methods' });
 
 // RPC method names (1inch compliant)
 export enum RpcMethod {
@@ -150,11 +153,11 @@ export class FusionRpcHandler {
         timestamp: Date.now()
       };
 
-      console.log(`📡 RPC ${request.method} completed in ${Date.now() - startTime}ms`);
+      log.info({ method: request.method, durationMs: Date.now() - startTime }, 'RPC completed');
       return response;
 
     } catch (error) {
-      console.error(`❌ RPC ${request.method} error:`, error);
+      log.error({ method: request.method, err: error }, 'RPC error');
       return this.createErrorResponse(
         request.id,
         RPC_ERRORS.INTERNAL_ERROR,

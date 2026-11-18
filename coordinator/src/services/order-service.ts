@@ -19,6 +19,10 @@ import {
   ordersExpiredSkippedTotal,
   ordersExpiredTerminalSkippedTotal,
   reconciliationEventsSkipped,
+  recordPhaseDwell,
+  recordSwapCompletion,
+  refreshPhaseRatios,
+  expiredOrdersBacklog,
 } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
@@ -39,9 +43,65 @@ import {
 export { announceSchema };
 export type { AnnounceInput };
 
+/**
+ * Identifies the service or operation that triggered an order mutation.
+ *
+ * Used in `audit_log` and `order_events` rows so incident responders can
+ * reconstruct exactly which component caused each state change (#746).
+ *
+ *   ethereum_listener  — live EthereumListener event
+ *   soroban_listener   — live SorobanListener event
+ *   solana_listener    — live SolanaListener event
+ *   reconciler         — reconciler catch-up replay run
+ *   secret_reconciler  — SecretReconciler preimage recovery
+ *   expiry_scan        — scheduled expiry scan
+ *   operator_http      — authenticated operator HTTP call
+ *   system             — coordinator-internal (startup, fallback, etc.)
+ */
+export type MutationActor =
+  | "ethereum_listener"
+  | "soroban_listener"
+  | "solana_listener"
+  | "reconciler"
+  | "secret_reconciler"
+  | "expiry_scan"
+  | "operator_http"
+  | "system";
+
 export class OrderValidationError extends Error {}
 
 /* ── Observability helpers ───────────────────────────────────────────────── */
+
+/**
+ * Module-level snapshot of active-order counts per (direction, phase).
+ *
+ * Maintained synchronously alongside the `coordinator_order_current_state`
+ * gauge so `refreshPhaseRatios` can compute normalised ratios on the hot
+ * path without hitting the DB.  Only non-terminal phases are tracked here;
+ * terminal phases don't appear in phase-ratio calculations.
+ *
+ * Key format: `${direction}:${phase}`
+ */
+const _phaseCountSnapshot = new Map<string, number>();
+
+function _snapshotKey(direction: string, phase: string): string {
+  return `${direction}:${phase}`;
+}
+
+function _incrementPhaseSnapshot(direction: string, phase: string, delta: number): void {
+  const key = _snapshotKey(direction, phase);
+  _phaseCountSnapshot.set(key, Math.max((_phaseCountSnapshot.get(key) ?? 0) + delta, 0));
+}
+
+/** Build a per-phase count map for one direction from the snapshot. */
+function _directionCounts(direction: string): Record<string, number> {
+  const PHASES = ['announced', 'src_locked', 'dst_locked', 'secret_revealed', 'expired'];
+  const out: Record<string, number> = {};
+  for (const p of PHASES) {
+    out[p] = _phaseCountSnapshot.get(_snapshotKey(direction, p)) ?? 0;
+  }
+  return out;
+}
 
 /**
  * Record lifecycle transition metrics for an order moving from one state
@@ -50,12 +110,14 @@ export class OrderValidationError extends Error {}
  *  - `orderStateDuration` histogram for the time spent in the previous state
  *  - `orderCurrentState` gauge (+1 for the new state, -1 for the old state)
  *  - `ordersTotal` counter (cumulative count per status)
+ *  - `orderPhaseDwellSeconds` / `orderPhaseTransitionSeconds` histograms
+ *  - `orderPhaseRatio` gauges (normalised distribution across active phases)
  */
 function recordTransition(
   direction: string,
   from: OrderStatus,
   to: OrderStatus,
-  updatedAtSeconds: number
+  updatedAtSeconds: number,
 ): void {
   // Per-transition counter.
   orderLifecycleTransitions.inc({ direction, from, to });
@@ -66,9 +128,25 @@ function recordTransition(
   // `updatedAt` as a proxy for when the order entered `from`.
   orderStateDuration.observe({ direction, state: from }, Math.max(Date.now() / 1000 - updatedAtSeconds, 0));
 
+  // Phase-distribution histograms — record dwell time and transition latency.
+  recordPhaseDwell(direction, from, to, updatedAtSeconds);
+
   // Update instantaneous state distribution.
   orderCurrentState.dec({ direction, state: from });
   orderCurrentState.inc({ direction, state: to });
+
+  // Update module-level snapshot and recompute normalised phase ratios.
+  _incrementPhaseSnapshot(direction, from, -1);
+  _incrementPhaseSnapshot(direction, to, +1);
+  refreshPhaseRatios(direction, _directionCounts(direction));
+
+  // Publish the expired-order backlog (orders whose timelock has elapsed and
+  // that are awaiting refund/failure) straight from the snapshot — no extra
+  // DB query, always in sync with `order_current_state{state="expired"}`.
+  expiredOrdersBacklog.set(
+    { direction },
+    _phaseCountSnapshot.get(_snapshotKey(direction, "expired")) ?? 0
+  );
 }
 
 export class OrderService {
@@ -132,6 +210,10 @@ export class OrderService {
     ordersTotal.inc({ status: "announced", direction: order.direction });
     orderLifecycleTransitions.inc({ direction: order.direction, from: "none", to: "announced" });
     orderCurrentState.inc({ direction: order.direction, state: "announced" });
+
+    // Track the new order in the module-level phase snapshot and refresh ratios.
+    _incrementPhaseSnapshot(order.direction, "announced", +1);
+    refreshPhaseRatios(order.direction, _directionCounts(order.direction));
     
     // Invalidate cache for both source and destination addresses
     this.historyCache.invalidateAddress(order.srcAddress);
@@ -219,7 +301,9 @@ export class OrderService {
     txHash: string;
     blockNumber: number;
     timelock: number;
+    actor?: MutationActor;
   }): Promise<void> {
+    const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
 
@@ -279,6 +363,7 @@ export class OrderService {
         dstChain: order.dstChain,
         txHash: input.txHash,
         blockNumber: input.blockNumber,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
@@ -291,7 +376,9 @@ export class OrderService {
     blockNumber: number;
     timelock: number;
     resolver: string | null;
+    actor?: MutationActor;
   }): Promise<void> {
+    const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
 
@@ -368,12 +455,13 @@ export class OrderService {
         txHash: input.txHash,
         blockNumber: input.blockNumber,
         resolverAddress: input.resolver ?? undefined,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
   }
 
-  async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null): Promise<void> {
+  async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null, actor: MutationActor = "system"): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
@@ -426,12 +514,13 @@ export class OrderService {
         srcChain: order.srcChain,
         dstChain: order.dstChain,
         txHash,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
   }
 
-  async markStatus(publicId: string, status: OrderRow["status"]): Promise<void> {
+  async markStatus(publicId: string, status: OrderRow["status"], actor: MutationActor = "system"): Promise<void> {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
@@ -461,6 +550,12 @@ export class OrderService {
     recordTransition(order.direction, order.status, status, order.updatedAt);
     ordersTotal.inc({ status, direction: order.direction });
 
+    // Record end-to-end swap completion time when an order reaches a terminal
+    // state. `order.createdAt` is unix seconds (as stored in SQLite).
+    if (status === "completed" || status === "refunded" || status === "failed") {
+      recordSwapCompletion(order.direction, status, order.createdAt);
+    }
+
     // ── SSE broadcast ───────────────────────────────────────────────────
     if (status === "refunded") {
       this.sseBroker?.broadcast(publicId, buildOrderRefundedPayload(publicId));
@@ -475,7 +570,14 @@ export class OrderService {
     this.historyCache.invalidateAddress(order.srcAddress);
     this.historyCache.invalidateAddress(order.dstAddress);
 
-    const eventType = status === "refunded" ? "order.refunded" : status === "completed" ? "order.completed" : status === "expired" ? "order.expired" : "order.status_changed";
+    const eventType =
+      status === "refunded"
+        ? "order.refunded"
+        : status === "completed"
+          ? "order.completed"
+          : status === "expired"
+            ? "order.expired"
+            : "order.failed";
     this.audit(
       buildOrderAuditEntry(eventType, {
         orderId: publicId,
@@ -485,6 +587,7 @@ export class OrderService {
         toStatus: status,
         srcChain: order.srcChain,
         dstChain: order.dstChain,
+        detail: `actor=${actor}`,
         requestId: getRequestId()
       })
     );
@@ -524,6 +627,23 @@ export class OrderService {
 
   async getLastProcessedBlock(chain: Chain): Promise<number> {
     return this.repo.getLastProcessedBlock(chain);
+  }
+
+  /**
+   * #734: claim an event's idempotence key in the durable ledger.
+   *
+   * Returns true when the caller owns the event and should apply it; false when
+   * a previous reconciler run already claimed it.  Unlike the reconciler's
+   * in-memory `EventSeenSet`, this survives a restart, which is what makes a
+   * repeated replay of the same event sequence a storage-layer no-op.
+   */
+  async claimEvent(input: {
+    eventKey: string;
+    chain: "ethereum" | "soroban" | "solana";
+    eventType: "OrderCreated" | "OrderClaimed" | "OrderRefunded";
+    orderId?: number | null;
+  }): Promise<boolean> {
+    return this.repo.claimEvent(input);
   }
 
   async getChainCursor(chain: Chain): Promise<number> {
@@ -645,7 +765,7 @@ export class OrderService {
       }
 
       try {
-        await this.markStatus(order.publicId, "expired");
+        await this.markStatus(order.publicId, "expired", "expiry_scan");
         this.log.info(
           { publicId: order.publicId, status: order.status },
           "order marked expired by timelock (expireStaleOrders)"

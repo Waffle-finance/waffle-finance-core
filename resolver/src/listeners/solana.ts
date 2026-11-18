@@ -1,6 +1,6 @@
-import { Connection, PublicKey } from "@solana/web3.js";
-import type { Logger } from "pino";
-import type { ResolverConfig } from "../config.js";
+import { Connection, PublicKey } from '@solana/web3.js';
+import type { Logger } from 'pino';
+import type { ResolverConfig } from '../config.js';
 import {
   eventsTotal,
   listenerErrorsTotal,
@@ -8,9 +8,11 @@ import {
   listenerPollRunsTotal,
   listenerLastEventTimestampSeconds,
   activeListeners,
-} from "../metrics.js";
+} from '../metrics.js';
+import { globalStalenessMonitor } from '../telemetry.js';
+import { resolveSolanaListenerConfig } from '../solana-config.js';
 
-const CHAIN = "solana";
+const CHAIN = 'solana';
 
 /**
  * Number of slots behind the current finalized slot before a transaction
@@ -44,7 +46,7 @@ const DEDUP_CACHE_MAX = 10_000;
 
 /** Emitted when a new HTLC order is locked on Solana. */
 export interface SolanaOrderCreatedEvent {
-  type: "created";
+  type: 'created';
   /** Solana transaction signature (base58). */
   txSig: string;
   /** On-chain order ID (Anchor PDA address). */
@@ -55,31 +57,55 @@ export interface SolanaOrderCreatedEvent {
   timelock: number;
   /** Slot the transaction landed in. */
   slot: number;
+  /** Address (Pubkey base58) of the order creator / sender / payer. */
+  sender?: string;
+  /** Address (Pubkey base58) of the beneficiary. */
+  beneficiary?: string;
+  /** Address (Pubkey base58) of the recipient of refunded funds. */
+  refundAddress?: string;
+  /** SPL Token mint address (base58) or SOL mint. */
+  mint?: string;
+  /** Order amount (lamports or atomic units). */
+  amount?: string;
+  /** Resolver safety deposit. */
+  safetyDeposit?: string;
 }
 
 /** Emitted when the beneficiary reveals the preimage and claims funds. */
 export interface SolanaOrderClaimedEvent {
-  type: "claimed";
+  type: 'claimed';
   txSig: string;
   orderId: string;
   /** Revealed preimage (hex string). */
   preimage: string;
   slot: number;
+  /** Address of the claimer / beneficiary. */
+  claimer?: string;
+  /** SHA-256 hashlock (hex string). */
+  hashlock?: string;
+  /** Amount claimed. */
+  amount?: string;
 }
 
 /** Emitted when the timelock expires and the maker reclaims funds. */
 export interface SolanaOrderRefundedEvent {
-  type: "refunded";
+  type: 'refunded';
   txSig: string;
   orderId: string;
   slot: number;
+  /** Address of the refunder. */
+  refunder?: string;
+  /** Address of the refund recipient. */
+  refundAddress?: string;
+  /** SHA-256 hashlock (hex string). */
+  hashlock?: string;
+  /** Amount refunded. */
+  amount?: string;
 }
 
 /** Union of all typed Solana HTLC events. */
 export type SolanaHtlcEvent =
-  | SolanaOrderCreatedEvent
-  | SolanaOrderClaimedEvent
-  | SolanaOrderRefundedEvent;
+  SolanaOrderCreatedEvent | SolanaOrderClaimedEvent | SolanaOrderRefundedEvent;
 
 // ---------------------------------------------------------------------------
 // Event handlers
@@ -113,15 +139,15 @@ export interface SolanaEventHandlers {
 export function parseSolanaHtlcLogs(
   sig: string,
   logs: string[],
-  slot: number,
+  slot: number
 ): SolanaHtlcEvent | null {
-  let eventType: "created" | "claimed" | "refunded" | null = null;
+  let eventType: 'created' | 'claimed' | 'refunded' | null = null;
   const payload: Record<string, unknown> = {};
 
   for (const line of logs) {
-    if (line.includes("OrderCreated"))  eventType = "created";
-    if (line.includes("OrderClaimed"))  eventType = "claimed";
-    if (line.includes("OrderRefunded")) eventType = "refunded";
+    if (line.includes('OrderCreated')) eventType = 'created';
+    if (line.includes('OrderClaimed')) eventType = 'claimed';
+    if (line.includes('OrderRefunded')) eventType = 'refunded';
 
     // Anchor may emit JSON data on any "Program log:" or "Program data:" line.
     const jsonMatch = line.match(/\{.*\}/);
@@ -132,7 +158,7 @@ export function parseSolanaHtlcLogs(
         // Malformed JSON in a program log line — not a whole-batch failure.
         // The metric is incremented here so operators can alert on repeated
         // parse errors without them being invisible in production.
-        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "parse_error" });
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'parse_error' });
       }
     }
   }
@@ -140,23 +166,78 @@ export function parseSolanaHtlcLogs(
   if (!eventType) return null;
 
   switch (eventType) {
-    case "created": {
-      const hashlock = payload.hashlock as string | undefined;
-      const orderId  = payload.orderId  as string | undefined;
-      const timelock = payload.timelock as number | undefined;
+    case 'created': {
+      const hashlock = (payload.hashlock ?? payload.hash_lock) as string | undefined;
+      const orderId = (payload.orderId ?? payload.order_id) as string | undefined;
+      const timelock = (payload.timelock ?? payload.time_lock) as number | undefined;
       if (!hashlock || !orderId || timelock == null) return null;
-      return { type: "created", txSig: sig, orderId, hashlock, timelock, slot };
+
+      const sender = (payload.sender ?? payload.payer) as string | undefined;
+      const beneficiary = payload.beneficiary as string | undefined;
+      const refundAddress = (payload.refundAddress ?? payload.refund_address) as string | undefined;
+      const mint = (payload.mint ?? payload.token_mint ?? payload.token) as string | undefined;
+      const amountVal = payload.amount;
+      const amount = amountVal != null ? String(amountVal) : undefined;
+      const depositVal = payload.safetyDeposit ?? payload.safety_deposit;
+      const safetyDeposit = depositVal != null ? String(depositVal) : undefined;
+
+      return {
+        type: 'created',
+        txSig: sig,
+        orderId,
+        hashlock,
+        timelock,
+        slot,
+        ...(sender ? { sender } : {}),
+        ...(beneficiary ? { beneficiary } : {}),
+        ...(refundAddress ? { refundAddress } : {}),
+        ...(mint ? { mint } : {}),
+        ...(amount ? { amount } : {}),
+        ...(safetyDeposit ? { safetyDeposit } : {}),
+      };
     }
-    case "claimed": {
+    case 'claimed': {
       const preimage = payload.preimage as string | undefined;
-      const orderId  = payload.orderId  as string | undefined;
+      const orderId = (payload.orderId ?? payload.order_id) as string | undefined;
       if (!preimage || !orderId) return null;
-      return { type: "claimed", txSig: sig, orderId, preimage, slot };
+
+      const claimer = (payload.claimer ?? payload.beneficiary) as string | undefined;
+      const hashlock = (payload.hashlock ?? payload.hash_lock) as string | undefined;
+      const amountVal = payload.amount;
+      const amount = amountVal != null ? String(amountVal) : undefined;
+
+      return {
+        type: 'claimed',
+        txSig: sig,
+        orderId,
+        preimage,
+        slot,
+        ...(claimer ? { claimer } : {}),
+        ...(hashlock ? { hashlock } : {}),
+        ...(amount ? { amount } : {}),
+      };
     }
-    case "refunded": {
-      const orderId = payload.orderId as string | undefined;
+    case 'refunded': {
+      const orderId = (payload.orderId ?? payload.order_id) as string | undefined;
       if (!orderId) return null;
-      return { type: "refunded", txSig: sig, orderId, slot };
+
+      const refunder = (payload.refunder ?? payload.refund_address ?? payload.refundAddress) as
+        string | undefined;
+      const refundAddress = (payload.refundAddress ?? payload.refund_address) as string | undefined;
+      const hashlock = (payload.hashlock ?? payload.hash_lock) as string | undefined;
+      const amountVal = payload.amount;
+      const amount = amountVal != null ? String(amountVal) : undefined;
+
+      return {
+        type: 'refunded',
+        txSig: sig,
+        orderId,
+        slot,
+        ...(refunder ? { refunder } : {}),
+        ...(refundAddress ? { refundAddress } : {}),
+        ...(hashlock ? { hashlock } : {}),
+        ...(amount ? { amount } : {}),
+      };
     }
   }
 }
@@ -207,8 +288,7 @@ export class SolanaListener {
    * Confirmation queue: slot → [{sig, logs}] seen at `confirmed`
    * but not yet at `finalized - FINALIZATION_SLOTS`.
    */
-  private readonly pendingSlots: Map<number, Array<{ sig: string; logs: string[] }>> =
-    new Map();
+  private readonly pendingSlots: Map<number, Array<{ sig: string; logs: string[] }>> = new Map();
 
   /**
    * In-process event deduplication cache.
@@ -222,16 +302,16 @@ export class SolanaListener {
       solana?: {
         rpcUrl: string;
         programId?: string;
-        commitment?: "processed" | "confirmed" | "finalized";
+        commitment?: 'processed' | 'confirmed' | 'finalized';
       };
     },
     pollMs: number,
-    log: Logger,
+    log: Logger
   ) {
     this.pollMs = pollMs;
-    this.log = log.child({ component: "SolanaListener" });
-    const rpcUrl = cfg.solana?.rpcUrl ?? "https://api.devnet.solana.com";
-    const commitment = cfg.solana?.commitment ?? "confirmed";
+    this.log = log.child({ component: 'SolanaListener' });
+    const rpcUrl = cfg.solana?.rpcUrl ?? 'https://api.devnet.solana.com';
+    const commitment = cfg.solana?.commitment ?? 'confirmed';
     this.connection = new Connection(rpcUrl, commitment);
   }
 
@@ -242,11 +322,11 @@ export class SolanaListener {
   async start(handlers: SolanaEventHandlers): Promise<void> {
     const programId = this.cfg.solana?.programId;
 
-    if (!programId || isProgramIdPlaceholder(programId)) {
-      this.log.warn(
-        { programId },
-        "SOLANA_HTLC_PROGRAM is a placeholder — Solana listener disabled",
-      );
+    // Placeholder → disabled (never a healthy live integration);
+    // malformed → throws here, failing before listener startup.
+    const resolution = resolveSolanaListenerConfig({ programId });
+    if (resolution.mode === 'disabled') {
+      this.log.warn({ programId }, resolution.reason);
       return;
     }
 
@@ -254,12 +334,10 @@ export class SolanaListener {
     this.stop();
     this.stopped = false;
 
-    this.log.info(
-      { program: programId, rpc: this.cfg.solana?.rpcUrl },
-      "Solana listener starting",
-    );
+    this.log.info({ program: programId, rpc: this.cfg.solana?.rpcUrl }, 'Solana listener starting');
 
     activeListeners.set({ chain: CHAIN }, 1);
+    globalStalenessMonitor.recordStarted(CHAIN);
 
     const tick = async () => {
       if (this.stopped) return;
@@ -267,12 +345,18 @@ export class SolanaListener {
       try {
         await this.poll(new PublicKey(programId), handlers);
         endTimer();
-        listenerPollRunsTotal.inc({ chain: CHAIN, result: "success" });
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: 'success' });
+        // Healthy tick — resets consecutive-failure counter and flips the
+        // health-state gauge back to "healthy" via the staleness monitor.
+        globalStalenessMonitor.recordHealthyTick(CHAIN);
       } catch (err) {
         endTimer();
-        listenerPollRunsTotal.inc({ chain: CHAIN, result: "failure" });
-        listenerErrorsTotal.inc({ chain: CHAIN, error_type: "poll_error" });
-        this.log.warn({ err }, "Solana poll failed");
+        listenerPollRunsTotal.inc({ chain: CHAIN, result: 'failure' });
+        listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'poll_error' });
+        // Failure tick — accumulates consecutive failures; after threshold=3
+        // the health-state gauge transitions to "degraded".
+        globalStalenessMonitor.recordFailure(CHAIN);
+        this.log.warn({ err }, 'Solana poll failed');
       } finally {
         if (!this.stopped) {
           this.timeoutId = setTimeout(tick, this.pollMs);
@@ -290,6 +374,7 @@ export class SolanaListener {
       this.timeoutId = undefined;
     }
     activeListeners.set({ chain: CHAIN }, 0);
+    globalStalenessMonitor.recordStopped(CHAIN);
   }
 
   // ---------------------------------------------------------------------------
@@ -316,23 +401,20 @@ export class SolanaListener {
   // Poll loop
   // ---------------------------------------------------------------------------
 
-  private async poll(
-    programPk: PublicKey,
-    handlers: SolanaEventHandlers,
-  ): Promise<void> {
+  private async poll(programPk: PublicKey, handlers: SolanaEventHandlers): Promise<void> {
     const startedAt = Date.now();
 
     // Step a: fetch both commitment levels to determine finalization watermark.
     const [finalizedSlot, confirmedSlot] = await Promise.all([
-      this.connection.getSlot("finalized"),
-      this.connection.getSlot("confirmed"),
+      this.connection.getSlot('finalized'),
+      this.connection.getSlot('confirmed'),
     ]);
 
     // Step b: detect slot regression (possible fork).
     if (this.lastSlot > 0 && confirmedSlot < this.lastSlot - REGRESSION_THRESHOLD) {
       this.log.warn(
         { confirmedSlot, lastSlot: this.lastSlot, finalizedSlot },
-        "Solana slot regression detected",
+        'Solana slot regression detected'
       );
       this.handleRegression(confirmedSlot);
     }
@@ -349,13 +431,13 @@ export class SolanaListener {
       let logs: string[] = [];
       try {
         const tx = await this.connection.getParsedTransaction(sigInfo.signature, {
-          commitment: "confirmed",
+          commitment: 'confirmed',
           maxSupportedTransactionVersion: 0,
         });
         if (!tx?.meta?.logMessages) continue;
         logs = tx.meta.logMessages;
       } catch (txErr) {
-        this.log.warn({ sig: sigInfo.signature, err: txErr }, "failed to fetch tx");
+        this.log.warn({ sig: sigInfo.signature, err: txErr }, 'failed to fetch tx');
         continue;
       }
 
@@ -368,7 +450,7 @@ export class SolanaListener {
 
     // Update lastSlot.
     if (sigs.length > 0) {
-      this.lastSlot = Math.max(this.lastSlot, ...sigs.map((s) => s.slot));
+      this.lastSlot = Math.max(this.lastSlot, ...sigs.map(s => s.slot));
     } else if (this.lastSlot === 0) {
       this.lastSlot = confirmedSlot;
     }
@@ -388,7 +470,7 @@ export class SolanaListener {
     const pruneOlderThan = finalizedSlot - PENDING_SLOTS_MAX_AGE;
     for (const slot of this.pendingSlots.keys()) {
       if (slot < pruneOlderThan) {
-        this.log.debug({ slot }, "pruning stale pending slot");
+        this.log.debug({ slot }, 'pruning stale pending slot');
         this.pendingSlots.delete(slot);
       }
     }
@@ -402,7 +484,7 @@ export class SolanaListener {
 
   private handleRegression(newConfirmedSlot: number): void {
     const regressionStart = newConfirmedSlot + 1;
-    const regressionEnd   = this.lastSlot;
+    const regressionEnd = this.lastSlot;
 
     let dropped = 0;
     for (let slot = regressionStart; slot <= regressionEnd; slot++) {
@@ -415,8 +497,11 @@ export class SolanaListener {
     if (dropped > 0) {
       this.log.warn(
         { regressionStart, regressionEnd, dropped },
-        "dropped pending transactions in regressed slot range",
+        'dropped pending transactions in regressed slot range'
       );
+      // Record dropped batches as missed events so the staleness monitor can
+      // reflect that events may have been lost during the fork.
+      globalStalenessMonitor.recordMissedBatch(CHAIN, 'slot_regression');
     }
 
     this.lastSlot = newConfirmedSlot;
@@ -426,14 +511,9 @@ export class SolanaListener {
   // Event dispatch
   // ---------------------------------------------------------------------------
 
-  private dispatch(
-    sig: string,
-    logs: string[],
-    slot: number,
-    handlers: SolanaEventHandlers,
-  ): void {
+  private dispatch(sig: string, logs: string[], slot: number, handlers: SolanaEventHandlers): void {
     if (this.isDuplicate(sig)) {
-      this.log.debug({ sig }, "Solana event duplicate skipped (in-process cache)");
+      this.log.debug({ sig }, 'Solana event duplicate skipped (in-process cache)');
       return;
     }
 
@@ -452,24 +532,24 @@ export class SolanaListener {
 
     try {
       switch (event.type) {
-        case "created":
-          eventsTotal.inc({ chain: CHAIN, event_type: "created" });
+        case 'created':
+          eventsTotal.inc({ chain: CHAIN, event_type: 'created' });
           handlers.onOrderCreated(event);
           break;
-        case "claimed":
-          eventsTotal.inc({ chain: CHAIN, event_type: "claimed" });
+        case 'claimed':
+          eventsTotal.inc({ chain: CHAIN, event_type: 'claimed' });
           handlers.onOrderClaimed(event);
           break;
-        case "refunded":
-          eventsTotal.inc({ chain: CHAIN, event_type: "refunded" });
+        case 'refunded':
+          eventsTotal.inc({ chain: CHAIN, event_type: 'refunded' });
           handlers.onOrderRefunded(event);
           break;
       }
 
       this.markSigProcessed(sig);
     } catch (err) {
-      listenerErrorsTotal.inc({ chain: CHAIN, error_type: "handler_error" });
-      this.log.warn({ err, sig }, "Solana event handler threw");
+      listenerErrorsTotal.inc({ chain: CHAIN, error_type: 'handler_error' });
+      this.log.warn({ err, sig }, 'Solana event handler threw');
       // Do NOT mark as processed on handler error — allow retry on next poll.
     }
   }
@@ -482,27 +562,4 @@ export class SolanaListener {
     }
     this.processedSigs.set(sig, true);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helper
-// ---------------------------------------------------------------------------
-
-/** Mirrors the coordinator's isSolanaPlaceholder logic inline to avoid
- *  importing @wafflefinance/config from the resolver (which has no Solana
- *  section in its config schema yet). */
-function isProgramIdPlaceholder(programId: string | undefined): boolean {
-  if (!programId || programId.trim() === "") return true;
-  const upper = programId.trim().toUpperCase();
-  const known = new Set([
-    "PLACEHOLDER",
-    "YOUR_SOLANA_HTLC_PROGRAM",
-    "YOUR_SOLANA_PROGRAM",
-    "YOUR_PROGRAM_ID",
-    "11111111111111111111111111111111",
-  ]);
-  for (const k of known) {
-    if (upper === k) return true;
-  }
-  return upper.includes("PLACEHOLDER") || upper.startsWith("YOUR_");
 }

@@ -13,6 +13,21 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    exclude: ['test/smoke/**', 'test/idempotency.ts'], // Separate configs
+    pool: 'forks',
+  },
+  // Separate config for smoke tests
+  testSmokes: {
+    environment: 'node',
+    include: ['test/smoke/**/*.ts'],
+    pool: 'forks',
+    testTimeout: 30000,
+    hookTimeout: 10000,
+  },
+  // Separate config for idempotency tests
+  testIdempotency: {
+    environment: 'node',
+    include: ['test/idempotency.test.ts'],
     pool: 'forks',
   },
 });

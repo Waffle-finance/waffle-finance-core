@@ -217,10 +217,58 @@ function devnetScenarios(name: string, factory: () => AsyncHtlcSim) {
   });
 }
 
-// ── EVM (Sepolia) ─────────────────────────────────────────────────────────────
+// ── Devnet opt-in flag and preflight report (issue #969) ──────────────────────
+//
+// Devnet tests are opt-in: they only run when RUN_DEVNET_E2E === "true".
+// When the flag is set but no chain has its prerequisites, the suite fails
+// fast with a missing-prerequisite message that names ONLY variable names and
+// safe network identifiers — never secret values, RPC tokens, or keys.
+
+const DEVNET_ENABLED = process.env.RUN_DEVNET_E2E === "true";
+
+// Required-variable names per chain (names only — never log values).
+const EVM_REQUIRED_VARS = ["DEVNET_EVM_PRIVATE_KEY"] as const;
+const STELLAR_REQUIRED_VARS = ["DEVNET_STELLAR_SECRET_KEY"] as const;
+const SOLANA_REQUIRED_VARS = ["DEVNET_SOLANA_SECRET_KEY", "DEVNET_SOLANA_PROGRAM_ID"] as const;
+
+// Safe, non-sensitive network identifiers for failure messages.
+const SAFE_NETWORKS = {
+  evm:     "EVM Sepolia (rpc default: ethereum-sepolia-rpc.publicnode.com)",
+  stellar: "Stellar testnet (rpc default: soroban-testnet.stellar.org)",
+  solana:  "Solana devnet (rpc default: api.devnet.solana.com)",
+} as const;
+
+function missingVars(names: readonly string[]): string[] {
+  return names.filter((n) => !process.env[n]);
+}
+
+export function devnetPreflightReport(): { enabled: boolean; missing: string[] } {
+  if (!DEVNET_ENABLED) return { enabled: false, missing: [] };
+  const missing: string[] = [];
+  if (!EVM_CFG) for (const n of missingVars(EVM_REQUIRED_VARS)) missing.push(`EVM Sepolia: ${n}`);
+  if (!SOROBAN_CFG) for (const n of missingVars(STELLAR_REQUIRED_VARS)) missing.push(`Stellar testnet: ${n}`);
+  if (!SOLANA_CFG) for (const n of missingVars(SOLANA_REQUIRED_VARS)) missing.push(`Solana devnet: ${n}`);
+  return { enabled: true, missing };
+}
+
+describe("devnet preflight", () => {
+  it("stays skipped unless RUN_DEVNET_E2E=true", () => {
+    if (!DEVNET_ENABLED) return; // opt-in flag absent → devnet suites skip below
+    const { missing } = devnetPreflightReport();
+    if (missing.length > 0) {
+      throw new Error(
+        `Devnet preflight failed: RUN_DEVNET_E2E is enabled but prerequisites are missing.\n` +
+        `Missing: ${missing.join(", ")}\n` +
+        `Networks: ${SAFE_NETWORKS.evm} | ${SAFE_NETWORKS.stellar} | ${SAFE_NETWORKS.solana}\n` +
+        `See e2e/DEVNET_SETUP.md for the exact variables to export. ` +
+        `(Values are never printed here.)`,
+      );
+    }
+  });
+});
 
 const EVM_CFG = evmConfig();
-describe.skipIf(!EVM_CFG)("EvmHtlcDevnet", () => {
+describe.skipIf(!DEVNET_ENABLED || !EVM_CFG)("EvmHtlcDevnet", () => {
   devnetScenarios("EVM Sepolia", () => new EvmHtlcDevnet(EVM_CFG!));
 
   it(
@@ -239,7 +287,7 @@ describe.skipIf(!EVM_CFG)("EvmHtlcDevnet", () => {
 // ── Soroban (Stellar testnet) ─────────────────────────────────────────────────
 
 const SOROBAN_CFG = sorobanConfig();
-describe.skipIf(!SOROBAN_CFG)("SorobanHtlcDevnet", () => {
+describe.skipIf(!DEVNET_ENABLED || !SOROBAN_CFG)("SorobanHtlcDevnet", () => {
   devnetScenarios("Soroban testnet", () => new SorobanHtlcDevnet(SOROBAN_CFG!));
 
   it(
@@ -258,7 +306,7 @@ describe.skipIf(!SOROBAN_CFG)("SorobanHtlcDevnet", () => {
 // ── Solana (devnet) ───────────────────────────────────────────────────────────
 
 const SOLANA_CFG = solanaConfig();
-describe.skipIf(!SOLANA_CFG)("SolanaHtlcDevnet", () => {
+describe.skipIf(!DEVNET_ENABLED || !SOLANA_CFG)("SolanaHtlcDevnet", () => {
   devnetScenarios("Solana devnet", () => new SolanaHtlcDevnet(SOLANA_CFG!));
 
   it(
@@ -276,7 +324,7 @@ describe.skipIf(!SOLANA_CFG)("SolanaHtlcDevnet", () => {
 
 // ── Cross-chain devnet round-trip (EVM ↔ Soroban) ────────────────────────────
 
-describe.skipIf(!EVM_CFG || !SOROBAN_CFG)(
+describe.skipIf(!DEVNET_ENABLED || !EVM_CFG || !SOROBAN_CFG)(
   "Cross-chain devnet round-trip — EVM ↔ Soroban",
   () => {
     it(
@@ -302,7 +350,7 @@ describe.skipIf(!EVM_CFG || !SOROBAN_CFG)(
 
 // ── Cross-chain devnet round-trip (EVM ↔ Solana) ─────────────────────────────
 
-describe.skipIf(!EVM_CFG || !SOLANA_CFG)(
+describe.skipIf(!DEVNET_ENABLED || !EVM_CFG || !SOLANA_CFG)(
   "Cross-chain devnet round-trip — EVM ↔ Solana",
   () => {
     it(

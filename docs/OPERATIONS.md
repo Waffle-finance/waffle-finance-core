@@ -32,6 +32,7 @@ Before deploying contracts or services, complete the following checklist:
    export V2_STAKE_ASSET="0x0000000000000000000000000000000000000000000000000000000000000000"  # ETH or ERC20
    export V2_MIN_STAKE="<min-stake-in-wei>"
    export V2_MIN_SAFETY_DEPOSIT="<min-safety-deposit-in-wei>"  # optional, defaults to 0
+   export SOLANA_HTLC_PROGRAM_MAINNET="<solana-program-pubkey>"
    ```
 
 2. **Verify RPC connectivity:**
@@ -43,14 +44,22 @@ Before deploying contracts or services, complete the following checklist:
 
    # Stellar Horizon
    curl "$STELLAR_HORIZON_URL" | head -1
+
+   # Solana (primary & failover RPCs)
+   curl -X POST $SOLANA_RPC_URL -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
    ```
 
 3. **Check deployer balance:**
    ```bash
-   # Ensure sufficient funds for contract deployment
-   # Mainnet: at least 0.1 ETH
-   # Sepolia: use faucet https://sepoliafaucet.com
+   # Ethereum — Mainnet: at least 0.1 ETH; Sepolia: use faucet https://sepoliafaucet.com
+   # Stellar — Testnet: friendbot; Mainnet: at least 50 XLM
+   # Solana — Devnet: airdrop; Mainnet: at least 2.0 SOL for Program deploy + Order PDA rent buffers
    ```
+
+4. **Review chain operator guides:**
+   - Stellar / Soroban: see [docs/SOROBAN_OPERATOR_GUIDE.md](SOROBAN_OPERATOR_GUIDE.md)
+   - Solana: see [docs/SOLANA_OPERATOR_GUIDE.md](SOLANA_OPERATOR_GUIDE.md) (devnet vs production gap audit, Anchor lifecycle, readiness gating, settlement checklist)
 
 ---
 
@@ -174,7 +183,10 @@ export RESOLVER_RPC_MAX_DELAY_MS=60000
 
 1. Verify resolver is registered:
    ```bash
-   pnpm --filter @wafflefinance/resolver status
+   # Check resolver health endpoint (the service exposes /health on RESOLVER_HEALTH_PORT)
+   curl http://localhost:${RESOLVER_HEALTH_PORT:-8081}/health
+   # Or check on-chain registration via the SDK:
+   pnpm --filter @wafflefinance/resolver start -- --check-registration
    ```
 2. Check resolver has sufficient stake
 3. Verify resolver RPC endpoints are configured correctly
@@ -277,6 +289,10 @@ export MAINTENANCE_MODE=true
 
 ## Monitoring Guide
 
+> For the full Prometheus rule set and thresholds (stale-cleanup backlog,
+> expiry backlog, job stalls, failed recovery paths) see
+> [`docs/ALERTING.md`](./ALERTING.md).
+
 ### Key Metrics to Watch
 
 | Metric                                             | Alert Threshold | Meaning                 |
@@ -286,6 +302,9 @@ export MAINTENANCE_MODE=true
 | `resolvers_active`                                 | = 0             | No resolvers available  |
 | `rpc_errors_total`                                 | > 10/min        | RPC connectivity issues |
 | `restart_count`                                    | > 5             | Service instability     |
+| `coordinator_stale_cleanup_backlog`                 | > 50 for 30m    | Stale-order backlog size (see [`docs/ALERTING.md`](./ALERTING.md)) |
+| `coordinator_stale_cleanup_remaining`               | > 0 for 2h      | Stale orders left unarchived after a run |
+| `coordinator_expired_orders_backlog`               | > 20 for 30m    | Expired orders awaiting refund/failure |
 
 ### Health Check Script
 

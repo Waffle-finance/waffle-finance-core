@@ -27,6 +27,7 @@ import { AbuseDetector } from "./middleware/abuse-detection.js";
 import { sanitizeForLog } from "../utils/sanitize-for-log.js";
 import { SecretRevealError } from "../services/secret-errors.js";
 import type { AuditRepository } from "../audit/audit-repo.js";
+import type { OrdersRepository } from "../persistence/orders-repo.js";
 import { AuditExporter } from "../audit/audit-exporter.js";
 
 export interface AppDeps {
@@ -37,6 +38,8 @@ export interface AppDeps {
   quotes: QuoteService;
   /** Optional — when provided, the audit replay endpoints are mounted. */
   auditRepo?: AuditRepository;
+  /** Optional — when provided, enables the /timeline endpoint in audit routes. */
+  ordersRepo?: OrdersRepository;
   /** Optional — when provided, the order export endpoints are mounted. */
   orderExport?: OrderExportService;
   getReconciliationStatus?: () => ReconciliationStatus;
@@ -149,7 +152,7 @@ export function createApp(deps: AppDeps): Express {
   // Audit replay endpoints — only mounted when an AuditRepository is injected.
   if (deps.auditRepo) {
     const exporter = new AuditExporter(deps.auditRepo);
-    app.use("/api", auditRoutes(deps.auditRepo, exporter, deps.log));
+    app.use("/api", auditRoutes(deps.auditRepo, exporter, deps.log, deps.ordersRepo));
   }
 
   // Order export endpoints — only mounted when an OrderExportService is injected.

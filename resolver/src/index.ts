@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { runCommand } from "./commands/run.js";
+import { configSummaryCommand } from "./commands/config-summary.js;
 import { registerCommand, statusCommand, unregisterCommand } from "./commands/register.js";
 
 const program = new Command();
@@ -15,6 +16,13 @@ program
   .description("Start the resolver. Listens to both chains and reacts to HTLC events.")
   .action(async () => {
     await runCommand();
+  });
+
+program
+  .command("config-summary")
+  .description("Validate runtime configuration and print a redacted per-chain summary without starting listeners.")
+  .action(async () => {
+    await configSummaryCommand();
   });
 
 program

@@ -154,6 +154,32 @@ When decoding is shared and typed, the coordinator is safer in two ways:
 - live processing and replay use the same event semantics
 - malformed input is visible and testable rather than silently ignored
 
+## Soroban vs EVM runtime differences — what the parser assumes
+
+The parser is designed for Soroban's runtime model, which differs from
+the Ethereum listener's model in ways that affect how events are sourced
+and how the coordinator processes them:
+
+**Finality**: Soroban uses BFT consensus (SCP).  Ledgers are final the
+moment they close.  There are no chain reorgs and no block-confirmation
+window.  The parser never needs to handle "tentative" events the way the
+Ethereum parser must guard against short-lived reorgs and block-hash
+mismatches.  If an event arrives "out of order" (ledger sequence goes
+backwards), it is always a node-level inconsistency, not a chain reorg.
+
+**Event sourcing**: Soroban events are fetched via cursor-based
+`getEvents` pagination rather than block-range `getLogs`.  The cursor is
+an opaque string that expires after the RPC node's event history window
+(~48 h).  A cursor reset triggers a bounded replay in the listener, which
+is why the parser is designed to be idempotent: replaying the same event
+through `decideDispatch` is safe because the DB state guards against
+double-application.
+
+**No probabilistic confirmation**: because ledgers are BFT-final, the
+coordinator treats a parsed event as authoritative as soon as it is
+decoded without error.  There is no equivalent of Ethereum's
+`confirmationDepth` setting in the Soroban path.
+
 ## Known behavior after this change
 
 - Governance or admin Soroban topics are ignored cleanly.
@@ -161,6 +187,9 @@ When decoding is shared and typed, the coordinator is safer in two ways:
 - Malformed HTLC payloads are logged and metered.
 - Order state is never mutated from malformed Soroban events.
 - The parser is explicit about required fields and type expectations.
+- Out-of-order events (BFT-finality note: these are always node-level,
+  never chain-level) are counted via
+  `coordinator_soroban_out_of_order_events_total`.
 
 ## File locations
 

@@ -16,6 +16,24 @@ export type {
   RpcCallResult,
 } from "./rpc-compat.js";
 
+export {
+  retryAsync,
+  retrySync,
+  RetryPolicies,
+} from "./retry.js";
+export type { RetryPolicy } from "./retry.js";
+
+export {
+  normalizeContractError,
+  normalizeEthereumError,
+  normalizeSolanaError,
+  normalizeSorobanError,
+} from "./contract-errors.js";
+export type {
+  ContractErrorCategory,
+  NormalizedContractError,
+} from "./contract-errors.js";
+
 /** 0x-prefixed 32-byte hex string. */
 type Hex32 = `0x${string}`;
 

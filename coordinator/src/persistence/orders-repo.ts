@@ -1,7 +1,10 @@
 import type { Database } from "./db.js";
 import { canTransition, isTerminal } from "../state-machine/order-machine.js";
 import { dbQueryDuration, orderTransitionEventsTotal } from "../metrics.js";
-import { InMemoryRepositoryTransaction, type RepositoryTransaction } from "./transaction-contract.js";
+import {
+  InMemoryRepositoryTransaction,
+  type RepositoryTransaction,
+} from "./transaction-contract.js";
 
 type DatabaseT = Database;
 type Statement = ReturnType<DatabaseT["prepare"]>;
@@ -27,7 +30,9 @@ export type OrderStatus =
   | "completed"
   | "refunded"
   | "failed"
-  | "expired";
+  | "expired"
+  | "cancelled"
+  | "abandoned";
 
 export type Chain = "ethereum" | "stellar" | "solana";
 export type Direction = "eth_to_xlm" | "xlm_to_eth" | "eth_to_sol" | "sol_to_eth";
@@ -97,6 +102,8 @@ export interface OrderRow {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  /** Machine-readable reason for cancellation or abandonment, e.g. "stale:no_src_lock". */
+  cancellationReason: string | null;
 }
 
 export interface OrderHistoryResult {
@@ -156,6 +163,7 @@ interface OrderDbRow {
   created_at: number;
   updated_at: number;
   archived_at: number | null;
+  cancellation_reason: string | null;
 }
 
 function rowToOrder(r: OrderDbRow): OrderRow {
@@ -192,126 +200,253 @@ function rowToOrder(r: OrderDbRow): OrderRow {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     archivedAt: r.archived_at ?? null,
+    cancellationReason: r.cancellation_reason ?? null,
   };
 }
 
 export class OrdersRepository {
   private readonly transactionManager: RepositoryTransaction;
-  private readonly insertStmt: Statement;
-  private readonly byPublicId: Statement;
-  private readonly byHashlock: Statement;
-  private readonly byAddress: Statement;
-  private readonly byAddressCursor: Statement;
-  private readonly bySrcOrderId: Statement;
-  private readonly byDstOrderId: Statement;
-  private readonly updateStatus: Statement;
-  private readonly updateSrcLock: Statement;
-  private readonly updateDstLock: Statement;
-  private readonly updateSecret: Statement;
-  private readonly rollbackSrc: Statement;
-  private readonly rollbackDst: Statement;
-  private readonly insertEvent: Statement;
 
-  constructor(private readonly db: DatabaseT, transactionManager?: RepositoryTransaction) {
+  /**
+   * #734: the connection every statement is issued against.
+   *
+   * This is mutable because a transaction runs on a *different* connection than
+   * the ambient one: a dedicated `PoolClient` under Postgres, or — because
+   * `node:sqlite` is single-connection — the same handle wrapped in an
+   * explicit `BEGIN IMMEDIATE`.  `runInTransaction` swaps it for the duration
+   * of the callback and restores it afterwards, and `rebindStatements()`
+   * re-prepares the cached statements against the new connection so they join
+   * the transaction instead of silently escaping it.
+   */
+  private active: DatabaseT;
+
+  /**
+   * The ambient connection.  `active` is only ever swapped for the duration of
+   * a transaction and restored in `atomic()`'s `finally`, so this is always
+   * the connection the repository was constructed with.  Exposed as a getter
+   * because tests and operators reach for `repo.db` to run maintenance SQL.
+   */
+  get db(): DatabaseT {
+    return this.active;
+  }
+
+  /**
+   * Cached statement SQL, keyed by the field that holds the prepared handle.
+   * Kept as text (not as pre-bound handles) so the handles can be re-created
+   * against whichever connection is active.
+   */
+  private readonly statementSql: Record<string, string>;
+  private insertStmt!: Statement;
+  private byPublicId!: Statement;
+  private byHashlock!: Statement;
+  private byAddress!: Statement;
+  private byAddressCursor!: Statement;
+  private bySrcOrderId!: Statement;
+  private byDstOrderId!: Statement;
+  private updateStatus!: Statement;
+  private updateSrcLock!: Statement;
+  private updateDstLock!: Statement;
+  private updateSecret!: Statement;
+  private rollbackSrc!: Statement;
+  private rollbackDst!: Statement;
+  private insertEvent!: Statement;
+  private claimEventStmt!: Statement;
+
+  constructor(db: DatabaseT, transactionManager?: RepositoryTransaction) {
     this.transactionManager = transactionManager ?? new InMemoryRepositoryTransaction();
-    this.insertStmt = db.prepare(`
-      INSERT INTO orders (
-        public_id, direction, status, hashlock,
-        src_chain, src_address, src_asset, src_amount, src_safety_deposit,
-        dst_chain, dst_address, dst_asset, dst_amount
-      ) VALUES (
-        :publicId, :direction, 'announced', :hashlock,
-        :srcChain, :srcAddress, :srcAsset, :srcAmount, :srcSafetyDeposit,
-        :dstChain, :dstAddress, :dstAsset, :dstAmount
-      )
-    `);
-    this.byPublicId = db.prepare("SELECT * FROM orders WHERE public_id = ?");
-    this.byHashlock = db.prepare("SELECT * FROM orders WHERE hashlock = ?");
-    this.byAddress = db.prepare(`
-      SELECT * FROM (
-        SELECT * FROM orders WHERE src_address = :addr
-        UNION
-        SELECT * FROM orders WHERE dst_address = :addr
-      )
-      ORDER BY created_at DESC
-      LIMIT :limit OFFSET :offset
-    `);
-    this.byAddressCursor = db.prepare(`
-      SELECT * FROM orders
-      WHERE (src_address = :addr OR dst_address = :addr)
-        AND (created_at < :cursorCreatedAt OR (created_at = :cursorCreatedAt AND id < :cursorId))
-      ORDER BY created_at DESC, id DESC
-      LIMIT :limit
-    `);
-    this.bySrcOrderId = db.prepare(`
-      SELECT * FROM orders WHERE src_chain = :chain AND src_order_id = :orderId
-    `);
-    this.byDstOrderId = db.prepare(`
-      SELECT * FROM orders WHERE dst_chain = :chain AND dst_order_id = :orderId
-    `);
-    this.updateStatus = db.prepare(`
-      UPDATE orders
-      SET status = :status, updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId
-    `);
-    // Status is computed in TypeScript (see recordSrcLock/recordDstLock) using
-    // the order state machine as the single source of truth, then applied here
-    // as a discrete value rather than via a brittle SQL CASE expression.
-    this.updateSrcLock = db.prepare(`
-      UPDATE orders SET
-        src_order_id = :orderId,
-        src_lock_tx = :txHash,
-        src_lock_block = :blockNumber,
-        src_timelock = :timelock,
-        status = :status,
-        updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId
-    `);
-    this.updateDstLock = db.prepare(`
-      UPDATE orders SET
-        dst_order_id = :orderId,
-        dst_lock_tx = :txHash,
-        dst_lock_block = :blockNumber,
-        dst_timelock = :timelock,
-        resolver_address = :resolver,
-        status = :status,
-        updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId
-    `);
-    this.updateSecret = db.prepare(`
-      UPDATE orders SET
-        preimage = :preimage,
-        preimage_enc_version = :encVersion,
-        secret_revealed_tx = :txHash,
-        status = 'secret_revealed',
-        updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId
-    `);
-    this.rollbackSrc = db.prepare(`
-      UPDATE orders SET
-        src_order_id = NULL,
-        src_lock_tx = NULL,
-        src_lock_block = NULL,
-        src_timelock = NULL,
-        status = 'announced',
-        updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId AND status = 'src_locked'
-    `);
-    this.rollbackDst = db.prepare(`
-      UPDATE orders SET
-        dst_order_id = NULL,
-        dst_lock_tx = NULL,
-        dst_lock_block = NULL,
-        dst_timelock = NULL,
-        resolver_address = NULL,
-        status = 'src_locked',
-        updated_at = CAST(strftime('%s','now') AS INTEGER)
-      WHERE public_id = :publicId AND status = 'dst_locked'
-    `);
-    this.insertEvent = db.prepare(`
-      INSERT INTO order_events (order_id, event_type, payload_json)
-      VALUES (:orderId, :eventType, :payloadJson)
-    `);
+    this.active = db;
+
+    this.statementSql = {
+      insertStmt: `
+        INSERT INTO orders (
+          public_id, direction, status, hashlock,
+          src_chain, src_address, src_asset, src_amount, src_safety_deposit,
+          dst_chain, dst_address, dst_asset, dst_amount
+        ) VALUES (
+          :publicId, :direction, 'announced', :hashlock,
+          :srcChain, :srcAddress, :srcAsset, :srcAmount, :srcSafetyDeposit,
+          :dstChain, :dstAddress, :dstAsset, :dstAmount
+        )
+      `,
+      byPublicId: "SELECT * FROM orders WHERE public_id = ?",
+      byHashlock: "SELECT * FROM orders WHERE hashlock = ?",
+      byAddress: `
+        SELECT * FROM (
+          SELECT * FROM orders WHERE src_address = :addr
+          UNION
+          SELECT * FROM orders WHERE dst_address = :addr
+        )
+        ORDER BY created_at DESC
+        LIMIT :limit OFFSET :offset
+      `,
+      byAddressCursor: `
+        SELECT * FROM orders
+        WHERE (src_address = :addr OR dst_address = :addr)
+          AND (created_at < :cursorCreatedAt OR (created_at = :cursorCreatedAt AND id < :cursorId))
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+      `,
+      bySrcOrderId: `
+        SELECT * FROM orders WHERE src_chain = :chain AND src_order_id = :orderId
+      `,
+      byDstOrderId: `
+        SELECT * FROM orders WHERE dst_chain = :chain AND dst_order_id = :orderId
+      `,
+      updateStatus: `
+        UPDATE orders
+        SET status = :status, updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId
+      `,
+      // Status is computed in TypeScript (see recordSrcLock/recordDstLock) using
+      // the order state machine as the single source of truth, then applied here
+      // as a discrete value rather than via a brittle SQL CASE expression.
+      updateSrcLock: `
+        UPDATE orders SET
+          src_order_id = :orderId,
+          src_lock_tx = :txHash,
+          src_lock_block = :blockNumber,
+          src_timelock = :timelock,
+          status = :status,
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId
+      `,
+      updateDstLock: `
+        UPDATE orders SET
+          dst_order_id = :orderId,
+          dst_lock_tx = :txHash,
+          dst_lock_block = :blockNumber,
+          dst_timelock = :timelock,
+          resolver_address = :resolver,
+          status = :status,
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId
+      `,
+      updateSecret: `
+        UPDATE orders SET
+          preimage = :preimage,
+          preimage_enc_version = :encVersion,
+          secret_revealed_tx = :txHash,
+          status = 'secret_revealed',
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId
+      `,
+      rollbackSrc: `
+        UPDATE orders SET
+          src_order_id = NULL,
+          src_lock_tx = NULL,
+          src_lock_block = NULL,
+          src_timelock = NULL,
+          status = 'announced',
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId AND status = 'src_locked'
+      `,
+      rollbackDst: `
+        UPDATE orders SET
+          dst_order_id = NULL,
+          dst_lock_tx = NULL,
+          dst_lock_block = NULL,
+          dst_timelock = NULL,
+          resolver_address = NULL,
+          status = 'src_locked',
+          updated_at = CAST(strftime('%s','now') AS INTEGER)
+        WHERE public_id = :publicId AND status = 'dst_locked'
+      `,
+      insertEvent: `
+        INSERT INTO order_events (order_id, event_type, payload_json)
+        VALUES (:orderId, :eventType, :payloadJson)
+      `,
+      claimEventStmt: `
+        INSERT INTO processed_events (event_key, chain, event_type, order_id)
+        VALUES (:eventKey, :chain, :eventType, :orderId)
+        ON CONFLICT(event_key) DO NOTHING
+      `,
+    };
+
+    this.rebindStatements();
+  }
+
+  /** (Re)prepare every cached statement against the currently active connection. */
+  private rebindStatements(): void {
+    for (const [key, sql] of Object.entries(this.statementSql)) {
+      (this as unknown as Record<string, Statement>)[key] = this.active.prepare(sql);
+    }
+  }
+
+  /**
+   * Run a multi-statement write atomically, with retry semantics.
+   *
+   * Delegates to `RepositoryTransaction.runInTransaction`, the single
+   * transaction seam the whole persistence layer shares.  While the callback
+   * runs, `this.active` points at the transaction's connection and the cached
+   * statements are re-prepared against it, so the order-row mutation and the
+   * `order_events` history row either both land or neither does.
+   */
+  private async atomic<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const ambient = this.active;
+    const result = await this.transactionManager.runInTransaction(
+      this.active,
+      operation,
+      async () => {
+        try {
+          return await fn();
+        } finally {
+          // Restore before propagating so a failed transaction does not leave
+          // the repository bound to a released Postgres client.
+          this.active = ambient;
+          this.rebindStatements();
+        }
+      }
+    );
+    this.active = ambient;
+    this.rebindStatements();
+    return result;
+  }
+
+  /**
+   * #734: claim an event's idempotence key in the durable ledger.
+   *
+   * Returns `true` when this call inserted the key — i.e. the caller owns the
+   * event and should apply it.  Returns `false` when the key was already
+   * present, which means the event was processed by an earlier run or before a
+   * restart; the caller must skip it.
+   *
+   * The uniqueness guarantee is the `processed_events` PRIMARY KEY, not this
+   * method.  `ON CONFLICT DO NOTHING` lets the index resolve the duplicate
+   * and `changes === 0` reports it, so a second identical event is a no-op at
+   * the storage layer.  The reconciler's in-memory `EventSeenSet` remains as a
+   * cheap fast path within a single run, but it is no longer the correctness
+   * boundary — it is cleared between runs and lost on restart.
+   */
+  async claimEvent(input: {
+    eventKey: string;
+    chain: "ethereum" | "soroban" | "solana";
+    eventType: "OrderCreated" | "OrderClaimed" | "OrderRefunded";
+    orderId?: number | null;
+  }): Promise<boolean> {
+    const result = await this.run(this.claimEventStmt, {
+      eventKey: input.eventKey,
+      chain: input.chain,
+      eventType: input.eventType,
+      orderId: input.orderId ?? null,
+    });
+    return result.changes > 0;
+  }
+
+  /** True when `eventKey` is already present in the durable idempotence ledger. */
+  async hasProcessedEvent(eventKey: string): Promise<boolean> {
+    const row = await this.get<{ event_key: string }>(
+      this.active.prepare("SELECT event_key FROM processed_events WHERE event_key = ?"),
+      eventKey
+    );
+    return row !== undefined && row !== null;
+  }
+
+  /** Count of rows in the durable idempotence ledger.  Used by tests and metrics. */
+  async countProcessedEvents(): Promise<number> {
+    const row = await this.get<{ n: number }>(
+      this.active.prepare("SELECT COUNT(*) AS n FROM processed_events")
+    );
+    return Number(row?.n ?? 0);
   }
 
   private async run(stmt: Statement, ...params: any[]): Promise<StatementResult> {
@@ -428,7 +563,7 @@ export class OrdersRepository {
 
     if (!cursor) {
       // First page - get latest orders
-      const firstPageStmt = this.db.prepare(`
+      const firstPageStmt = this.active.prepare(`
         SELECT * FROM orders
         WHERE src_address = :addr OR dst_address = :addr
         ORDER BY created_at DESC, id DESC
@@ -524,16 +659,33 @@ export class OrdersRepository {
     expectedStatus?: OrderStatus
   ): Promise<void>;
   async setStatus(publicId: string, status: OrderStatus, actor = "system", expectedStatus?: OrderStatus): Promise<void> {
-    await this.transactionManager.runWithRetry("status-update", async () => {
+    await this.atomic("status-update", async () => {
       // Fetch the current row first so we can record a transition event and
       // also use it for the zero-row disambiguation below.
       const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+
+      // #734: a replayed status update that targets the status the order
+      // already holds must not write anything and must not append a second
+      // `status.transitioned` row. Counting it as a transition each time the
+      // reconciler re-reads the window is exactly the "double-counted state
+      // transition" the issue warns about: the lifecycle metrics and the trail
+      // would grow without bound while the order itself never changed.
+      if (expectedStatus === undefined && order && order.status === status) {
+        await this.appendTransitionEvent(order.id, "status.no_op", {
+          actor,
+          fromStatus: order.status,
+          toStatus: status,
+          outcome: "no_op:already_at_target",
+          triggeredAt: Math.floor(Date.now() / 1000),
+        });
+        return;
+      }
 
       let result: StatementResult;
       if (expectedStatus !== undefined) {
         // Conditional UPDATE — only succeeds when the current status matches.
         result = await this.run(
-          this.db.prepare(`
+          this.active.prepare(`
             UPDATE orders
             SET status = :status, updated_at = CAST(strftime('%s','now') AS INTEGER)
             WHERE public_id = :publicId AND status = :expectedStatus
@@ -592,7 +744,7 @@ export class OrdersRepository {
     timelock: number;
     actor?: string;
   }): Promise<void> {
-    await this.transactionManager.runWithRetry("src-lock-update", async () => {
+    await this.atomic("src-lock-update", async () => {
       const order = await this.get<OrderDbRow>(this.byPublicId, input.publicId);
       if (!order) return;
       const actor = input.actor ?? "system";
@@ -640,7 +792,7 @@ export class OrdersRepository {
     resolver: string | null;
     actor?: string;
   }): Promise<void> {
-    await this.transactionManager.runWithRetry("dst-lock-update", async () => {
+    await this.atomic("dst-lock-update", async () => {
       const order = await this.get<OrderDbRow>(this.byPublicId, input.publicId);
       if (!order) return;
       const actor = input.actor ?? "system";
@@ -687,7 +839,7 @@ export class OrdersRepository {
     encVersion?: number | null;
     actor?: string;
   }): Promise<void> {
-    await this.transactionManager.runWithRetry("secret-update", async () => {
+    await this.atomic("secret-update", async () => {
       const order = await this.get<OrderDbRow>(this.byPublicId, input.publicId);
       if (!order) return;
       const actor = input.actor ?? "system";
@@ -749,7 +901,7 @@ export class OrdersRepository {
       payload_json: string;
       created_at: number;
     }>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT oe.event_type, oe.payload_json, oe.created_at
         FROM order_events oe
         JOIN orders o ON o.id = oe.order_id
@@ -765,12 +917,72 @@ export class OrdersRepository {
     }));
   }
 
-  async rollbackSrcLock(publicId: string): Promise<void> {
-    await this.run(this.rollbackSrc, { publicId });
+  /**
+   * Roll a source lock back to `announced`.
+   *
+   * #734: previously this wrote the `orders` row with no `order_events` row at
+   * all, so a rollback that succeeded was invisible in the lifecycle trail and
+   * a rollback that failed halfway left the order stuck in `src_locked` with
+   * the lock fields cleared.  It is now a single atomic write plus a history
+   * row, so the trail always accounts for the rollback.
+   *
+   * The SQL is guarded by `AND status = 'src_locked'`, so a replayed rollback
+   * for an order that has already moved on changes nothing.
+   */
+  async rollbackSrcLock(publicId: string, actor = "system"): Promise<void> {
+    await this.atomic("src-lock-rollback", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) return;
+      const now = Math.floor(Date.now() / 1000);
+      const result = await this.run(this.rollbackSrc, { publicId });
+      if (result.changes === 0) {
+        await this.appendTransitionEvent(order.id, "src_lock.rolled_back", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:not_src_locked",
+          triggeredAt: now,
+        });
+        return;
+      }
+      await this.appendTransitionEvent(order.id, "src_lock.rolled_back", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "announced",
+        outcome: "transitioned",
+        triggeredAt: now,
+      });
+    });
   }
 
-  async rollbackDstLock(publicId: string): Promise<void> {
-    await this.run(this.rollbackDst, { publicId });
+  /**
+   * Roll a destination lock back to `src_locked`.  See `rollbackSrcLock` for
+   * why this is atomic and history-recorded (#734).
+   */
+  async rollbackDstLock(publicId: string, actor = "system"): Promise<void> {
+    await this.atomic("dst-lock-rollback", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) return;
+      const now = Math.floor(Date.now() / 1000);
+      const result = await this.run(this.rollbackDst, { publicId });
+      if (result.changes === 0) {
+        await this.appendTransitionEvent(order.id, "dst_lock.rolled_back", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:not_dst_locked",
+          triggeredAt: now,
+        });
+        return;
+      }
+      await this.appendTransitionEvent(order.id, "dst_lock.rolled_back", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "src_locked",
+        outcome: "transitioned",
+        triggeredAt: now,
+      });
+    });
   }
 
   /**
@@ -781,7 +993,7 @@ export class OrdersRepository {
   async findStaleAnnounced(retentionWindowSeconds: number): Promise<OrderRow[]> {
     const cutoff = Math.floor(Date.now() / 1000) - retentionWindowSeconds;
     const rows = await this.all<OrderDbRow>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT * FROM orders
         WHERE status = 'announced'
           AND src_order_id IS NULL
@@ -796,7 +1008,7 @@ export class OrdersRepository {
   /** Soft-delete a single order by stamping it with the current unix time. */
   async archiveOrder(publicId: string): Promise<void> {
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         UPDATE orders
         SET archived_at = CAST(strftime('%s','now') AS INTEGER),
             updated_at  = CAST(strftime('%s','now') AS INTEGER)
@@ -817,7 +1029,7 @@ export class OrdersRepository {
    */
   async unarchiveOrder(publicId: string): Promise<void> {
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         UPDATE orders
         SET archived_at = NULL,
             updated_at  = CAST(strftime('%s','now') AS INTEGER)
@@ -830,11 +1042,11 @@ export class OrdersRepository {
 
   async getLastProcessedBlock(chain: Chain): Promise<number> {
     const srcRow = await this.get<{ max_block: number | null }>(
-      this.db.prepare("SELECT MAX(src_lock_block) AS max_block FROM orders WHERE src_chain = ?"),
+      this.active.prepare("SELECT MAX(src_lock_block) AS max_block FROM orders WHERE src_chain = ?"),
       chain
     );
     const dstRow = await this.get<{ max_block: number | null }>(
-      this.db.prepare("SELECT MAX(dst_lock_block) AS max_block FROM orders WHERE dst_chain = ?"),
+      this.active.prepare("SELECT MAX(dst_lock_block) AS max_block FROM orders WHERE dst_chain = ?"),
       chain
     );
     const srcMax = srcRow?.max_block ?? 0;
@@ -856,7 +1068,7 @@ export class OrdersRepository {
    */
   async getChainCursor(chain: Chain): Promise<number> {
     const row = await this.get<{ position: number }>(
-      this.db.prepare("SELECT position FROM chain_cursors WHERE chain = ?"),
+      this.active.prepare("SELECT position FROM chain_cursors WHERE chain = ?"),
       chain
     );
     return row?.position ?? 0;
@@ -873,7 +1085,7 @@ export class OrdersRepository {
    */
   async setChainCursor(chain: Chain, position: number): Promise<void> {
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         INSERT INTO chain_cursors (chain, position, updated_at)
         VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))
         ON CONFLICT(chain) DO UPDATE
@@ -896,7 +1108,7 @@ export class OrdersRepository {
     else return;
 
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         UPDATE orders
         SET ${col} = MAX(COALESCE(${col}, 0), ?),
             updated_at = CAST(strftime('%s','now') AS INTEGER)
@@ -919,17 +1131,129 @@ export class OrdersRepository {
     else return null;
 
     const row = await this.get<{ min_cursor: number | null }>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT MIN(${col}) AS min_cursor
         FROM orders
         WHERE (src_chain = ? OR dst_chain = ?)
-          AND status NOT IN ('completed', 'refunded', 'failed', 'expired')
+          AND status NOT IN ('completed', 'refunded', 'failed', 'expired', 'cancelled', 'abandoned')
           AND ${col} IS NOT NULL AND ${col} > 0
       `),
       chain,
       chain
     );
     return row?.min_cursor ?? null;
+  }
+
+  /**
+   * Explicitly cancel an announced order that has not yet been locked on-chain.
+   *
+   * Only orders in `announced` state can be cancelled — the transition is
+   * allowed by the state machine.  Orders that have progressed past
+   * `announced` (i.e. already have a source lock) cannot be cancelled through
+   * this path.
+   *
+   * The `reason` field is stored as `cancellationReason` for user-facing APIs.
+   */
+  async cancelOrder(publicId: string, reason: string, actor = "system"): Promise<void> {
+    await this.atomic("cancel-order", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) {
+        const err = new Error(`Order not found: ${publicId}`);
+        (err as any).code = "NOT_FOUND";
+        throw err;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (isTerminal(order.status)) {
+        await this.appendTransitionEvent(order.id, "cancel.no_op", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:terminal",
+          reason,
+          triggeredAt: now,
+        });
+        return;
+      }
+      if (!canTransition(order.status, "cancelled")) {
+        const err = new Error(
+          `Cannot cancel order ${publicId} in status "${order.status}": transition to "cancelled" is not allowed`
+        );
+        (err as any).code = "INVALID_TRANSITION";
+        throw err;
+      }
+      await this.run(
+        this.active.prepare(`
+          UPDATE orders
+          SET status = 'cancelled',
+              cancellation_reason = :reason,
+              updated_at = CAST(strftime('%s','now') AS INTEGER)
+          WHERE public_id = :publicId
+        `),
+        { publicId, reason }
+      );
+      await this.appendTransitionEvent(order.id, "cancel.transitioned", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "cancelled",
+        outcome: "transitioned",
+        reason,
+        triggeredAt: now,
+      });
+    });
+  }
+
+  /**
+   * Mark an order as abandoned and soft-delete it.
+   *
+   * Used by the stale-cleanup service for announced orders that received no
+   * source-chain lock within the retention window.  The order is transitioned
+   * to `abandoned` (terminal) and `archived_at` is stamped so maintenance
+   * queries skip it.  If a late lock event later surfaces, `unarchiveOrder`
+   * can recover the row.
+   *
+   * Unlike `cancelOrder`, this is a silent no-op when the order is already
+   * terminal or not in a state that allows the transition — callers do not
+   * need to guard against that case.
+   */
+  async abandonOrder(publicId: string, reason: string, actor = "system"): Promise<void> {
+    await this.atomic("abandon-order", async () => {
+      const order = await this.get<OrderDbRow>(this.byPublicId, publicId);
+      if (!order) return;
+      const now = Math.floor(Date.now() / 1000);
+      if (isTerminal(order.status)) {
+        await this.appendTransitionEvent(order.id, "abandon.no_op", {
+          actor,
+          fromStatus: order.status,
+          toStatus: order.status,
+          outcome: "no_op:terminal",
+          reason,
+          triggeredAt: now,
+        });
+        return;
+      }
+      if (!canTransition(order.status, "abandoned")) {
+        return;
+      }
+      await this.run(
+        this.active.prepare(`
+          UPDATE orders
+          SET status = 'abandoned',
+              cancellation_reason = :reason,
+              archived_at = CAST(strftime('%s','now') AS INTEGER),
+              updated_at = CAST(strftime('%s','now') AS INTEGER)
+          WHERE public_id = :publicId
+        `),
+        { publicId, reason }
+      );
+      await this.appendTransitionEvent(order.id, "abandon.transitioned", {
+        actor,
+        fromStatus: order.status,
+        toStatus: "abandoned",
+        outcome: "transitioned",
+        reason,
+        triggeredAt: now,
+      });
+    });
   }
 
   // ── Soroban listener checkpoints ──────────────────────────────────────────
@@ -952,7 +1276,7 @@ export class OrdersRepository {
       recovery_marker: SorobanRecoveryMarker;
       updated_at: number;
     }>(
-      this.db.prepare(
+      this.active.prepare(
         `SELECT contract_id, last_safe_ledger, effective_cursor, recovery_marker, updated_at
            FROM soroban_checkpoints
           WHERE contract_id = ?`
@@ -985,7 +1309,7 @@ export class OrdersRepository {
     recoveryMarker: SorobanRecoveryMarker;
   }): Promise<void> {
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         INSERT INTO soroban_checkpoints
             (contract_id, last_safe_ledger, effective_cursor, recovery_marker, updated_at)
         VALUES
@@ -1024,7 +1348,7 @@ export class OrdersRepository {
     marker: SorobanRecoveryMarker
   ): Promise<number> {
     const result = await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         UPDATE soroban_checkpoints
            SET recovery_marker = :marker,
                updated_at      = CAST(strftime('%s','now') AS INTEGER)
@@ -1045,7 +1369,7 @@ export class OrdersRepository {
    */
   async findExpiredCandidates(nowSeconds: number): Promise<OrderRow[]> {
     const rows = await this.all<OrderDbRow>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT * FROM orders
         WHERE status IN ('src_locked', 'dst_locked')
           AND (
@@ -1072,7 +1396,7 @@ export class OrdersRepository {
       hashlock: string;
       status: string;
     }>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT public_id, src_order_id, hashlock, status
         FROM orders
         WHERE status IN ('src_locked', 'dst_locked')
@@ -1099,7 +1423,7 @@ export class OrdersRepository {
       last_soroban_ledger: number | null;
       last_solana_slot: number | null;
     }>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT last_eth_block, last_soroban_ledger, last_solana_slot
         FROM orders WHERE public_id = ?
       `),
@@ -1153,7 +1477,7 @@ export class OrdersRepository {
     params.push(publicId);
 
     await this.run(
-      this.db.prepare(`
+      this.active.prepare(`
         UPDATE orders SET ${sets.join(", ")}
         WHERE public_id = ?
       `),
@@ -1179,7 +1503,7 @@ export class OrdersRepository {
       last_solana_slot: number | null;
       updated_at: number;
     }>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT public_id, status, last_eth_block, last_soroban_ledger, last_solana_slot, updated_at
         FROM orders
         WHERE archived_at IS NULL
@@ -1209,14 +1533,15 @@ export class OrdersRepository {
    * recently updated.  Used by `CacheVerifier` to select a representative
    * sample for on-chain spot-checking.
    *
-   * Terminal statuses (completed, refunded, failed) are excluded.  `expired`
-   * is intentionally included — an expired order can still be reconciled.
+   * Terminal statuses (completed, refunded, failed, cancelled, abandoned) are
+   * excluded.  `expired` is intentionally included — an expired order can
+   * still be reconciled.
    */
   async findNonTerminalSample(limit: number): Promise<OrderRow[]> {
     const rows = await this.all<OrderDbRow>(
-      this.db.prepare(`
+      this.active.prepare(`
         SELECT * FROM orders
-        WHERE status NOT IN ('completed', 'refunded', 'failed')
+        WHERE status NOT IN ('completed', 'refunded', 'failed', 'cancelled', 'abandoned')
           AND archived_at IS NULL
         ORDER BY updated_at DESC
         LIMIT ?
@@ -1234,7 +1559,7 @@ export class OrdersRepository {
       position: number;
       updated_at: number;
     }>(
-      this.db.prepare("SELECT chain, position, updated_at FROM chain_cursors ORDER BY chain")
+      this.active.prepare("SELECT chain, position, updated_at FROM chain_cursors ORDER BY chain")
     );
     return rows.map((r) => ({
       chain: r.chain,

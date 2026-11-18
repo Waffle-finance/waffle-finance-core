@@ -61,7 +61,7 @@
  * ```
  */
 
-import type { NetworkMode } from "./schema.js";
+import type { NetworkMode } from './schema.js';
 
 // ── Placeholder detection ─────────────────────────────────────────────────────
 
@@ -71,24 +71,26 @@ import type { NetworkMode } from "./schema.js";
  * can appear in template .env files and must be caught before runtime.
  */
 const CONTRACT_PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
-  "",
-  "PLACEHOLDER",
-  "YOUR_CONTRACT_ID",
-  "YOUR_SOROBAN_CONTRACT",
-  "YOUR_SOROBAN_HTLC",
-  "YOUR_RESOLVER_REGISTRY",
-  "YOUR_ETH_HTLC_ESCROW",
-  "YOUR_ETH_RESOLVER_REGISTRY",
-  "YOUR_SOLANA_HTLC_PROGRAM",
-  "YOUR_SOLANA_PROGRAM",
-  "YOUR_PROGRAM_ID",
+  '',
+  'PLACEHOLDER',
+  'YOUR_CONTRACT_ID',
+  'YOUR_SOROBAN_CONTRACT',
+  'YOUR_SOROBAN_HTLC',
+  'YOUR_RESOLVER_REGISTRY',
+  'YOUR_ETH_HTLC_ESCROW',
+  'YOUR_ETH_RESOLVER_REGISTRY',
+  'YOUR_SOLANA_HTLC_PROGRAM',
+  'YOUR_SOLANA_PROGRAM',
+  'YOUR_PROGRAM_ID',
   // Stellar contract IDs are 56-char StrKey starting with 'C' — flag known bad prefixes
-  "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB42222",
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB42222',
   // Solana system program
-  "11111111111111111111111111111111",
+  '11111111111111111111111111111111',
   // Common dummy ETH addresses
-  "0x0000000000000000000000000000000000000000",
-  "0x1111111111111111111111111111111111111111",
+  '0X0000000000000000000000000000000000000000',
+  '0X1111111111111111111111111111111111111111',
+  '0x0000000000000000000000000000000000000000',
+  '0x1111111111111111111111111111111111111111',
 ]);
 
 /**
@@ -99,11 +101,11 @@ const CONTRACT_PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
 export function isPlaceholderValue(value: string | null | undefined): boolean {
   if (value === null || value === undefined) return true;
   const trimmed = value.trim();
-  if (trimmed === "") return true;
+  if (trimmed === '') return true;
   const upper = trimmed.toUpperCase();
   if (CONTRACT_PLACEHOLDER_VALUES.has(upper)) return true;
-  if (upper.includes("PLACEHOLDER")) return true;
-  if (upper.startsWith("YOUR_")) return true;
+  if (upper.includes('PLACEHOLDER')) return true;
+  if (upper.startsWith('YOUR_')) return true;
   return false;
 }
 
@@ -111,9 +113,7 @@ export function isPlaceholderValue(value: string | null | undefined): boolean {
  * Normalise a raw env string to `null` when it is a placeholder.
  * Returns the trimmed value otherwise.
  */
-export function normaliseContractId(
-  raw: string | null | undefined
-): string | null {
+export function normaliseContractId(raw: string | null | undefined): string | null {
   if (isPlaceholderValue(raw)) return null;
   return (raw as string).trim();
 }
@@ -185,14 +185,14 @@ export interface ConfigValidationError {
 }
 
 export type ConfigValidationErrorCode =
-  | "MISSING_REQUIRED"       // required field is absent
-  | "PLACEHOLDER_REJECTED"   // known placeholder where a real value is needed
-  | "INVALID_URL"            // field must be a valid HTTP(S) URL but is not
-  | "CHAIN_ID_MISMATCH"      // chainId does not match the declared network mode
-  | "PASSPHRASE_MISMATCH"    // Stellar passphrase does not match network mode
-  | "INVALID_CONTRACT_ID"    // contract ID format is wrong (not a valid StrKey etc.)
-  | "INVALID_ADDRESS"        // EVM address format is wrong
-  | "ENDPOINT_SCHEME_MISMATCH"; // non-HTTPS endpoint in mainnet mode
+  | 'MISSING_REQUIRED' // required field is absent
+  | 'PLACEHOLDER_REJECTED' // known placeholder where a real value is needed
+  | 'INVALID_URL' // field must be a valid HTTP(S) URL but is not
+  | 'CHAIN_ID_MISMATCH' // chainId does not match the declared network mode
+  | 'PASSPHRASE_MISMATCH' // Stellar passphrase does not match network mode
+  | 'INVALID_CONTRACT_ID' // contract ID format is wrong (not a valid StrKey etc.)
+  | 'INVALID_ADDRESS' // EVM address format is wrong
+  | 'ENDPOINT_SCHEME_MISMATCH'; // non-HTTPS endpoint in mainnet mode
 
 /** An advisory warning that does not prevent startup but should be surfaced. */
 export interface ConfigValidationWarning {
@@ -204,10 +204,10 @@ export interface ConfigValidationWarning {
 }
 
 export type ConfigValidationWarningCode =
-  | "CONTRACT_NOT_CONFIGURED"   // optional contract address absent — feature disabled
-  | "SOLANA_PLACEHOLDER_MODE"   // Solana program is a placeholder — Solana flows disabled
-  | "HTTP_ENDPOINT_IN_TESTNET"  // non-HTTPS RPC in testnet (acceptable, but visible)
-  | "DEFAULT_PASSPHRASE_USED";  // network passphrase was not explicitly set
+  | 'CONTRACT_NOT_CONFIGURED' // optional contract address absent — feature disabled
+  | 'SOLANA_PLACEHOLDER_MODE' // Solana program is a placeholder — Solana flows disabled
+  | 'HTTP_ENDPOINT_IN_TESTNET' // non-HTTPS RPC in testnet (acceptable, but visible)
+  | 'DEFAULT_PASSPHRASE_USED'; // network passphrase was not explicitly set
 
 /** Final result returned by `validateSorobanChainConfig`. */
 export interface SorobanChainConfigResult {
@@ -255,14 +255,12 @@ export interface NormalisedSorobanChainConfig {
 
 // ── Known passphrase constants ────────────────────────────────────────────────
 
-export const STELLAR_TESTNET_PASSPHRASE =
-  "Test SDF Network ; September 2015" as const;
-export const STELLAR_MAINNET_PASSPHRASE =
-  "Public Global Stellar Network ; September 2015" as const;
+export const STELLAR_TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015' as const;
+export const STELLAR_MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015' as const;
 
 // Known Soroban / Stellar public RPC endpoints (for scheme checks)
-const SOROBAN_TESTNET_DEFAULT = "https://soroban-testnet.stellar.org";
-const SOROBAN_MAINNET_DEFAULT = "https://mainnet.sorobanrpc.com";
+const SOROBAN_TESTNET_DEFAULT = 'https://soroban-testnet.stellar.org';
+const SOROBAN_MAINNET_DEFAULT = 'https://mainnet.sorobanrpc.com';
 
 // Known Ethereum chain IDs
 const ETH_MAINNET_CHAIN_ID = 1;
@@ -280,7 +278,7 @@ function isValidUrl(raw: string): boolean {
 }
 
 function isHttpsUrl(raw: string): boolean {
-  return raw.startsWith("https://");
+  return raw.startsWith('https://');
 }
 
 // ── Core validator ────────────────────────────────────────────────────────────
@@ -303,7 +301,7 @@ export function validateSorobanChainConfig(
   const errors: ConfigValidationError[] = [];
   const warnings: ConfigValidationWarning[] = [];
   const { network } = input;
-  const isMainnet = network === "mainnet";
+  const isMainnet = network === 'mainnet';
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -325,177 +323,215 @@ export function validateSorobanChainConfig(
     warnings.push({ code, envVar, field, message });
   }
 
-  function requireUrl(
-    value: string,
-    envVar: string,
-    field: string,
-    label: string
-  ): void {
+  function requireUrl(value: string, envVar: string, field: string, label: string): void {
     if (!isValidUrl(value)) {
-      addError("INVALID_URL", envVar, field,
+      addError(
+        'INVALID_URL',
+        envVar,
+        field,
         `${label} is not a valid URL: "${value}". ` +
-        `Set ${envVar} to a reachable HTTP(S) endpoint.`
+          `Set ${envVar} to a reachable HTTP(S) endpoint.`
       );
       return;
     }
     if (isMainnet && !isHttpsUrl(value)) {
-      addError("ENDPOINT_SCHEME_MISMATCH", envVar, field,
+      addError(
+        'ENDPOINT_SCHEME_MISMATCH',
+        envVar,
+        field,
         `${label} must use HTTPS in mainnet mode but got: "${value}". ` +
-        `Update ${envVar} to an https:// endpoint.`
+          `Update ${envVar} to an https:// endpoint.`
       );
     } else if (!isMainnet && !isHttpsUrl(value)) {
-      addWarning("HTTP_ENDPOINT_IN_TESTNET", envVar, field,
+      addWarning(
+        'HTTP_ENDPOINT_IN_TESTNET',
+        envVar,
+        field,
         `${label} uses HTTP (not HTTPS) in testnet mode: "${value}". ` +
-        `Consider switching to an HTTPS endpoint.`
+          `Consider switching to an HTTPS endpoint.`
       );
     }
   }
 
   // ── Soroban RPC URL (REQUIRED) ───────────────────────────────────────────
-  const sorobanRpcEnv = isMainnet ? "SOROBAN_RPC_URL" : "SOROBAN_RPC_URL";
+  const sorobanRpcEnv = isMainnet ? 'SOROBAN_RPC_URL' : 'SOROBAN_RPC_URL';
 
   if (!input.soroban.rpcUrl || !isValidUrl(input.soroban.rpcUrl)) {
-    addError("INVALID_URL", sorobanRpcEnv, "soroban.rpcUrl",
-      `Soroban RPC URL is missing or invalid: "${input.soroban.rpcUrl ?? ""}". ` +
-      `Set SOROBAN_RPC_URL to a reachable Soroban RPC endpoint ` +
-      `(default: ${isMainnet ? SOROBAN_MAINNET_DEFAULT : SOROBAN_TESTNET_DEFAULT}).`
+    addError(
+      'INVALID_URL',
+      sorobanRpcEnv,
+      'soroban.rpcUrl',
+      `Soroban RPC URL is missing or invalid: "${input.soroban.rpcUrl ?? ''}". ` +
+        `Set SOROBAN_RPC_URL to a reachable Soroban RPC endpoint ` +
+        `(default: ${isMainnet ? SOROBAN_MAINNET_DEFAULT : SOROBAN_TESTNET_DEFAULT}).`
     );
   } else {
-    requireUrl(input.soroban.rpcUrl, "SOROBAN_RPC_URL", "soroban.rpcUrl", "Soroban RPC URL");
+    requireUrl(input.soroban.rpcUrl, 'SOROBAN_RPC_URL', 'soroban.rpcUrl', 'Soroban RPC URL');
   }
 
   // ── Horizon URL (REQUIRED) ───────────────────────────────────────────────
   if (!input.soroban.horizonUrl || !isValidUrl(input.soroban.horizonUrl)) {
-    addError("INVALID_URL", "STELLAR_HORIZON_URL", "soroban.horizonUrl",
-      `Stellar Horizon URL is missing or invalid: "${input.soroban.horizonUrl ?? ""}". ` +
-      `Set STELLAR_HORIZON_URL (e.g. https://horizon-testnet.stellar.org).`
+    addError(
+      'INVALID_URL',
+      'STELLAR_HORIZON_URL',
+      'soroban.horizonUrl',
+      `Stellar Horizon URL is missing or invalid: "${input.soroban.horizonUrl ?? ''}". ` +
+        `Set STELLAR_HORIZON_URL (e.g. https://horizon-testnet.stellar.org).`
     );
   } else {
-    requireUrl(input.soroban.horizonUrl, "STELLAR_HORIZON_URL", "soroban.horizonUrl", "Stellar Horizon URL");
+    requireUrl(
+      input.soroban.horizonUrl,
+      'STELLAR_HORIZON_URL',
+      'soroban.horizonUrl',
+      'Stellar Horizon URL'
+    );
   }
 
   // ── Network passphrase (REQUIRED, must match network mode) ───────────────
-  const expectedPassphrase = isMainnet
-    ? STELLAR_MAINNET_PASSPHRASE
-    : STELLAR_TESTNET_PASSPHRASE;
+  const expectedPassphrase = isMainnet ? STELLAR_MAINNET_PASSPHRASE : STELLAR_TESTNET_PASSPHRASE;
 
-  if (!input.soroban.networkPassphrase || input.soroban.networkPassphrase.trim() === "") {
-    addError("MISSING_REQUIRED", "STELLAR_NETWORK_PASSPHRASE", "soroban.networkPassphrase",
+  if (!input.soroban.networkPassphrase || input.soroban.networkPassphrase.trim() === '') {
+    addError(
+      'MISSING_REQUIRED',
+      'STELLAR_NETWORK_PASSPHRASE',
+      'soroban.networkPassphrase',
       `Stellar network passphrase is required but was not provided. ` +
-      `Expected: "${expectedPassphrase}".`
+        `Expected: "${expectedPassphrase}".`
     );
   } else if (input.soroban.networkPassphrase.trim() !== expectedPassphrase) {
-    addError("PASSPHRASE_MISMATCH", "STELLAR_NETWORK_PASSPHRASE", "soroban.networkPassphrase",
+    addError(
+      'PASSPHRASE_MISMATCH',
+      'STELLAR_NETWORK_PASSPHRASE',
+      'soroban.networkPassphrase',
       `Stellar network passphrase does not match the declared network mode "${network}". ` +
-      `Got: "${input.soroban.networkPassphrase.trim()}". ` +
-      `Expected: "${expectedPassphrase}". ` +
-      `Ensure NETWORK_MODE and STELLAR_NETWORK_PASSPHRASE are consistent.`
+        `Got: "${input.soroban.networkPassphrase.trim()}". ` +
+        `Expected: "${expectedPassphrase}". ` +
+        `Ensure NETWORK_MODE and STELLAR_NETWORK_PASSPHRASE are consistent.`
     );
   }
 
   // ── Ethereum RPC URL (REQUIRED) ──────────────────────────────────────────
-  const ethRpcEnv = isMainnet ? "MAINNET_RPC_URL" : "SEPOLIA_RPC_URL";
+  const ethRpcEnv = isMainnet ? 'MAINNET_RPC_URL' : 'SEPOLIA_RPC_URL';
   if (!input.ethereum.rpcUrl || !isValidUrl(input.ethereum.rpcUrl)) {
-    addError("INVALID_URL", ethRpcEnv, "ethereum.rpcUrl",
-      `Ethereum RPC URL is missing or invalid: "${input.ethereum.rpcUrl ?? ""}". ` +
-      `Set ${ethRpcEnv} or ETHEREUM_RPC_URL.`
+    addError(
+      'INVALID_URL',
+      ethRpcEnv,
+      'ethereum.rpcUrl',
+      `Ethereum RPC URL is missing or invalid: "${input.ethereum.rpcUrl ?? ''}". ` +
+        `Set ${ethRpcEnv} or ETHEREUM_RPC_URL.`
     );
   } else {
-    requireUrl(input.ethereum.rpcUrl, ethRpcEnv, "ethereum.rpcUrl", "Ethereum RPC URL");
+    requireUrl(input.ethereum.rpcUrl, ethRpcEnv, 'ethereum.rpcUrl', 'Ethereum RPC URL');
   }
 
   // ── Ethereum chain ID (REQUIRED, must match network mode) ────────────────
   const expectedChainId = isMainnet ? ETH_MAINNET_CHAIN_ID : ETH_SEPOLIA_CHAIN_ID;
   if (input.ethereum.chainId !== expectedChainId) {
-    addError("CHAIN_ID_MISMATCH", "NETWORK_MODE", "ethereum.chainId",
+    addError(
+      'CHAIN_ID_MISMATCH',
+      'NETWORK_MODE',
+      'ethereum.chainId',
       `Ethereum chainId ${input.ethereum.chainId} does not match network mode "${network}". ` +
-      `Expected chainId ${expectedChainId} for ${isMainnet ? "Ethereum mainnet" : "Sepolia testnet"}. ` +
-      `Ensure NETWORK_MODE is set correctly.`
+        `Expected chainId ${expectedChainId} for ${isMainnet ? 'Ethereum mainnet' : 'Sepolia testnet'}. ` +
+        `Ensure NETWORK_MODE is set correctly.`
     );
   }
 
   // ── Optional Soroban contract IDs ────────────────────────────────────────
-  const htlcContractEnv = isMainnet ? "SOROBAN_HTLC_MAINNET" : "SOROBAN_HTLC_TESTNET";
+  const htlcContractEnv = isMainnet ? 'SOROBAN_HTLC_MAINNET' : 'SOROBAN_HTLC_TESTNET';
   const sorobanRegistryEnv = isMainnet
-    ? "SOROBAN_RESOLVER_REGISTRY_MAINNET"
-    : "SOROBAN_RESOLVER_REGISTRY_TESTNET";
+    ? 'SOROBAN_RESOLVER_REGISTRY_MAINNET'
+    : 'SOROBAN_RESOLVER_REGISTRY_TESTNET';
 
   const normSorobanHtlc = normaliseContractId(input.soroban.htlcContract);
   const normSorobanRegistry = normaliseContractId(input.soroban.resolverRegistry);
 
   if (normSorobanHtlc === null) {
-    addWarning("CONTRACT_NOT_CONFIGURED", htlcContractEnv, "soroban.htlcContract",
+    addWarning(
+      'CONTRACT_NOT_CONFIGURED',
+      htlcContractEnv,
+      'soroban.htlcContract',
       `Soroban HTLC contract is not configured (${htlcContractEnv} is blank or a placeholder). ` +
-      `Soroban settlement flows are DISABLED. ` +
-      `Set ${htlcContractEnv} to the deployed contract ID to enable them.`
+        `Soroban settlement flows are DISABLED. ` +
+        `Set ${htlcContractEnv} to the deployed contract ID to enable them.`
     );
   }
 
   if (normSorobanRegistry === null) {
-    addWarning("CONTRACT_NOT_CONFIGURED", sorobanRegistryEnv, "soroban.resolverRegistry",
+    addWarning(
+      'CONTRACT_NOT_CONFIGURED',
+      sorobanRegistryEnv,
+      'soroban.resolverRegistry',
       `Soroban resolver registry is not configured (${sorobanRegistryEnv} is blank or a placeholder). ` +
-      `On-chain resolver lookup on Soroban is DISABLED. ` +
-      `Set ${sorobanRegistryEnv} to the deployed contract ID.`
+        `On-chain resolver lookup on Soroban is DISABLED. ` +
+        `Set ${sorobanRegistryEnv} to the deployed contract ID.`
     );
   }
 
   // ── Optional Ethereum contract addresses ─────────────────────────────────
-  const ethEscrowEnv = isMainnet
-    ? "ETH_HTLC_ESCROW_MAINNET"
-    : "ETH_HTLC_ESCROW_TESTNET";
+  const ethEscrowEnv = isMainnet ? 'ETH_HTLC_ESCROW_MAINNET' : 'ETH_HTLC_ESCROW_TESTNET';
   const ethRegistryEnv = isMainnet
-    ? "ETH_RESOLVER_REGISTRY_MAINNET"
-    : "ETH_RESOLVER_REGISTRY_TESTNET";
+    ? 'ETH_RESOLVER_REGISTRY_MAINNET'
+    : 'ETH_RESOLVER_REGISTRY_TESTNET';
 
   const rawEthEscrow = input.ethereum.htlcEscrow ?? null;
   const rawEthRegistry = input.ethereum.resolverRegistry ?? null;
 
-  const normEthEscrow = normaliseContractId(
-    rawEthEscrow ? String(rawEthEscrow) : null
-  );
-  const normEthRegistry = normaliseContractId(
-    rawEthRegistry ? String(rawEthRegistry) : null
-  );
+  const normEthEscrow = normaliseContractId(rawEthEscrow ? String(rawEthEscrow) : null);
+  const normEthRegistry = normaliseContractId(rawEthRegistry ? String(rawEthRegistry) : null);
 
   if (normEthEscrow === null) {
-    addWarning("CONTRACT_NOT_CONFIGURED", ethEscrowEnv, "ethereum.htlcEscrow",
+    addWarning(
+      'CONTRACT_NOT_CONFIGURED',
+      ethEscrowEnv,
+      'ethereum.htlcEscrow',
       `Ethereum HTLC escrow address is not configured (${ethEscrowEnv} is blank or a placeholder). ` +
-      `Ethereum settlement flows are DISABLED. ` +
-      `Set ${ethEscrowEnv} to the deployed contract address.`
+        `Ethereum settlement flows are DISABLED. ` +
+        `Set ${ethEscrowEnv} to the deployed contract address.`
     );
   } else if (!/^0x[0-9a-fA-F]{40}$/.test(normEthEscrow)) {
-    addError("INVALID_ADDRESS", ethEscrowEnv, "ethereum.htlcEscrow",
+    addError(
+      'INVALID_ADDRESS',
+      ethEscrowEnv,
+      'ethereum.htlcEscrow',
       `${ethEscrowEnv} is not a valid 0x-prefixed 20-byte Ethereum address: "${normEthEscrow}". ` +
-      `Provide a correctly checksummed address.`
+        `Provide a correctly checksummed address.`
     );
   }
 
   if (normEthRegistry === null) {
-    addWarning("CONTRACT_NOT_CONFIGURED", ethRegistryEnv, "ethereum.resolverRegistry",
+    addWarning(
+      'CONTRACT_NOT_CONFIGURED',
+      ethRegistryEnv,
+      'ethereum.resolverRegistry',
       `Ethereum resolver registry address is not configured (${ethRegistryEnv} is blank or a placeholder). ` +
-      `On-chain resolver lookup on Ethereum is DISABLED. ` +
-      `Set ${ethRegistryEnv} to the deployed contract address.`
+        `On-chain resolver lookup on Ethereum is DISABLED. ` +
+        `Set ${ethRegistryEnv} to the deployed contract address.`
     );
   } else if (!/^0x[0-9a-fA-F]{40}$/.test(normEthRegistry)) {
-    addError("INVALID_ADDRESS", ethRegistryEnv, "ethereum.resolverRegistry",
+    addError(
+      'INVALID_ADDRESS',
+      ethRegistryEnv,
+      'ethereum.resolverRegistry',
       `${ethRegistryEnv} is not a valid 0x-prefixed 20-byte Ethereum address: "${normEthRegistry}". ` +
-      `Provide a correctly checksummed address.`
+        `Provide a correctly checksummed address.`
     );
   }
 
   // ── Solana program ID (OPTIONAL / placeholder-safe) ──────────────────────
-  const solanaEnv = isMainnet
-    ? "SOLANA_HTLC_PROGRAM_MAINNET"
-    : "SOLANA_HTLC_PROGRAM_TESTNET";
+  const solanaEnv = isMainnet ? 'SOLANA_HTLC_PROGRAM_MAINNET' : 'SOLANA_HTLC_PROGRAM_TESTNET';
   const rawSolanaProgramId = input.solana?.programId ?? null;
   const normSolanaProgramId = normaliseContractId(rawSolanaProgramId);
   const solanaActive = normSolanaProgramId !== null;
 
   if (!solanaActive) {
-    addWarning("SOLANA_PLACEHOLDER_MODE", solanaEnv, "solana.programId",
+    addWarning(
+      'SOLANA_PLACEHOLDER_MODE',
+      solanaEnv,
+      'solana.programId',
       `Solana HTLC program is not configured (${solanaEnv} is blank or a placeholder). ` +
-      `Solana settlement flows are DISABLED. ` +
-      `Set ${solanaEnv} to a real Solana program address to enable them.`
+        `Solana settlement flows are DISABLED. ` +
+        `Set ${solanaEnv} to a real Solana program address to enable them.`
     );
   }
 
@@ -562,14 +598,12 @@ export class SorobanChainConfigError extends Error {
     public readonly errors: ConfigValidationError[],
     public readonly warnings: ConfigValidationWarning[]
   ) {
-    const summary = errors
-      .map((e) => `  [${e.code}] ${e.envVar}: ${e.message}`)
-      .join("\n");
+    const summary = errors.map(e => `  [${e.code}] ${e.envVar}: ${e.message}`).join('\n');
     super(
       `Soroban/chain configuration is invalid — ${errors.length} error(s) must be resolved before the service can start:\n` +
-      summary
+        summary
     );
-    this.name = "SorobanChainConfigError";
+    this.name = 'SorobanChainConfigError';
   }
 }
 
@@ -588,9 +622,7 @@ export class SorobanChainConfigError extends Error {
  * ```
  */
 export function formatConfigReport(result: SorobanChainConfigResult): string {
-  const lines: string[] = [
-    `Soroban/chain configuration report — ${result.normalised.network}`,
-  ];
+  const lines: string[] = [`Soroban/chain configuration report — ${result.normalised.network}`];
 
   for (const err of result.errors) {
     lines.push(`  ✗ [${err.code}] ${err.field} (${err.envVar}): ${err.message}`);
@@ -601,10 +633,12 @@ export function formatConfigReport(result: SorobanChainConfigResult): string {
   }
 
   if (result.ok && result.warnings.length === 0) {
-    lines.push("  ✓ All required fields valid. All optional contracts configured.");
+    lines.push('  ✓ All required fields valid. All optional contracts configured.');
   } else if (result.ok) {
-    lines.push(`  ✓ Required fields valid. ${result.warnings.length} optional field(s) not configured.`);
+    lines.push(
+      `  ✓ Required fields valid. ${result.warnings.length} optional field(s) not configured.`
+    );
   }
 
-  return lines.join("\n");
+  return lines.join('\n');
 }

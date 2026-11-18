@@ -26,6 +26,32 @@ between three surfaces that are edited independently:
    `.github/*.md`, and the package `README.md` files that describes operational
    or configuration behavior.
 
+## Audit updates since initial audit
+
+### 2026-09-24 — documentation hygiene pass
+
+The following items from the initial audit were closed or partially closed
+during this pass:
+
+- **Finding #2 (phantom workflow files):** All docs that referenced
+  `.github/workflows/release.yml`, `ci.yml`, and `contracts.yml` have been
+  updated with ARCHIVAL NOTICE blocks. `RELEASE_POLICY.md`, `.github/RELEASE_CHECKLIST.md`,
+  and `.github/RELEASE_QUICK_REFERENCE.md` now accurately describe the 4 real
+  workflows. See [docs/DOC_MAP.md](DOC_MAP.md) for the complete doc status map.
+
+- **TD-000 (Solana activation):** Marked ✅ RESOLVED in `docs/TECHNICAL_DEBT.md`
+  as of 2026-07-30. The Solana Anchor HTLC program is deployed on devnet;
+  simulation mode is retained as fallback only.
+
+- **TD-071 (mainnet frontend flows untested):** Closed by `.github/workflows/frontend.yml`,
+  which now runs a two-leg matrix — `testnet-only` and `mainnet-enabled` —
+  on every push and PR touching the frontend, SDK, or config packages. Both
+  legs must be green to merge.
+
+- **Check #3 (doc-to-file links resolve)** and **Check #6 (npm script references
+  in docs):** A `scripts/check-docs-drift.mjs` validator has been implemented
+  and wired into `pnpm validate:docs`. See [Status](#status) below.
+
 ## Known drift found during the initial audit (2026-07-26)
 
 Running the checks below by hand against the current `main` branch surfaced real,
@@ -136,11 +162,10 @@ The repo already has a `pnpm validate` entry point
 not wired into `pnpm validate`.
 
 The intended integration point for this gate is a new `validate:docs` script
-(`scripts/check-docs-drift.mjs`, not yet implemented — see [Status](#status))
-added alongside the others:
+(`scripts/check-docs-drift.mjs`) added alongside the others:
 
 ```jsonc
-// package.json (target shape once implemented)
+// package.json (current shape — validate:docs is now implemented)
 "scripts": {
   "validate:docs": "node scripts/check-docs-drift.mjs",
   "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs"
@@ -170,9 +195,48 @@ When you touch any of the following, update the paired surface in the same PR:
 
 ## Status
 
-This document is the **specification** for the gate — the check inventory, the
-audit findings that motivate it, and the contributor contract. The automated
-script (`scripts/check-docs-drift.mjs`) and its `pnpm validate:docs` /
-CI wiring are **not yet implemented**; this pass was scoped to documentation
-only. Implementing checks 1–3 and 6 (pure static analysis, no live services)
-against the check table above is the natural next PR.
+### Checks 3 and 6 — implemented (2026-09-24)
+
+`scripts/check-docs-drift.mjs` now implements two of the eight checks from
+the alignment table above:
+
+- **Check 3 (doc-to-file links resolve):** Scans every `*.md` file in the
+  repo for relative markdown links (`[text](path)`) and verifies each target
+  exists on the filesystem. Fails if any link is broken.
+
+- **Check 6 (npm script references in docs):** Scans every `*.md` file for
+  `pnpm <script>`, `pnpm run <script>`, and `pnpm --filter <pkg> <script>`
+  invocations and verifies each referenced script actually exists in the
+  relevant `package.json`. Fails if a doc tells a contributor to run a script
+  that has been renamed or removed.
+
+The script runs via:
+
+```bash
+pnpm validate:docs
+```
+
+And is wired into `pnpm validate`:
+
+```jsonc
+// package.json (current shape)
+"validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs"
+```
+
+### Checks 1, 2, 4, 5, 7, 8 — not yet automated
+
+The remaining checks (env var coverage/staleness, metric name sync,
+health endpoint sync, package version sync, deployment artifact sync) are
+not yet implemented as automated scripts. They remain in the backlog as the
+natural next PRs after the initial documentation pass. Checks 1 and 2
+(env var coverage) are the highest-priority next items given the 16 missing
+`env.example` entries documented in Finding #1 above.
+
+### CI wiring — still manual
+
+There is still no `.github/workflows/` entry that runs `pnpm validate` (or
+`pnpm validate:docs`) automatically on every push. Until a general CI workflow
+is added, `pnpm validate:docs` must be run locally before merging or tagging.
+This is the same constraint that applied to `pnpm validate` before this pass.
+Wiring it into CI is the prerequisite for the "catches drift before merges"
+acceptance bar.

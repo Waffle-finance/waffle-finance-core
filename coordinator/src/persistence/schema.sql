@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS orders (
     public_id             TEXT    NOT NULL UNIQUE,
 
     direction             TEXT    NOT NULL CHECK (direction IN ('eth_to_xlm', 'xlm_to_eth', 'eth_to_sol', 'sol_to_eth')),
-    status                TEXT    NOT NULL CHECK (status IN ('announced', 'src_locked', 'dst_locked', 'secret_revealed', 'completed', 'refunded', 'failed', 'expired')),
+    status                TEXT    NOT NULL CHECK (status IN ('announced', 'src_locked', 'dst_locked', 'secret_revealed', 'completed', 'refunded', 'failed', 'expired', 'cancelled', 'abandoned')),
 
     -- Cross-chain link.
     hashlock              TEXT    NOT NULL,    -- 0x-prefixed 32-byte hex.
@@ -46,25 +46,32 @@ CREATE TABLE IF NOT EXISTS orders (
     --   NULL  → plaintext (legacy / encryption disabled)
     --   1     → AES-256-GCM encrypted blob (see coordinator/src/crypto/secret-cipher.ts)
     preimage              TEXT,
-    preimage_enc_version  INTEGER,
+    -- NULL = plaintext (legacy / encryption disabled); 1 = AES-256-GCM blob.
+    preimage_enc_version  INTEGER    CHECK (preimage_enc_version IS NULL OR preimage_enc_version = 1),
     secret_revealed_tx    TEXT,
 
     -- Resolver that filled the destination side (if any).
     resolver_address      TEXT,
 
     -- Per-order reconciler high-water marks (see 011_order_ledger_cursors.sql).
+    -- These advance independently per chain as the reconciler processes events
+    -- so each order's scan window is as narrow as possible.
     last_eth_block        INTEGER,
     last_soroban_ledger   INTEGER,
     last_solana_slot      INTEGER,
 
-    created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    archived_at           INTEGER,
+    -- Reason this order was cancelled or abandoned (see 012_order_cancellation.sql).
+    cancellation_reason   TEXT,
 
-    -- Per-order high-water marks for reconciler (see TD-043).
-    last_eth_block        INTEGER,
-    last_soroban_ledger   INTEGER,
-    last_solana_slot      INTEGER
+    created_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    -- #734: replay safety. Every mutation stamps updated_at from the wall clock,
+    -- so it must never move backwards, and archived_at can only be set at or
+    -- after creation. Without these the reconciler can observe updated_at
+    -- regressing across a replay and stale-cleanup ordering silently breaks.
+    updated_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+                          CHECK (created_at > 0 AND updated_at >= created_at),
+    archived_at           INTEGER
+                          CHECK (archived_at IS NULL OR archived_at >= created_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_hashlock         ON orders (hashlock);
@@ -86,15 +93,66 @@ CREATE INDEX IF NOT EXISTS idx_orders_last_eth_block ON orders (last_eth_block) 
 CREATE INDEX IF NOT EXISTS idx_orders_last_soroban_ledger ON orders (last_soroban_ledger) WHERE last_soroban_ledger IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_last_solana_slot ON orders (last_solana_slot) WHERE last_solana_slot IS NOT NULL;
 
+-- Append-only trail of order lifecycle transitions.  One row is written per
+-- observed transition, including explicit no-ops (see order_events_event_type).
+--
+-- #734: replay safety.  The reconciler re-reads overlapping windows on every
+-- run, so this table receives the same logical event many times over a
+-- process lifetime.  The rows are cheap and the trail is intentionally
+-- append-only (never updated, never deleted), but event_type is constrained to
+-- the closed set the repository actually emits so a typo or a bad merge cannot
+-- silently poison the trail with unclassifiable rows.
 CREATE TABLE IF NOT EXISTS order_events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id      INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    event_type    TEXT    NOT NULL,
+    event_type    TEXT    NOT NULL
+                  CHECK (event_type IN (
+                    'status.transitioned',  'status.no_op',
+                    'src_lock.transitioned',  'src_lock.no_op',
+                    'dst_lock.transitioned',  'dst_lock.no_op',
+                    'secret_revealed.transitioned', 'secret_revealed.no_op',
+                    'cancel.transitioned',    'cancel.no_op',
+                    'abandon.transitioned',   'abandon.no_op',
+                    'src_lock.rolled_back',   'dst_lock.rolled_back'
+                  )),
     payload_json  TEXT    NOT NULL,
-    created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+    created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    -- #734: a transition can never predate the order it belongs to.
+    CHECK (created_at > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_order_events_order ON order_events (order_id, created_at);
+
+-- ── Processed-event ledger (replay idempotence) ──────────────────────────────
+-- #734: durable idempotence keys for the reconciler.
+--
+-- `event-identity.ts` already reduces every chain event to a deterministic key
+-- (`eth:OrderCreated:0x…:3`, `soroban:OrderClaimed:41200:0x…:0`,
+-- `solana:OrderRefunded:<sig>`).  Before this table those keys lived only in
+-- the per-run `EventSeenSet`, which is cleared at the start of every run and
+-- lost entirely on restart — so a replayed window re-applied every event.
+--
+-- The PRIMARY KEY is the enforcement point: a second delivery of the same
+-- event collides with an existing row and the INSERT is a storage-layer no-op.
+-- This is deliberately a *unique constraint* rather than an application-level
+-- "have I seen this?" check, because only the constraint survives a restart.
+--
+-- `order_id` is nullable: an event can be claimed before the matching order
+-- row is located (unknown-hashlock events are still claimed so a later replay
+-- does not re-derive them).  ON DELETE CASCADE keeps the ledger from
+-- outgrowing the cache it describes when stale cleanup soft-deletes an order.
+CREATE TABLE IF NOT EXISTS processed_events (
+    event_key   TEXT    PRIMARY KEY,
+    chain       TEXT    NOT NULL CHECK (chain IN ('ethereum', 'soroban', 'solana')),
+    event_type  TEXT    NOT NULL
+                CHECK (event_type IN ('OrderCreated', 'OrderClaimed', 'OrderRefunded')),
+    order_id    INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    CHECK (created_at > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processed_events_order ON processed_events (order_id)
+    WHERE order_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS resolver_heartbeats (
     address     TEXT PRIMARY KEY,

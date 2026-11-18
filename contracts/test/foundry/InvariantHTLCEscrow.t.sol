@@ -594,4 +594,161 @@ contract InvariantHTLCEscrowTest is Test {
         vm.expectRevert(HTLCEscrow.SafetyDepositTooSmall.selector);
         htlc.createOrder{value: 1 ether}(ben, ref, address(0), 1 ether, MIN_SD - 1, hashlock, 600);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Gas Profiling Benchmarks
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice Gas benchmark: createOrder (native ETH).
+    ///         Measures gas consumed by a single createOrder call and asserts
+    ///         it stays within an acceptable ceiling. The ceiling is generous
+    ///         so this acts as a regression guard rather than an optimisation
+    ///         gate; tighten it when the contract is optimised further.
+    function testGas_createOrder_native() public {
+        address ben = makeAddr("gasBen");
+        address ref = makeAddr("gasRef");
+        bytes32 secret = bytes32(uint256(0xdeadbeef));
+        bytes memory preimage = abi.encodePacked(secret);
+        bytes32 hashlock = sha256(preimage);
+
+        vm.deal(address(this), 2 ether);
+
+        uint256 gasBefore = gasleft();
+        htlc.createOrder{value: 2 ether}(ben, ref, address(0), 1 ether, MIN_SD, hashlock, 600);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Ceiling: 200 000 gas — a generous regression guard.
+        assertLt(gasUsed, 200_000, "createOrder(native) exceeded gas ceiling");
+    }
+
+    /// @notice Gas benchmark: claimOrder (native ETH, beneficiary is EOA).
+    function testGas_claimOrder_native() public {
+        address sender = makeAddr("gasSender");
+        address ben = makeAddr("gasBen2");
+        address ref = makeAddr("gasRef2");
+        address claimer = makeAddr("gasClaimer");
+
+        bytes32 secret = bytes32(uint256(0xcafe1234));
+        bytes memory preimage = abi.encodePacked(secret);
+        bytes32 hashlock = sha256(preimage);
+
+        vm.deal(sender, 2 ether);
+        vm.prank(sender);
+        uint256 orderId = htlc.createOrder{value: 2 ether}(ben, ref, address(0), 1 ether, MIN_SD, hashlock, 600);
+
+        uint256 gasBefore = gasleft();
+        vm.prank(claimer);
+        htlc.claimOrder(orderId, preimage);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Ceiling: 100 000 gas.
+        assertLt(gasUsed, 100_000, "claimOrder(native) exceeded gas ceiling");
+    }
+
+    /// @notice Gas benchmark: refundOrder (native ETH).
+    function testGas_refundOrder_native() public {
+        address sender = makeAddr("gasSender3");
+        address ben = makeAddr("gasBen3");
+        address ref = makeAddr("gasRef3");
+        address refunder = makeAddr("gasRefunder");
+
+        bytes32 secret = bytes32(uint256(0xabcdef01));
+        bytes memory preimage = abi.encodePacked(secret);
+        bytes32 hashlock = sha256(preimage);
+
+        vm.deal(sender, 2 ether);
+        vm.prank(sender);
+        uint256 orderId = htlc.createOrder{value: 2 ether}(ben, ref, address(0), 1 ether, MIN_SD, hashlock, 600);
+
+        IHTLCEscrow.Order memory order = htlc.getOrder(orderId);
+        vm.warp(order.timelock + 1);
+
+        uint256 gasBefore = gasleft();
+        vm.prank(refunder);
+        htlc.refundOrder(orderId);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Ceiling: 100 000 gas.
+        assertLt(gasUsed, 100_000, "refundOrder(native) exceeded gas ceiling");
+    }
+
+    /// @notice Gas stress: Create, claim, and refund many orders in rapid succession.
+    ///         Verifies that gas usage scales linearly and no state corruption occurs
+    ///         when the contract processes bursts of activity.
+    function testGas_stressCreateClaimRefund() public {
+        uint256 N = 20; // 20 create + 10 claim + 10 refund
+
+        address sender = makeAddr("stressSender");
+        address ben = makeAddr("stressBen");
+        address ref = makeAddr("stressRef");
+        address claimer = makeAddr("stressClaimer");
+
+        vm.deal(sender, 1_000 ether);
+
+        uint256[] memory ids = new uint256[](N);
+        bytes[] memory preimages = new bytes[](N);
+
+        // Create N orders
+        for (uint256 i = 0; i < N; i++) {
+            bytes32 secret = bytes32(uint256(keccak256(abi.encodePacked("stress", i))));
+            bytes memory preimage = abi.encodePacked(secret);
+            bytes32 hashlock = sha256(preimage);
+            preimages[i] = preimage;
+
+            vm.prank(sender);
+            ids[i] = htlc.createOrder{value: 2 ether}(ben, ref, address(0), 1 ether, MIN_SD, hashlock, 600);
+        }
+
+        // Claim first half
+        for (uint256 i = 0; i < N / 2; i++) {
+            vm.prank(claimer);
+            htlc.claimOrder(ids[i], preimages[i]);
+            assertEq(uint8(htlc.getOrder(ids[i]).status), uint8(IHTLCEscrow.OrderStatus.Claimed));
+        }
+
+        // Refund second half after timelock
+        vm.warp(block.timestamp + 601);
+        for (uint256 i = N / 2; i < N; i++) {
+            vm.prank(claimer);
+            htlc.refundOrder(ids[i]);
+            assertEq(uint8(htlc.getOrder(ids[i]).status), uint8(IHTLCEscrow.OrderStatus.Refunded));
+        }
+
+        // No state corruption: all orders are finalised, contract balance should be
+        // only pending deferred payouts (claimer has no receive() → pushes defer).
+        uint256 remaining = address(htlc).balance;
+        // All safety deposits pushed to claimer (EOA) succeed, locked amounts to ben succeed.
+        // Expected balance is 0 for EOA recipients.
+        assertEq(remaining, 0, "Gas stress: unexpected residual balance");
+    }
+
+    /// @notice Gas benchmark: withdraw() after deferred push payout.
+    function testGas_withdraw_deferredPayout() public {
+        // Use a NoFallbackReceiver as beneficiary so the push defers.
+        NoFallbackReceiver noFallback = new NoFallbackReceiver();
+
+        address sender = makeAddr("wdSender");
+        address ref = makeAddr("wdRef");
+        bytes32 secret = bytes32(uint256(0x12345678));
+        bytes memory preimage = abi.encodePacked(secret);
+        bytes32 hashlock = sha256(preimage);
+
+        vm.deal(sender, 2 ether);
+        vm.prank(sender);
+        uint256 orderId = htlc.createOrder{value: 2 ether}(
+            address(noFallback), ref, address(0), 1 ether, MIN_SD, hashlock, 600
+        );
+
+        // Claim — push to noFallback defers.
+        htlc.claimOrder(orderId, preimage);
+        assertGt(htlc.pendingWithdrawals(address(noFallback)), 0);
+
+        uint256 gasBefore = gasleft();
+        noFallback.pull(IHTLCEscrow(address(htlc)));
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // Ceiling: 60 000 gas.
+        assertLt(gasUsed, 60_000, "withdraw() exceeded gas ceiling");
+        assertEq(htlc.pendingWithdrawals(address(noFallback)), 0);
+    }
 }

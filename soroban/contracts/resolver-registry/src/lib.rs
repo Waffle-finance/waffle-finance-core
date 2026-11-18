@@ -81,6 +81,38 @@ pub enum ResolverLifecycle {
     Inactive = 2,
 }
 
+/// Documented conditions under which the admin may slash a resolver.
+///
+/// Stored in the `slashed` event so that indexers and governance tooling
+/// can distinguish punitive actions without requiring off-chain notes.
+/// This enum is non-exhaustive by design: `ProtocolViolation` covers
+/// any misbehaviour not yet assigned its own variant.
+///
+/// # Alignment with EVM ResolverRegistry
+///
+/// The EVM counterpart emits a slash condition code alongside the slash
+/// amount in its `ResolverSlashed` event.  This enum mirrors that set of
+/// conditions so the off-chain coordinator can apply consistent slashing
+/// policy across both chains.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SlashCondition {
+    /// Resolver accepted an order fill but failed to submit or confirm the
+    /// preimage within the HTLC claim window, causing the order to expire.
+    FailedOrderFulfillment = 0,
+    /// Resolver submitted a fraudulent preimage, double-claimed an order,
+    /// or attempted to claim funds it was not entitled to.
+    FraudulentClaim = 1,
+    /// Resolver created a source-chain HTLC on behalf of a user but
+    /// abandoned the destination-chain leg before settlement (mid-flow
+    /// abandonment that locks user funds until the timelock expires).
+    OrderAbandonment = 2,
+    /// Catch-all for any other documented protocol violation not covered
+    /// by a more specific variant.
+    ProtocolViolation = 3,
+}
+
 #[cfg(test)]
 mod test;
 
@@ -461,6 +493,58 @@ impl ResolverRegistry {
             .set(&DataKey::Resolver(resolver.clone()), &info);
         env.events()
             .publish((topic_slashed(), resolver), (take,));
+    }
+
+    /// Slash a misbehaving resolver with an explicit condition code.
+    ///
+    /// Identical to [`slash`] except the `condition` is emitted alongside
+    /// the slashed amount so indexers and governance tooling can distinguish
+    /// punitive actions without requiring off-chain notes.
+    ///
+    /// Emits `(slashed, resolver) → (take, condition)`.
+    pub fn slash_with_reason(
+        env: Env,
+        resolver: Address,
+        amount: i128,
+        condition: SlashCondition,
+    ) {
+        Self::require_admin(&env);
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+        let mut info: ResolverInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Resolver(resolver.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::ResolverNotFound));
+        let take = amount.min(info.stake);
+        let asset: Address = env.storage().instance().get(&DataKey::StakeAsset).unwrap();
+        let beneficiary: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashBeneficiary)
+            .unwrap();
+        token::Client::new(&env, &asset).transfer(
+            &env.current_contract_address(),
+            &beneficiary,
+            &take,
+        );
+        info.stake -= take;
+        info.total_slashed = info
+            .total_slashed
+            .checked_add(take)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::Overflow));
+        info.last_slash_at = env.ledger().timestamp();
+        let min_stake: i128 = env.storage().instance().get(&DataKey::MinStake).unwrap_or(0);
+        if info.stake < min_stake && info.lifecycle != ResolverLifecycle::Inactive {
+            info.active = false;
+            info.lifecycle = ResolverLifecycle::Inactive;
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Resolver(resolver.clone()), &info);
+        env.events()
+            .publish((topic_slashed(), resolver), (take, condition));
     }
 
     pub fn is_active(env: Env, resolver: Address) -> bool {

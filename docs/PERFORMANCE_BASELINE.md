@@ -154,8 +154,9 @@ pnpm --filter @wafflefinance/coordinator exec vitest run test/performance.test.t
 ```
 
 Once the target scenarios above are added, the same command (or a
-dedicated `pnpm --filter @wafflefinance/coordinator benchmark` script, if
-one is added) should regenerate the full table in this document. Update
+dedicated `benchmark` script added to `@wafflefinance/coordinator` — see
+`docs/TECHNICAL_DEBT.md` for the backlog item) should regenerate the full
+table in this document. Update
 this file in the same PR that changes anything on the order lifecycle's
 hot path — persistence schema, index definitions, or the reconciler's
 replay logic — so the baseline doesn't silently go stale.

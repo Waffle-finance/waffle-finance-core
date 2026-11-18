@@ -323,7 +323,7 @@ describe("SolanaHTLCClient (simulation mode)", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const client = new SolanaHTLCClient({
       rpcUrl: "https://api.devnet.solana.com",
-      programId: "",
+      programId: "PLACEHOLDER",
     });
     const fakeSigner: SolanaSigner = {
       publicKey: new PublicKey("11111111111111111111111111111111"),

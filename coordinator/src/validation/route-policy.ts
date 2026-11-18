@@ -306,7 +306,8 @@ export function listLiveRoutes(): Array<{
 }> {
   return LIVE_DIRECTIONS.map((d) => ({
     direction: d,
-    ...POLICY_DIRECTION_CHAINS[d],
+    srcChain: POLICY_DIRECTION_CHAINS[d].src,
+    dstChain: POLICY_DIRECTION_CHAINS[d].dst,
   }));
 }
 
@@ -325,7 +326,8 @@ export function listBlockedRoutes(): Array<{
     .filter((d) => BLOCKED_DIRECTIONS.has(d))
     .map((d) => ({
       direction: d,
-      ...POLICY_DIRECTION_CHAINS[d],
+      srcChain: POLICY_DIRECTION_CHAINS[d].src,
+      dstChain: POLICY_DIRECTION_CHAINS[d].dst,
       reason: BLOCKED_DIRECTIONS.get(d)!,
     }));
 }

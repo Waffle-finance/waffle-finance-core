@@ -60,14 +60,14 @@ The central table: one row per cross-chain swap order.
 | `src_lock_block` / `dst_lock_block` | `INTEGER`          | yes      |                                                                          |
 | `src_timelock` / `dst_timelock` | `INTEGER`              | yes      | Unix seconds, absolute.                                                |
 | `preimage`               | `TEXT`                       | yes      | NULL until revealed. May be an AES-256-GCM blob — see `preimage_enc_version`. |
-| `preimage_enc_version`   | `INTEGER`                    | yes      | `NULL` = plaintext/legacy, `1` = AES-256-GCM (`crypto/secret-cipher.ts`). Added by `003_secret_encryption.sql`. |
+| `preimage_enc_version`   | `INTEGER`                    | yes      | `NULL` = plaintext/legacy, `1` = AES-256-GCM (`crypto/secret-cipher.ts`). Added by `003_secret_encryption.sql`. `CHECK (preimage_enc_version IS NULL OR preimage_enc_version = 1)` since `013_replay_safety.sql`. |
 | `secret_revealed_tx`     | `TEXT`                       | yes      |                                                                          |
 | `resolver_address`       | `TEXT`                       | yes      | Resolver that filled the destination side.                            |
 | `last_eth_block`         | `INTEGER` / `BIGINT`         | yes      | Per-order Ethereum reconciler high-water mark. Added by `011_order_ledger_cursors.sql`. |
 | `last_soroban_ledger`    | `INTEGER` / `BIGINT`         | yes      | Per-order Soroban/Stellar reconciler high-water mark.                 |
 | `last_solana_slot`       | `INTEGER` / `BIGINT`         | yes      | Per-order Solana reconciler high-water mark.                          |
-| `created_at` / `updated_at` | `INTEGER` / `INTEGER`     | no       | Unix seconds, DB-assigned default (`strftime`/`EXTRACT(EPOCH …)`).     |
-| `archived_at`            | `INTEGER` / `BIGINT`         | yes      | Soft-delete timestamp. `NULL` = live. Added by `006_stale_cleanup.sql`. Note the intentional `INTEGER` vs `BIGINT` divergence — SQLite's `INTEGER` is already 64-bit; Postgres's is 32-bit. |
+| `created_at` / `updated_at` | `INTEGER` / `INTEGER`     | no       | Unix seconds, DB-assigned default (`strftime`/`EXTRACT(EPOCH …)`). `CHECK (created_at > 0 AND updated_at >= created_at)` since `013_replay_safety.sql` — a replay may never move `updated_at` backwards. |
+| `archived_at`            | `INTEGER` / `BIGINT`         | yes      | Soft-delete timestamp. `NULL` = live. Added by `006_stale_cleanup.sql`. Note the intentional `INTEGER` vs `BIGINT` divergence — SQLite's `INTEGER` is already 64-bit; Postgres's is 32-bit. `CHECK (archived_at IS NULL OR archived_at >= created_at)` since `013_replay_safety.sql`. |
 
 Indexes: `idx_orders_hashlock`, `idx_orders_src_address`, `idx_orders_dst_address`,
 `idx_orders_status`, `idx_orders_src_order_id (src_chain, src_order_id)`,
@@ -87,11 +87,41 @@ Append-mostly log of raw chain events tied to an order.
 |---|---|---|---|
 | `id` | `INTEGER` / `BIGSERIAL` | no | |
 | `order_id` | `INTEGER` / `BIGINT` | no | `REFERENCES orders(id) ON DELETE CASCADE`. |
-| `event_type` | `TEXT` | no | |
+| `event_type` | `TEXT` | no | `CHECK IN (…)` over the closed set `OrdersRepository.appendTransitionEvent` emits: `status.transitioned`, `status.no_op`, `{src,dst}_lock.{transitioned,no_op}`, `secret_revealed.{transitioned,no_op}`, `cancel.{transitioned,no_op}`, `abandon.{transitioned,no_op}`, `{src,dst}_lock.rolled_back`. Constrained by `013_replay_safety.sql`. |
 | `payload_json` | `TEXT` | no | |
-| `created_at` | `INTEGER` | no | DB-assigned default. |
+| `created_at` | `INTEGER` | no | DB-assigned default. `CHECK (created_at > 0)`. |
 
 Index: `idx_order_events_order (order_id, created_at)`.
+
+Every mutation of the `orders` row appends exactly one `order_events` row in
+the **same transaction** (`OrdersRepository.atomic`). A write that changed the
+status without recording the trail — or recorded a trail entry for a status
+change that never landed — would be a partial status transition, and the next
+replay would take the `no_op:already_at_target` path and never repair it.
+
+### `processed_events`
+
+The durable idempotence ledger for event replay. Added by
+`013_replay_safety.sql`.
+
+| Column | Type (SQLite / Postgres) | Nullable | Notes |
+|---|---|---|---|
+| `event_key` | `TEXT` | no | `PRIMARY KEY`. The deterministic key from `reconciliation/event-identity.ts` — `eth:<type>:<txHash>:<logIndex>`, `soroban:<type>:<ledger>:<txHash>:<eventIndex>`, `solana:<type>:<signature>`. |
+| `chain` | `TEXT` | no | `CHECK IN ('ethereum','soroban','solana')`. Note `'soroban'`, matching `event-identity.ts`, not `'stellar'` as in `orders.src_chain`. |
+| `event_type` | `TEXT` | no | `CHECK IN ('OrderCreated','OrderClaimed','OrderRefunded')`. |
+| `order_id` | `INTEGER` / `BIGINT` | yes | `REFERENCES orders(id) ON DELETE CASCADE`. `NULL` when the event was claimed before its order row was located. |
+| `created_at` | `INTEGER` / `BIGINT` | no | Unix seconds, DB-assigned default. `CHECK (created_at > 0)`. |
+
+Index: `idx_processed_events_order (order_id) WHERE order_id IS NOT NULL`.
+
+**Why this table exists.** The reconciler re-reads overlapping block windows on
+every run. Its `EventSeenSet` deduplicates within a run, but it is cleared at
+the start of every run and lost entirely on restart, so a replayed window used
+to re-derive and re-apply every event it contained. The `event_key` PRIMARY
+KEY is the correctness boundary: `OrdersRepository.claimEvent` inserts with
+`ON CONFLICT(event_key) DO NOTHING` and treats `changes === 0` as "already
+processed", so a duplicate delivery is a no-op decided by the index rather than
+by application logic — which is what makes it survive a restart.
 
 ### `resolver_heartbeats`
 
@@ -215,10 +245,26 @@ it has no delete path at all, soft or hard.
 ### Constraints
 
 - `CHECK` constraints enumerate closed sets (`direction`, `status`,
-  `src_chain`/`dst_chain`, `resolver_heartbeats.chain`). Widening a `CHECK`
-  to add a new value is additive; narrowing one (removing a value that rows
-  may still hold) is a breaking change and needs a backfill/migration path
+  `src_chain`/`dst_chain`, `resolver_heartbeats.chain`, `order_events.event_type`,
+  `processed_events.chain`/`event_type`, `preimage_enc_version`). Widening a
+  `CHECK` to add a new value is additive; narrowing one (removing a value that
+  rows may still hold) is a breaking change and needs a backfill/migration path
   for existing rows first.
+- **Timestamps never regress.** `orders` carries
+  `CHECK (created_at > 0 AND updated_at >= created_at)` and
+  `CHECK (archived_at IS NULL OR archived_at >= created_at)`. Every mutation
+  stamps `updated_at` from the wall clock, so this is what stops a replay from
+  making an order look older than it is and reordering stale-cleanup scans.
+  There is deliberately **no `updated_at` trigger**: the coordinator sets
+  `updated_at` explicitly in each `UPDATE` (and `PostgresStatement` rewrites
+  `strftime` to `EXTRACT(EPOCH …)`), and a trigger would have no portable
+  equivalent across the two engines.
+- **New `CHECK`s on an existing table need a table rebuild on both engines.**
+  Neither SQLite nor Postgres can add a `CHECK` to a populated table in place.
+  This is acceptable here precisely because the coordinator database is a
+  rebuildable cache of on-chain reality: an operator on an existing deployment
+  drops the file and lets the reconciler repopulate it. Fresh databases get
+  every constraint from `schema.sql` at first open.
 - Foreign keys are used only where the referenced row's lifecycle strictly
   bounds the referencing row's (`order_events.order_id → orders.id ON DELETE
   CASCADE`). Correlation-only relationships (`audit_log.order_id`) are
@@ -237,6 +283,12 @@ column presence, nullability, and index names — so a change to `schema.sql`
 that silently drops or renames something is caught the same way a change to
 the migration registry is. When you add a column, index, or table, update
 both this document and that test in the same change.
+
+`coordinator/test/replay-safety.test.ts` covers the constraints above and the
+`processed_events` idempotence guarantee: that a duplicate `event_key` is
+refused by the schema (not by application logic), that it is still refused
+after a restart, and that a failure between the `orders` write and the
+`order_events` write rolls both back.
 
 Run both:
 

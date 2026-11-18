@@ -13,7 +13,7 @@ The coordinator **does not custody user funds or sign blockchain transactions**.
 For local development:
 
 ```
-http://localhost:3000/api
+http://localhost:3001/api
 ```
 
 Health and monitoring endpoints are available outside the `/api` prefix.
@@ -466,7 +466,7 @@ Applications should use the `retryable` field to determine whether an operation 
 Announce an order:
 
 ```bash
-curl -X POST http://localhost:3000/api/orders/announce \
+curl -X POST http://localhost:3001/api/orders/announce \
   -H "Content-Type: application/json" \
   -d @order.json
 ```
@@ -474,13 +474,13 @@ curl -X POST http://localhost:3000/api/orders/announce \
 Retrieve an order:
 
 ```bash
-curl http://localhost:3000/api/orders/order_123
+curl http://localhost:3001/api/orders/order_123
 ```
 
 Retrieve prices:
 
 ```bash
-curl http://localhost:3000/api/prices
+curl http://localhost:3001/api/prices
 ```
 
 ---
@@ -488,7 +488,7 @@ curl http://localhost:3000/api/prices
 # JavaScript Example
 
 ```javascript
-const response = await fetch("http://localhost:3000/api/orders/order_123");
+const response = await fetch("http://localhost:3001/api/orders/order_123");
 
 if (!response.ok) {
   throw new Error("Request failed");

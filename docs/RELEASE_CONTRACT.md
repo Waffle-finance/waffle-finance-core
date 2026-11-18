@@ -118,6 +118,17 @@ For each package, the columns below are what "the build succeeded" and
 | Migration steps | None (contracts are immutable once deployed; a redeploy is a new contract ID, recorded the same way as the EVM side — `SOROBAN_HTLC_TESTNET` etc. in `env.example`) |
 | Local verification today | **None** — not part of `verify-release-locally.sh`, and versioned independently (`workspace.package.version = "0.1.0"` in `soroban/Cargo.toml`) from the npm packages' `1.0.0` |
 
+### `solana` (Rust — Anchor / Solana HTLC Program)
+
+| | |
+|---|---|
+| Build command | `anchor build --verifiable` (from `solana/`) or `cargo build-sbf` |
+| Build target | Rust → Solana SBF ELF bytecode (`target/deploy/wafflefinance_htlc.so`) + Anchor IDL (`target/idl/wafflefinance_htlc.json`) |
+| Artifact | `solana/target/deploy/wafflefinance_htlc.so` and IDL; verified on-chain via `solana-verify` |
+| Environment assumptions | Anchor CLI + Solana CLI installed; `SOLANA_HTLC_PROGRAM_TESTNET` / `SOLANA_HTLC_PROGRAM_MAINNET`; private multi-endpoint RPCs for mainnet per [docs/SOLANA_OPERATOR_GUIDE.md](SOLANA_OPERATOR_GUIDE.md) |
+| Migration steps | Program upgrade via Anchor CLI / Squads multi-sig upgrade authority; no storage migration required for active Order PDAs |
+| Local verification today | Anchor test suite (`anchor test`) + SDK IDL schema compatibility and production readiness suite (`npx vitest run test/anchor-schema-stability.test.ts test/solana-production-readiness.test.ts`) |
+
 ### Metadata inconsistency found while auditing this table
 
 [RELEASE_POLICY.md](../RELEASE_POLICY.md#required-fields) requires every

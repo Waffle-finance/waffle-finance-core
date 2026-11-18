@@ -100,9 +100,20 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
   };
 
   return (
-    <div className="w-full bg-amber-500/15 border-y border-amber-400/40 text-amber-100 px-6 py-3 flex flex-col md:flex-row items-start md:items-center gap-3 justify-between">
+    /*
+     * role="alert" causes most screen readers to announce this banner
+     * immediately when it mounts (interrupting polite queues). aria-live is
+     * kept as a belt-and-suspenders fallback for assistive tech that treats
+     * role="alert" as "assertive" implicitly.
+     */
+    <div
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      className="w-full bg-amber-500/15 border-y border-amber-400/40 text-amber-100 px-6 py-3 flex flex-col md:flex-row items-start md:items-center gap-3 justify-between"
+    >
       <div className="flex items-start gap-3 text-sm">
-        <span className="mt-0.5">⚠</span>
+        <span className="mt-0.5" aria-hidden="true">⚠</span>
         <div>
           <div className="font-semibold">
             Your wallet network does not match the app network.
@@ -133,6 +144,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
         <button
           onClick={onSwitchWalletToApp}
           disabled={busy}
+          aria-label={`Switch wallet to ${expectedLabel}`}
           className="px-3 py-1.5 rounded-md bg-amber-400/20 hover:bg-amber-400/30 text-amber-50 text-xs font-semibold border border-amber-300/30 transition-colors disabled:opacity-50"
         >
           Switch wallet to {expectedLabel}
@@ -141,6 +153,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
           <button
             onClick={onSwitchAppToWallet}
             disabled={busy}
+            aria-label="Switch app to wallet network"
             className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-amber-50 text-xs font-medium border border-white/10 transition-colors disabled:opacity-50"
           >
             Switch app to wallet

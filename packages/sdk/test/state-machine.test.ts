@@ -1,26 +1,19 @@
 import { describe, it, expect } from "vitest";
 import {
+  ORDER_STATUS_TRANSITIONS,
   canTransition,
   InvalidTransitionError,
   isTerminal,
   nextStatesOf,
   requireTransition,
 } from "../src/state-machine/index.js";
+import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES, isOrderStatus } from "../src/types/index.js";
 import type { OrderStatus } from "../src/types/index.js";
 
-const ALL_STATUSES: OrderStatus[] = [
-  "announced",
-  "src_locked",
-  "dst_locked",
-  "secret_revealed",
-  "completed",
-  "refunded",
-  "failed",
-  "expired",
-];
+const ALL_STATUSES: OrderStatus[] = [...ORDER_STATUSES];
 
 const EXPECTED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  announced: ["src_locked", "failed", "expired"],
+  announced: ["src_locked", "cancelled", "abandoned", "failed", "expired"],
   src_locked: ["dst_locked", "secret_revealed", "refunded", "failed", "expired"],
   dst_locked: ["secret_revealed", "refunded", "failed", "expired"],
   secret_revealed: ["completed", "refunded", "failed"],
@@ -28,9 +21,34 @@ const EXPECTED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   refunded: [],
   failed: [],
   expired: ["refunded", "failed"],
+  cancelled: [],
+  abandoned: [],
 };
 
 describe("order state machine", () => {
+  it("exposes ORDER_STATUS_TRANSITIONS as the canonical table", () => {
+    expect(ORDER_STATUS_TRANSITIONS).toEqual(EXPECTED_TRANSITIONS);
+  });
+
+  it("covers exactly the canonical ORDER_STATUSES", () => {
+    expect(Object.keys(ORDER_STATUS_TRANSITIONS).sort()).toEqual([...ORDER_STATUSES].sort());
+  });
+
+  it("TERMINAL_ORDER_STATUSES matches the empty-next-state set", () => {
+    const terminals = Object.entries(ORDER_STATUS_TRANSITIONS)
+      .filter(([, next]) => next.length === 0)
+      .map(([status]) => status);
+    expect(terminals.sort()).toEqual([...TERMINAL_ORDER_STATUSES].sort());
+  });
+
+  it("isOrderStatus guards every canonical atom and rejects everything else", () => {
+    for (const atom of ORDER_STATUSES) {
+      expect(isOrderStatus(atom)).toBe(true);
+    }
+    for (const raw of ["announced_to_x", "PENDING", "", null, undefined, 42, {}]) {
+      expect(isOrderStatus(raw)).toBe(false);
+    }
+  });
   it("matches the complete transition matrix", () => {
     for (const from of ALL_STATUSES) {
       expect(nextStatesOf(from)).toEqual(EXPECTED_TRANSITIONS[from]);
@@ -67,12 +85,23 @@ describe("order state machine", () => {
       expect(isTerminal("completed")).toBe(true);
       expect(isTerminal("refunded")).toBe(true);
       expect(isTerminal("failed")).toBe(true);
+      expect(isTerminal("cancelled")).toBe(true);
+      expect(isTerminal("abandoned")).toBe(true);
       expect(isTerminal("announced")).toBe(false);
       expect(isTerminal("src_locked")).toBe(false);
     });
 
+    it("allows cancellation and abandonment from announced only", () => {
+      expect(canTransition("announced", "cancelled")).toBe(true);
+      expect(canTransition("announced", "abandoned")).toBe(true);
+      expect(canTransition("src_locked", "cancelled")).toBe(false);
+      expect(canTransition("src_locked", "abandoned")).toBe(false);
+      expect(canTransition("dst_locked", "cancelled")).toBe(false);
+      expect(canTransition("expired", "cancelled")).toBe(false);
+    });
+
     it("nextStatesOf returns a stable list", () => {
-      expect(nextStatesOf("announced")).toEqual(["src_locked", "failed", "expired"]);
+      expect(nextStatesOf("announced")).toEqual(["src_locked", "cancelled", "abandoned", "failed", "expired"]);
       expect(nextStatesOf("completed")).toEqual([]);
     });
   });
@@ -172,6 +201,8 @@ describe("order state machine", () => {
       expect(nextStatesOf("completed")).toEqual([]);
       expect(nextStatesOf("refunded")).toEqual([]);
       expect(nextStatesOf("failed")).toEqual([]);
+      expect(nextStatesOf("cancelled")).toEqual([]);
+      expect(nextStatesOf("abandoned")).toEqual([]);
     });
 
     it("throwing transition error includes from/to state", () => {

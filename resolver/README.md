@@ -42,6 +42,44 @@ that chain: it still watches events and exposes metrics, but never attempts a
 claim/refund there, and the status monitor described below skips it (there is
 no on-chain identity to check).
 
+## Local development keys (test identities only)
+
+Resolver keys authorize on-chain actions. Never copy a production key into a
+local `.env`, a frontend config, or coordinator config — those files are
+shared, logged, and bundled differently. For local runs, generate throwaway
+test-only identities and keep signing keys in the resolver process alone.
+
+Supported formats:
+
+- `RESOLVER_ETH_PRIVATE_KEY` — `0x`-prefixed 32-byte hex (`/^0x[0-9a-fA-F]{64}$/`,
+  must be a usable secp256k1 key). Empty/unset means Ethereum observe-only.
+- `RESOLVER_STELLAR_SECRET` — `S...` StrKey Ed25519 secret seed
+  (`StrKey.isValidEd25519SecretSeed`). Empty/unset means Soroban observe-only.
+- `NETWORK_MODE=testnet` selects the `*_TESTNET` registry addresses; use
+  testnet endpoints (`SEPOLIA_RPC_URL`, `SOROBAN_RPC_URL`, `STELLAR_HORIZON_URL`)
+  for local runs.
+
+Generate local-only identities (testnet/dev only — outputs stay redacted):
+
+```bash
+# Ethereum test identity (writes a random key to a local file, never prints it)
+node -e "const {randomBytes}=require('node:crypto');require('node:fs').writeFileSync('./.resolver-eth-test.key','0x'+randomBytes(32).toString('hex'),{mode:0o600})"
+RESOLVER_ETH_PRIVATE_KEY="$(cat ./.resolver-eth-test.key)" NETWORK_MODE=testnet pnpm --filter @wafflefinance/resolver dev
+
+# Stellar test identity (fund via Friendbot on testnet; secret stays in the file)
+npx -y @stellar/stellar-cli key generate --fund --network testnet --output-json /tmp/friendbot.json >/dev/null
+```
+
+Operational rules:
+
+- Keep `RESOLVER_ETH_PRIVATE_KEY` / `RESOLVER_STELLAR_SECRET` in the resolver
+  `.env` only — never in `frontend/.env`, coordinator config, screenshots, or
+  chat logs. Redact them in pastes (`RESOLVER_ETH_PRIVATE_KEY=[redacted]`).
+- Frontend and coordinator configs need only public addresses/contract ids
+  (`ETH_*`, `SOROBAN_*`); they must never contain signing secrets.
+- If a real key was ever pasted or committed, rotate it: generate a fresh key
+  and treat the exposed one as compromised.
+
 ## Operational policy: registration, stake maintenance, and slashing
 
 The two `ResolverRegistry` contracts (`contracts/contracts/ResolverRegistry.sol`

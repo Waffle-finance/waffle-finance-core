@@ -97,32 +97,28 @@ export function loadCoordinatorConfig(
     },
   };
 
-  const cfg = coordinatorConfigSchema.parse(mapped);
-
   // ── Soroban/chain config contract validation ─────────────────────────────
-  //
-  // Run the typed config contract after Zod parsing so that field shapes are
-  // already validated.  This second pass catches semantic problems: chain ID
-  // mismatch, placeholder contract IDs, passphrase drift, etc.  Errors are
-  // surfaced as a detailed report rather than a raw Zod ZodError so operators
-  // get actionable messages even when they don't have access to the source.
+  // Run the typed config contract before Zod parsing so that semantic and
+  // connectivity problems (endpoint format, chain ID mismatch, placeholder IDs)
+  // produce formatted, actionable reports instead of raw Zod errors.
   const chainInput: SorobanChainConfigInput = {
-    network: cfg.network,
+    network: mapped.network,
     soroban: {
-      rpcUrl: cfg.soroban.rpcUrl,
-      horizonUrl: cfg.soroban.horizonUrl,
-      networkPassphrase: cfg.soroban.networkPassphrase,
-      htlcContract: cfg.soroban.htlcContract,
-      resolverRegistry: cfg.soroban.resolverRegistry,
+      rpcUrl: mapped.soroban.rpcUrl,
+      horizonUrl: mapped.soroban.horizonUrl,
+      networkPassphrase: mapped.soroban.networkPassphrase,
+      htlcContract: mapped.soroban.htlcContract,
+      resolverRegistry: mapped.soroban.resolverRegistry,
     },
     ethereum: {
-      rpcUrl: cfg.ethereum.rpcUrl,
-      chainId: cfg.ethereum.chainId,
-      htlcEscrow: cfg.ethereum.htlcEscrow ?? null,
-      resolverRegistry: cfg.ethereum.resolverRegistry ?? null,
+      rpcUrl: mapped.ethereum.rpcUrl,
+      chainId: mapped.ethereum.chainId,
+      htlcEscrow: mapped.ethereum.htlcEscrow ?? null,
+      resolverRegistry: mapped.ethereum.resolverRegistry ?? null,
     },
     solana: {
-      programId: cfg.solana.programId,
+      programId: mapped.solana.programId,
+      rpcUrl: mapped.solana.rpcUrl,
     },
   };
   const chainResult = validateSorobanChainConfig(chainInput);
@@ -143,6 +139,7 @@ export function loadCoordinatorConfig(
     );
   }
 
+  const cfg = coordinatorConfigSchema.parse(mapped);
   return cfg;
 }
 

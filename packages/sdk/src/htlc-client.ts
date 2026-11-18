@@ -74,6 +74,24 @@ export type HTLCErrorCode =
   | "invalid_preimage"
   /** Client is in simulation/placeholder mode — no real on-chain call made. */
   | "simulation_mode"
+  /**
+   * ERC20 token allowance is below the order amount.
+   * Callers must call `token.approve(escrowAddress, amount)` before creating
+   * an ERC20 order. On Soroban and Solana this code is not used; the token
+   * model handles authorization differently.
+   */
+  | "insufficient_allowance"
+  /**
+   * The caller is not registered as an active resolver in the ResolverRegistry.
+   * Only relevant when the escrow contract has a non-zero resolver registry set.
+   * Callers must stake and register in the registry before creating orders.
+   */
+  | "resolver_not_authorised"
+  /**
+   * The safety deposit provided is below the contract's minimum.
+   * Increase `safetyDeposit` to at least `minSafetyDeposit`.
+   */
+  | "safety_deposit_too_small"
   /** Any other chain-level error. */
   | "chain_error";
 

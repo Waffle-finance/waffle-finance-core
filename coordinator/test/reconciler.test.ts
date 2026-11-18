@@ -141,6 +141,31 @@ async function seedOrder(orders: OrderService, hashlock = HASHLOCK) {
   });
 }
 
+async function seedSolanaOrder(orders: OrderService) {
+  const order = await orders.announce({
+    direction: "sol_to_eth",
+    hashlock: VALID_HASHLOCK,
+    srcChain: "solana",
+    srcAddress: "solana_sender_addr",
+    srcAsset: "native",
+    srcAmount: "1000000000",
+    srcSafetyDeposit: "0",
+    dstChain: "ethereum",
+    dstAddress: VALID_ETH_ADDR,
+    dstAsset: "native",
+    dstAmount: "1000000000000000000",
+  });
+  await orders.recordSrcLock({
+    actor: "system",
+    publicId: order.publicId,
+    orderId: "solana-order-1",
+    txHash: "solana-lock-signature",
+    blockNumber: 100,
+    timelock: 9999,
+  });
+  return order;
+}
+
 /** Return the most-recently created viem mock client. */
 function ethMock() {
   const { createPublicClient } = require("viem");
@@ -978,6 +1003,74 @@ describe("Reconciler — Solana PLACEHOLDER skip", () => {
   });
 });
 
+describe("Reconciler — Solana transaction outcome recovery", () => {
+  it("does not replay event logs from a transaction that failed on-chain", async () => {
+    const orders = await freshOrders();
+    const order = await seedSolanaOrder(orders);
+    const solanaCfg = {
+      ...BASE_CFG,
+      solana: {
+        ...BASE_CFG.solana,
+        programId: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      },
+    };
+    const reconciler = new Reconciler(solanaCfg, orders, log);
+    const mock = solanaMock();
+    mock.getSignaturesForAddress.mockResolvedValue([
+      { signature: "failed-solana-claim", slot: 499_999, err: null },
+    ] as any);
+    mock.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: { InstructionError: [0, "Custom"] },
+        logMessages: [
+          "Program log: OrderClaimed",
+          `Program log: ${JSON.stringify({
+            orderId: "solana-order-1",
+            preimage: VALID_PREIMAGE,
+          })}`,
+        ],
+      },
+    } as any);
+
+    await reconciler.run();
+
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("src_locked");
+    expect(updated?.preimage).toBeNull();
+  });
+
+  it("does not durably consume a Solana event when persistence fails, then replays it", async () => {
+    const orders = await freshOrders();
+    const order = await seedSolanaOrder(orders);
+    const reconciler = new Reconciler(BASE_CFG, orders, log);
+    const originalRecordSecret = orders.recordSecret.bind(orders);
+    const recordSecret = vi.spyOn(orders, "recordSecret")
+      .mockImplementationOnce(async () => {
+        throw new Error("database unavailable");
+      })
+      .mockImplementation(originalRecordSecret);
+    const claimEvent = vi.spyOn(orders, "claimEvent");
+    const signature = "partial-solana-claim";
+    const logs = [
+      "Program log: OrderClaimed",
+      `Program log: ${JSON.stringify({
+        orderId: "solana-order-1",
+        preimage: VALID_PREIMAGE,
+      })}`,
+    ];
+
+    await expect((reconciler as any).replaySolanaLogs(signature, logs, 200)).resolves.toBe(0);
+    expect(claimEvent).not.toHaveBeenCalled();
+    expect((await orders.get(order.publicId))?.status).toBe("src_locked");
+
+    (reconciler as any).seenSet.clear();
+    await expect((reconciler as any).replaySolanaLogs(signature, logs, 200)).resolves.toBe(1);
+    expect(recordSecret).toHaveBeenCalledTimes(2);
+    expect(claimEvent).toHaveBeenCalledTimes(1);
+    expect((await orders.get(order.publicId))?.status).toBe("secret_revealed");
+  });
+});
+
 describe("Reconciler — Soroban event replay", () => {
   let orders: OrderService;
   let reconciler: Reconciler;
@@ -1095,5 +1188,62 @@ describe("Reconciler — #576: unsafe integer guard", () => {
     const updated = await orders.get(order.publicId);
     expect(updated?.status).toBe("announced");
     expect(reconciler.getStatus().eventsReplayed).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Chain / coordinator terminal-state agreement
+// ─────────────────────────────────────────────────────────────────────────────
+// A chain transaction can succeed while the coordinator stays stale until
+// event processing catches up. These assertions verify that the harness
+// eventually reconciles the public order state with the chain outcome for
+// one successful claim and one refund scenario. Each test runs the existing
+// reconciliation path once and requires at least one replayed event, so a
+// missing event fails fast instead of timing out indefinitely. No live
+// network is required (all chain reads are mocked).
+
+describe("Reconciler — chain/coordinator terminal-state agreement", () => {
+  it("claim: chain OrderClaimed and coordinator agree on the terminal outcome", async () => {
+    const orders = await freshOrders();
+    const order = await seedOrder(orders, VALID_HASHLOCK);
+    await orders.recordSrcLock({ publicId: order.publicId, orderId: "77", txHash: "0xabc", blockNumber: 100, timelock: 9_999 });
+
+    const r = new Reconciler(BASE_CFG, orders, log);
+    const mock = ethMock();
+    const chainTerminalEvents = [ethClaimedLog(77n, VALID_PREIMAGE)];
+    mock.getLogs.mockImplementation(async ({ event }: any) =>
+      event?.name === "OrderClaimed" ? chainTerminalEvents : []
+    );
+
+    await r.run();
+
+    // Fails if no chain event was processed (no silent pass on stale state).
+    expect(r.getStatus().eventsReplayed).toBeGreaterThan(0);
+    // Chain side reached its terminal event; coordinator must match it.
+    expect(chainTerminalEvents).toHaveLength(1);
+    const updated = await orders.get(order.publicId);
+    expect(updated?.status).toBe("secret_revealed");
+    expect(updated?.preimage).toBe(VALID_PREIMAGE);
+  });
+
+  it("refund: chain OrderRefunded and coordinator agree on the terminal outcome", async () => {
+    const orders = await freshOrders();
+    const order = await seedOrder(orders);
+    await orders.recordSrcLock({ publicId: order.publicId, orderId: "55", txHash: "0xabc", blockNumber: 100, timelock: 9_999 });
+
+    const r = new Reconciler(BASE_CFG, orders, log);
+    const mock = ethMock();
+    const chainTerminalEvents = [ethRefundedLog(55n)];
+    mock.getLogs.mockImplementation(async ({ event }: any) =>
+      event?.name === "OrderRefunded" ? chainTerminalEvents : []
+    );
+
+    await r.run();
+
+    // Fails if no chain event was processed (no silent pass on stale state).
+    expect(r.getStatus().eventsReplayed).toBeGreaterThan(0);
+    // Chain side reached its terminal event; coordinator must match it.
+    expect(chainTerminalEvents).toHaveLength(1);
+    expect((await orders.get(order.publicId))?.status).toBe("refunded");
   });
 });

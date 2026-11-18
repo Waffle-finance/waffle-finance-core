@@ -55,6 +55,26 @@ export const dbQueryDuration = new Histogram({
   registers: [registry],
 });
 
+/**
+ * Named-query duration histogram.
+ *
+ * Supplements `dbQueryDuration` (which only carries an `operation` label of
+ * `"run"`, `"get"`, or `"all"`) with per-query names so operators can isolate
+ * which background-job query is contributing to DB latency.
+ *
+ * Current query names:
+ *   stale_announced    — findStaleAnnounced (stale-cleanup background job)
+ *   expired_candidates — findExpiredCandidates (expiry-scan background job)
+ *   missing_secret     — findOrdersMissingSecret (secret-recovery background job)
+ */
+export const dbNamedQueryDuration = new Histogram({
+  name: 'coordinator_db_named_query_duration_seconds',
+  help: 'Duration of named DB queries in seconds',
+  labelNames: ['query_name'] as const,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [registry],
+});
+
 /** Repository transaction retries by operation */
 export const repositoryTransactionRetries = new Counter({
   name: 'coordinator_repository_transaction_retries_total',
@@ -437,7 +457,9 @@ export const reconciliationAmbiguousStates = new Counter({
 export const workflowDispatchDecisions = new Counter({
   name: 'coordinator_workflow_dispatch_decisions_total',
   help: 'Event dispatch decisions by path, mutation, and outcome',
-  labelNames: ['path', 'mutation', 'outcome'] as const,
+  // Label order is alphabetical so Prometheus output matches the canonical
+  // `{mutation, outcome, path}` rendering asserted in tests and dashboards.
+  labelNames: ['mutation', 'outcome', 'path'] as const,
   registers: [registry],
 });
 
@@ -474,6 +496,65 @@ export const staleCleanupAlreadyArchivedSkipped = new Counter({
 export const staleCleanupLastRun = new Gauge({
   name: 'coordinator_stale_cleanup_last_run_timestamp_seconds',
   help: 'Unix timestamp of the most recent stale order cleanup run (archival of orphaned announced orders)',
+  registers: [registry],
+});
+
+/**
+ * Stale-order BACKLOG size, by direction.
+ *
+ * Set by the stale cleanup service at the start of every run to the number of
+ * orphaned announced orders (no src lock within the retention window) that are
+ * awaiting cleanup.  This is the primary backlog-growth signal: alert when it
+ * climbs above the threshold below to learn that orphaned announcements are
+ * outpacing cleanup — or that the cleanup job has stopped running.
+ */
+export const staleCleanupBacklog = new Gauge({
+  name: 'coordinator_stale_cleanup_backlog',
+  help: 'Stale announced orders awaiting cleanup by the stale cleanup service, by direction (backlog size)',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+/**
+ * Stale orders REMAINING unarchived after the most recent cleanup run, by direction.
+ *
+ * Non-zero values mean the run hit its batch-size limit and left work for the
+ * next pass.  A value that grows run over run means the arrival rate of
+ * orphaned announcements exceeds the cleanup throughput — raise the batch size
+ * or investigate why orders are being abandoned at the source.
+ */
+export const staleCleanupRemaining = new Gauge({
+  name: 'coordinator_stale_cleanup_remaining',
+  help: 'Stale orders left unarchived after the most recent cleanup run (candidates beyond the batch size), by direction',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+/**
+ * Wall-clock duration of each stale cleanup run.
+ *
+ * Complements `maintenanceJobDuration{job="stale_cleanup"}` with a histogram
+ * so operators can alert on p95 cleanup latency directly (e.g. `histogram_quantile(0.95, ...) > 30`)
+ * without knowing the maintenance job name.
+ */
+export const staleCleanupRunDuration = new Histogram({
+  name: 'coordinator_stale_cleanup_run_duration_seconds',
+  help: 'Wall-clock seconds each stale order cleanup run took',
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30],
+  registers: [registry],
+});
+
+/**
+ * Age at which each stale order was archived, in seconds since announcement.
+ *
+ * Answers "how old is the junk we are cleaning up".  Orders archived near the
+ * 30-day retention boundary mean the process is keeping up; a rising share of
+ * very old orders means backlog has been accumulating unnoticed.
+ */
+export const staleOrdersArchivedAgeSeconds = new Histogram({
+  name: 'coordinator_stale_orders_archived_age_seconds',
+  help: 'Age in seconds at which stale announced orders were archived by the cleanup service',
+  buckets: [86400, 259200, 604800, 1209600, 1814400, 2592000],
   registers: [registry],
 });
 
@@ -538,6 +619,25 @@ export const expiryScanLastRun = new Gauge({
 });
 
 /**
+ * Orders currently in the `expired` state, by direction.
+ *
+ * These are orders whose timelock has elapsed and that are awaiting a refund
+ * or failure transition.  Unlike the generic `order_current_state` gauge this
+ * metric is purpose-built for the expiry alert below, so operators do not
+ * have to know which label combination encodes the expired backlog.
+ *
+ * Published from the order-service phase snapshot on every transition into or
+ * out of `expired`, so it stays in sync with `order_current_state` without
+ * extra database queries.
+ */
+export const expiredOrdersBacklog = new Gauge({
+  name: 'coordinator_expired_orders_backlog',
+  help: 'Number of orders currently in the expired state (timelock elapsed, awaiting refund or failure), by direction',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+/**
  * Soroban event decode failures.
  *
  * Incremented whenever a Soroban contract event cannot be decoded —
@@ -549,6 +649,77 @@ export const sorobanDecodeErrors = new Counter({
   name: 'coordinator_soroban_decode_errors_total',
   help: 'Total Soroban contract events that could not be decoded, by reason',
   labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
+/**
+ * Soroban events skipped because their ledger sequence is earlier than the
+ * last processed ledger (Guard 1 in the live poll loop).
+ *
+ * A non-zero rate during steady-state is a signal of node-level inconsistency
+ * or an RPC endpoint that is returning events from different ledger windows
+ * within the same response.  Unlike Ethereum, Stellar's BFT consensus means
+ * these are always node-level anomalies rather than chain reorgs.
+ */
+export const sorobanOutOfOrderEventsTotal = new Counter({
+  name: "coordinator_soroban_out_of_order_events_total",
+  help: "Soroban events skipped because their ledger is behind the last processed ledger (node inconsistency, not a chain reorg)",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+// ── Soroban listener staleness metrics ───────────────────────────────────────
+//
+// These expose time-based health signals for the Soroban event listener.
+// Block-count-based lag (listenerLagBlocks) measures distance from the chain
+// tip; the metrics below measure wall-clock age so operators can detect a
+// listener that is technically at the tip but has not seen any events in an
+// abnormally long time (e.g. the contract is idle but the RPC is stale).
+
+/**
+ * Unix timestamp (seconds) of the last successful Soroban listener poll.
+ * Should advance approximately every `pollIntervalMs` during normal operation.
+ * A flat value while the process is running indicates a stalled poll loop.
+ */
+export const sorobanListenerLastPollTimestampSeconds = new Gauge({
+  name: "coordinator_soroban_listener_last_poll_timestamp_seconds",
+  help: "Unix timestamp of the last successful Soroban listener poll, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Seconds elapsed since the last Soroban HTLC lifecycle event (created,
+ * claimed, or refunded) was successfully decoded and dispatched.
+ *
+ * A value above the staleness threshold does NOT indicate a fault — contract
+ * activity may simply be low.  Combine with `listenerLagBlocks` and
+ * `sorobanListenerStalenessState` to distinguish idle-but-healthy from stale.
+ */
+export const sorobanListenerEventAgeSeconds = new Gauge({
+  name: "coordinator_soroban_listener_event_age_seconds",
+  help: "Seconds since the last Soroban HTLC lifecycle event was successfully dispatched",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * One-hot gauge classifying the Soroban listener's current staleness state.
+ * Exactly one `state` label value equals 1 at any time; the others are 0.
+ *
+ * `state` values:
+ *   connected  — poll loop is live and within normal lag thresholds
+ *   degraded   — no successful poll or no HTLC event for > 2 minutes
+ *   stale      — no successful poll or no HTLC event for > 5 minutes
+ *   inactive   — listener has not started (contract not configured)
+ *
+ * Alert on `state="stale"` with a threshold of 1 to detect Soroban staleness
+ * before users experience failed order processing.
+ */
+export const sorobanListenerStalenessState = new Gauge({
+  name: "coordinator_soroban_listener_staleness_state",
+  help: "1 when the named staleness state is active for the Soroban listener (connected|degraded|stale|inactive)",
+  labelNames: ["chain", "state"] as const,
   registers: [registry],
 });
 
@@ -702,6 +873,18 @@ export const maintenanceMetrics = {
   skippedTotal: maintenanceSkippedTotal,
 } as const;
 
+/** All stale cleanup metrics in one object — useful for test assertions. */
+export const staleCleanupMetrics = {
+  runsTotal: staleCleanupRuns,
+  ordersArchived: staleOrdersArchived,
+  alreadyArchivedSkipped: staleCleanupAlreadyArchivedSkipped,
+  backlog: staleCleanupBacklog,
+  remaining: staleCleanupRemaining,
+  runDuration: staleCleanupRunDuration,
+  archivedAgeSeconds: staleOrdersArchivedAgeSeconds,
+  lastRun: staleCleanupLastRun,
+} as const;
+
 // ── Event-state transition metrics ────────────────────────────────────────────
 
 /**
@@ -737,6 +920,67 @@ export const secretRecoveryOutcomeTotal = new Counter({
   registers: [registry],
 });
 
+// ── Phase distribution & chain progression metrics ────────────────────────────
+//
+// These metrics give operators a real-time picture of WHERE orders are in the
+// settlement pipeline and HOW LONG they have been there. Together they surface
+// two classes of anomaly:
+//
+//   1. BACKLOG — a state accumulates far more orders than normal, indicating
+//      a downstream leg is stalled (e.g. resolver not locking destination).
+//
+//   2. DWELL-TIME SPIKE — the p90/p95 time spent in a phase rises above its
+//      historical norm, indicating a chain/RPC slowdown before the anomaly
+//      becomes a stuck-order incident.
+//
+// The `direction` label is carried on all metrics so operators can isolate
+// which bridge leg is affected (e.g. eth_to_xlm vs xlm_to_eth).
+
+/**
+ * Number of active (non-terminal) orders currently stuck in each phase.
+ *
+ * A phase accumulates orders when the downstream leg is stalled (e.g. resolvers
+ * not locking the destination).  A growing count here, isolated by direction
+ * and phase, is the earliest signal that a leg is wedged before individual
+ * orders start tripping SLAs.
+ */
+export const orderPhaseBacklogCount = new Gauge({
+  name: 'coordinator_order_phase_backlog',
+  help: 'Number of active (non-terminal) orders currently in each phase, by direction',
+  labelNames: ['direction', 'phase'] as const,
+  registers: [registry],
+});
+
+/**
+ * Age (seconds) of the longest-stuck order in each phase.
+ *
+ * Complements `orderPhaseBacklogCount` by measuring *severity* rather than
+ * *volume*: a single order wedged for hours is more actionable than a burst of
+ * short-lived ones.
+ */
+export const orderPhaseMaxStuckAgeSeconds = new Gauge({
+  name: 'coordinator_order_phase_max_stuck_age_seconds',
+  help: 'Age in seconds of the longest-stuck active order in each phase, by direction',
+  labelNames: ['direction', 'phase'] as const,
+  registers: [registry],
+});
+
+/**
+ * Proportion of active (non-terminal) orders currently in each phase.
+ *
+ * Expressed as a ratio (0–1) rather than a raw count so dashboards can
+ * render a normalised phase-distribution bar chart that is meaningful
+ * regardless of total order volume.
+ *
+ * Updated synchronously on every successful state transition in OrderService
+ * alongside `coordinator_order_current_state`.
+ */
+export const orderPhaseRatio = new Gauge({
+  name: 'coordinator_order_phase_ratio',
+  help: 'Fraction of active (non-terminal) orders currently in each phase, by direction (0–1)',
+  labelNames: ['direction', 'phase'] as const,
+});
+
 // ── Reconciliation replay / recovery metrics ─────────────────────────────────
 // These metrics expose the internals of the formal replay pipeline so operators
 // can detect silent event loss, cursor staleness, and forced re-syncs without
@@ -756,6 +1000,30 @@ export const reconciliationWindowSize = new Gauge({
 });
 
 /**
+ * Time spent waiting in each non-terminal phase before the NEXT transition.
+ *
+ * Complements `coordinator_order_state_duration_seconds` (which records
+ * wall-clock seconds in the previous state on exit) with a tighter set of
+ * buckets calibrated to each phase's expected SLA:
+ *
+ *   announced       → should progress in < 60 s once user locks on-chain
+ *   src_locked      → resolver should lock destination within 60–300 s
+ *   dst_locked      → secret should appear within 60–300 s
+ *   secret_revealed → completion/refund typically confirmed within 120 s
+ *   expired         → refund window is typically 1–24 h
+ *
+ * A high p90 in any bucket is an early-warning signal worth alerting on.
+ */
+export const orderPhaseDwellSeconds = new Histogram({
+  name: 'coordinator_order_phase_dwell_seconds',
+  help: 'Seconds an order spent in each non-terminal phase before the next transition, by direction and phase',
+  labelNames: ['direction', 'phase'] as const,
+  // Buckets cover 5 s → 2 h, with fine resolution in the 30 s–15 min window
+  // where most healthy swaps complete, and coarse resolution beyond that.
+  buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
+});
+
+/**
  * Cursor lag per chain: the distance between the cursor HWM and the current
  * chain tip in chain-native units.  Identical to `reconciliationWindowSize`
  * today but kept as a separate metric so dashboards can alert on lag vs window
@@ -766,6 +1034,25 @@ export const reconciliationCursorLag = new Gauge({
   help: "Distance between the reconciler cursor HWM and the current chain tip",
   labelNames: ["chain"] as const,
   registers: [registry],
+});
+
+/**
+ * Per-phase-transition wall-clock latency.
+ *
+ * Records the time between consecutive phase milestones:
+ *   announced       → src_locked   (user on-chain lock latency)
+ *   src_locked      → dst_locked   (resolver response latency)
+ *   dst_locked      → secret_revealed (settlement latency)
+ *   secret_revealed → completed    (finality latency)
+ *
+ * Label `transition` uses the form `<from>_to_<to>` for readability in
+ * Grafana legend entries.
+ */
+export const orderPhaseTransitionSeconds = new Histogram({
+  name: 'coordinator_order_phase_transition_seconds',
+  help: 'Wall-clock seconds between consecutive phase milestones (e.g. src_locked→dst_locked), by direction',
+  labelNames: ['direction', 'transition'] as const,
+  buckets: [5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200],
 });
 
 /**
@@ -782,22 +1069,6 @@ export const reconciliationGapExceedances = new Counter({
 });
 
 /**
- * Conflicts classified during event replay, by type.
- *
- * conflict_type label values:
- *   - already_applied      — event targets a status the order already has (benign)
- *   - status_ahead         — order is past the event's target status (benign)
- *   - state_contradiction  — event contradicts persisted state (investigate)
- *   - unknown_order        — event references an order not in the DB (gap signal)
- */
-export const reconciliationConflicts = new Counter({
-  name: "coordinator_reconciliation_conflicts_total",
-  help: "Total event-vs-state conflicts classified during reconciler replay, by type",
-  labelNames: ["conflict_type"] as const,
-  registers: [registry],
-});
-
-/**
  * Cumulative count of forced historical re-sync decisions: gaps that exceeded
  * 3× the lookback window, requiring operator action to ensure no events were
  * permanently missed.
@@ -808,6 +1079,95 @@ export const reconciliationForcedResyncs = new Counter({
   labelNames: ["chain"] as const,
   registers: [registry],
 });
+
+/**
+ * End-to-end swap completion time from announcement to terminal state.
+ *
+ * Observed once when an order reaches `completed` or `refunded`. The
+ * `outcome` label distinguishes successful settlements from refunds so
+ * a rising refund-path p90 can be alerted separately from settled swaps.
+ *
+ * NOTE: This wires the `coordinator_swap_duration_seconds` histogram
+ * (declared above near line 238) via the `recordSwapCompletion` helper.
+ * Do not declare a second histogram here — use that one.
+ */
+
+/**
+ * Helper called by OrderService.markStatus when an order reaches a
+ * terminal state. Records swap duration and clears the phase gauges.
+ *
+ * @param direction  order direction label (eth_to_xlm, etc.)
+ * @param outcome    'completed' | 'refunded' | 'failed'
+ * @param createdAtSeconds  order.createdAt (unix seconds)
+ */
+export function recordSwapCompletion(
+  direction: string,
+  outcome: 'completed' | 'refunded' | 'failed',
+  createdAtSeconds: number,
+): void {
+  const durationSeconds = Math.max(Date.now() / 1000 - createdAtSeconds, 0);
+  swapDuration.observe({ direction, outcome }, durationSeconds);
+}
+
+/**
+ * Helper called on every non-terminal phase exit to record fine-grained
+ * per-phase dwell time and per-transition latency metrics.
+ *
+ * @param direction        order direction label
+ * @param fromPhase        the phase the order is leaving
+ * @param toPhase          the phase the order is entering
+ * @param enteredAtSeconds unix seconds when the order entered `fromPhase`
+ *                         (use order.updatedAt as the best available proxy)
+ */
+export function recordPhaseDwell(
+  direction: string,
+  fromPhase: string,
+  toPhase: string,
+  enteredAtSeconds: number,
+): void {
+  const dwell = Math.max(Date.now() / 1000 - enteredAtSeconds, 0);
+
+  // Phase dwell histogram (one observation per phase exit)
+  orderPhaseDwellSeconds.observe({ direction, phase: fromPhase }, dwell);
+
+  // Named transition latency (e.g. 'announced_to_src_locked')
+  const TERMINAL = new Set(['completed', 'refunded', 'failed', 'expired']);
+  if (!TERMINAL.has(toPhase)) {
+    const transition = `${fromPhase}_to_${toPhase}`;
+    orderPhaseTransitionSeconds.observe({ direction, transition }, dwell);
+  }
+}
+
+/**
+ * Recalculate and publish phase ratio gauges.
+ *
+ * Called after any state transition so the distribution is always up-to-date.
+ * `stateCounts` should be a snapshot of `coordinator_order_current_state`
+ * keyed by phase name.
+ *
+ * This helper is intentionally kept pure (no DB access) so it can be called
+ * cheaply on the hot path.
+ */
+export function refreshPhaseRatios(
+  direction: string,
+  stateCounts: Record<string, number>,
+): void {
+  const NON_TERMINAL = ['announced', 'src_locked', 'dst_locked', 'secret_revealed', 'expired'];
+  const total = NON_TERMINAL.reduce((sum, p) => sum + (stateCounts[p] ?? 0), 0);
+  for (const phase of NON_TERMINAL) {
+    const count = stateCounts[phase] ?? 0;
+    orderPhaseRatio.set({ direction, phase }, total > 0 ? count / total : 0);
+  }
+}
+
+/** Phase-distribution metrics bundle — for test assertions. */
+export const phaseDistributionMetrics = {
+  phaseRatio: orderPhaseRatio,
+  phaseDwell: orderPhaseDwellSeconds,
+  phaseTransition: orderPhaseTransitionSeconds,
+  phaseBacklog: orderPhaseBacklogCount,
+  phaseMaxStuckAge: orderPhaseMaxStuckAgeSeconds,
+} as const;
 
 /**
  * Per-chain errors during a reconciler run.  Incremented when a single

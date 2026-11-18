@@ -10,6 +10,9 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:smoke": "vitest run test/smoke",
+    "test:smoke:watch": "vitest test/smoke",
+    "test:idempotency": "vitest run test/idempotency",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },

@@ -23,7 +23,7 @@ Production observability guide for the WaffleFinance coordinator service.
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Engine ≥ 24)
-- Coordinator running locally on port **3000** (`pnpm dev` inside `coordinator/`)
+- Coordinator running locally on port **3001** (`pnpm dev` inside `coordinator/`)
 
 ### Setup Steps (< 15 commands)
 
@@ -35,7 +35,7 @@ cd coordinator && pnpm install
 pnpm dev
 
 # 3. Verify metrics are served
-curl http://localhost:3000/metrics | head -20
+curl http://localhost:3001/metrics | head -20
 
 # 4. In a second terminal, start the observability stack
 cd coordinator/ops
@@ -411,7 +411,7 @@ coordinator_active_orders
 
 1. **Verify endpoint is live**:
    ```bash
-   curl http://localhost:3000/metrics | head -20
+   curl http://localhost:3001/metrics | head -20
    ```
 
 2. **Check Prometheus targets**:
@@ -446,7 +446,7 @@ coordinator_active_orders
 
 ### Option 1: External Prometheus (Recommended)
 
-1. Configure external Prometheus to scrape: `http://<coordinator-host>:3000/metrics`
+1. Configure external Prometheus to scrape: `http://<coordinator-host>:3001/metrics`
 2. Set scrape interval to 30s (or adjust based on alert latency)
 3. Set retention to ≥ 30 days
 4. Configure alert rules using the rules above
@@ -478,7 +478,7 @@ global:
 scrape_configs:
   - job_name: "coordinator"
     static_configs:
-      - targets: ["coordinator:3000"]
+      - targets: ["coordinator:3001"]
     metrics_path: /metrics
     relabel_configs:
       - source_labels: [__address__]
@@ -500,7 +500,7 @@ Edit `ops/prometheus.yml` if the coordinator runs on a different host/port:
 scrape_configs:
   - job_name: "wafflefinance-coordinator"
     static_configs:
-      - targets: ["host.docker.internal:3000"]   # change as needed
+      - targets: ["host.docker.internal:3001"]   # change as needed
     metrics_path: /metrics
 ```
 

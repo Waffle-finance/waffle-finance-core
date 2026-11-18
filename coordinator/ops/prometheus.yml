@@ -6,5 +6,5 @@ scrape_configs:
   - job_name: "wafflefinance-coordinator"
     static_configs:
       # Point at the coordinator. When running outside Docker, use host.docker.internal.
-      - targets: ["host.docker.internal:3000"]
+      - targets: ["host.docker.internal:3001"]
     metrics_path: /metrics

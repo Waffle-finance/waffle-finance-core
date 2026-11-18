@@ -1225,7 +1225,7 @@ contract HTLCEscrowSecurityTest is Test {
 
         // Owner slashes the resolver, bringing their stake below minimum
         vm.prank(registryOwner);
-        registry.slash(resolver, 10 ether);
+        registry.slash(resolver, 10 ether, ResolverRegistry.SlashReason.Unspecified);
 
         // Resolver is no longer active
         assertFalse(registry.isActive(resolver));

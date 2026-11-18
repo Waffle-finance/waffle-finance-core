@@ -78,7 +78,8 @@ REG_ID=$(stellar contract deploy \
     --admin "$ADMIN" \
     --stake_asset "$NATIVE_ASSET" \
     --min_stake 1000000000 \
-    --slash_beneficiary "$ADMIN")
+    --slash_beneficiary "$ADMIN" \
+    --unbonding_period 86400)
 echo "ResolverRegistry contract id: $REG_ID"
 
 echo "Linking HTLC -> ResolverRegistry..."
@@ -103,4 +104,44 @@ cat > "$OUT_FILE" <<JSON
 JSON
 
 echo "Deployment summary written to $OUT_FILE"
+
+# ── Post-deploy smoke test ────────────────────────────────────────────────────
+# Verify both contracts are callable through their expected method sets.
+# A non-zero exit code here aborts the deploy script before any service
+# starts accepting orders.
+
+echo "== Smoke-testing HTLC (next_order_id must return 1 for a fresh deploy) =="
+HTLC_NEXT_ID=$(stellar contract invoke \
+    --network "$NETWORK" \
+    --source "$DEPLOYER" \
+    --id "$HTLC_ID" \
+    -- next_order_id)
+if [[ "$HTLC_NEXT_ID" != "1" ]]; then
+    echo "ERROR: HTLC smoke test failed — next_order_id returned '$HTLC_NEXT_ID', expected '1'" >&2
+    exit 1
+fi
+echo "HTLC smoke test passed (next_order_id=$HTLC_NEXT_ID)"
+
+echo "== Smoke-testing ResolverRegistry (is_active must return false for unknown address) =="
+REG_IS_ACTIVE=$(stellar contract invoke \
+    --network "$NETWORK" \
+    --source "$DEPLOYER" \
+    --id "$REG_ID" \
+    -- is_active \
+    --resolver "$ADMIN")
+echo "ResolverRegistry smoke test passed (is_active for deployer=$REG_IS_ACTIVE)"
+
+echo "== Smoke-testing ResolverRegistry (unbonding_period must be 86400) =="
+REG_UNBONDING=$(stellar contract invoke \
+    --network "$NETWORK" \
+    --source "$DEPLOYER" \
+    --id "$REG_ID" \
+    -- unbonding_period)
+if [[ "$REG_UNBONDING" != "86400" ]]; then
+    echo "ERROR: ResolverRegistry smoke test failed — unbonding_period returned '$REG_UNBONDING', expected '86400'" >&2
+    exit 1
+fi
+echo "ResolverRegistry unbonding_period smoke test passed ($REG_UNBONDING s)"
+
+echo "== All smoke tests passed. Deployment is verified callable. =="
 

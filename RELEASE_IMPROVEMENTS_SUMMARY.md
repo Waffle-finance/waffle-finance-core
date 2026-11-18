@@ -1,3 +1,15 @@
+> **ARCHIVAL NOTICE — do not follow as current instructions**
+>
+> This file summarises improvements to `.github/workflows/release.yml`.
+> That workflow file **does not exist** in this repository (see
+> [docs/QUALITY_GATE.md § Finding #2](docs/QUALITY_GATE.md) for the full
+> audit finding). The checklist items and CI steps described here were never
+> committed as a working workflow. The actual release gate today is
+> `scripts/verify-release-locally.sh` run by hand before tagging, plus the
+> four CI workflows listed in [docs/DOC_MAP.md](docs/DOC_MAP.md).
+>
+> This file is retained for historical context only.
+
 # Release Workflow Improvements - Summary
 
 ## ✅ Task Complete

@@ -14,6 +14,21 @@
     "declarationMap": true,
     "sourceMap": true,
     "noUncheckedIndexedAccess": false,
-    "noImplicitOverride": false
+    "noImplicitOverride": false,
+
+    // #733: two additions, both chosen because they measured zero new errors
+    // in every workspace that could be type-checked (packages/sdk, relayer,
+    // resolver). See the report for the per-workspace before/after counts and
+    // for the flags that were deliberately NOT enabled.
+    //
+    // `noFallthroughCasesInSwitch` was already set in the SDK's own two
+    // tsconfigs; hoisting it here de-duplicates the setting rather than
+    // changing behaviour for the SDK, and gives the other workspaces the
+    // same protection.
+    "noFallthroughCasesInSwitch": true,
+    // Catches a function that computes a value on some branches and
+    // implicitly returns `undefined` on the rest — the shape behind a whole
+    // class of "the guard returned nothing" bugs.
+    "noImplicitReturns": true
   }
 }

@@ -221,6 +221,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
         <button
           onClick={refreshFromCoordinator}
           disabled={isHistoryBusy}
+          aria-label="Refresh transaction history"
           className="button-hover-scale flex items-center justify-center gap-2 rounded-full border border-cyan-200/30 bg-cyan-200/[0.12] px-4 py-2 text-sm font-semibold text-cyan-50 shadow-[0_12px_34px_rgba(0,226,255,0.12)] transition hover:border-cyan-100/45 hover:bg-cyan-200/[0.18] disabled:opacity-60"
         >
           <RefreshCw className={`h-4 w-4 ${isHistoryBusy ? 'animate-spin' : ''}`} />
@@ -244,6 +245,8 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
           <button
             key={key}
             onClick={() => setQuery({ status: key === 'all' ? undefined : (key as Transaction['status']) })}
+            aria-label={`Filter transactions by ${key === 'all' ? 'all statuses' : key}`}
+            aria-pressed={(options.query.status || 'all') === key}
             className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
               (options.query.status || 'all') === key
                 ? 'brand-cta'
@@ -368,6 +371,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       onClick={() => setRefundTarget(tx)}
                       className="flex items-center gap-1.5 rounded-full border border-indigo-300/30 bg-indigo-400/15 px-3 py-1.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-400/25"
                       title="Refund your locked ETH from the HTLC contract once the timelock expires"
+                      aria-label={`Refund ETH for order ${tx.id}`}
                     >
                       <Undo2 className="h-3.5 w-3.5" />
                       Refund ETH
@@ -379,6 +383,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                       disabled={manualRefundingIds.has(tx.id)}
                       className="flex items-center gap-1.5 rounded-full border border-cyan-400/30 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                       title="Ask the relayer to refund your original XLM payment"
+                      aria-label={`Refund XLM for order ${tx.id}`}
                     >
                       <Undo2 className={`h-3.5 w-3.5 ${manualRefundingIds.has(tx.id) ? 'animate-spin' : ''}`} />
                       {manualRefundingIds.has(tx.id) ? 'Refunding...' : 'Refund XLM'}

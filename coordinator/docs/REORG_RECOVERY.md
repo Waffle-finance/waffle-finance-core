@@ -280,5 +280,5 @@ If you suspect inconsistency:
 
 ---
 
-*See also: [`docs/OPERATIONS.md`](../docs/OPERATIONS.md) for full deployment
+*See also: [`docs/OPERATIONS.md`](../../docs/OPERATIONS.md) for full deployment
 runbooks and alerting configuration.*

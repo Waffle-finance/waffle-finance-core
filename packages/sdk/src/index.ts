@@ -1,8 +1,14 @@
 // Types
+export {
+  ORDER_STATUSES,
+  TERMINAL_ORDER_STATUSES,
+  isOrderStatus,
+} from "./types/index.js";
 export type {
   Chain,
   Direction,
   OrderStatus,
+  TerminalOrderStatus,
   Order,
   ChainLeg,
   ResolverInfo,
@@ -10,6 +16,23 @@ export type {
   ExternalBridgeRoute,
   ExternalBridgeAdapter,
 } from "./types/index.js";
+
+// SDK runtime configuration validation
+export {
+  SdkConfigurationError,
+  validateRpcUrl,
+  validateChainId,
+  validateEthereumAddress,
+  validateSolanaAddress as validateSolanaConfigAddress,
+  validateSorobanAddress,
+  validateNetworkPassphrase,
+  validateChainPair,
+} from "./config-validation.js";
+export type {
+  SdkConfigIssue,
+  SdkConfigIssueCode,
+  ChainPairValidationInput,
+} from "./config-validation.js";
 
 // Route-identity registry — single source of truth for supported routes
 export {
@@ -89,12 +112,24 @@ export {
 
 // State Machine
 export {
+  ORDER_STATUS_TRANSITIONS,
   InvalidTransitionError,
   canTransition,
   requireTransition,
   isTerminal,
   nextStatesOf,
 } from "./state-machine/index.js";
+
+// Status display — canonical order-status → user-facing mapping
+export {
+  displayStatusFor,
+  statusDisplay,
+  describeOrderStatus,
+  isDisplayStatus,
+  ALL_DISPLAY_STATUSES,
+  ORDER_STATUS_TO_DISPLAY,
+} from "./status-display/index.js";
+export type { DisplayStatus, StatusDisplay } from "./status-display/index.js";
 
 // Assets
 export {
@@ -107,20 +142,33 @@ export {
   resolveSolanaAsset,
   resolveEthereumTokenFromSolana,
   normalizeEthereumAddress,
+  assertCanonicalEthereumAddress,
   normalizeStellarAssetKey,
+  assertCanonicalStellarAssetKey,
   normalizeSolanaMint,
+  assertCanonicalSolanaMint,
   isSupportedEthToStellar,
   isSupportedStellarToEth,
   isSupportedEthToSolana,
   isSupportedSolanaToEth,
+  isSupportedStellarToSolana,
+  isSupportedSolanaToStellar,
   assertSupportedEthToStellar,
   assertSupportedStellarToEth,
   assertSupportedEthToSolana,
   assertSupportedSolanaToEth,
+  assertSupportedStellarToSolana,
+  assertSupportedSolanaToStellar,
+  resolveSolanaAssetFromStellar,
+  resolveStellarAssetFromSolana,
   getSupportedEthereumAddresses,
   getSupportedStellarAssets,
   getSupportedSolanaMints,
+  getSupportedStellarToSolana,
+  getSupportedSolanaToStellar,
+  toCanonicalId,
   UnsupportedAssetError,
+  InvalidAssetIdentifierError,
   type AssetMappingNetwork,
   type CanonicalStellarAsset,
   type CanonicalSolanaAsset,
@@ -164,6 +212,69 @@ export {
   type SolanaSigner,
 } from "./solana/index.js";
 
+// Solana wallet lifecycle and Phantom provider (#720)
+export {
+  getPhantomProvider,
+  formatSolanaAddress,
+  createPhantomSigner,
+  SolanaWalletLifecycleManager,
+  INITIAL_SOLANA_WALLET_STATE,
+  type PhantomSolanaProvider,
+  type SolanaConnectionPhase,
+  type SolanaWalletState,
+  type SolanaWalletErrorCode,
+  type SolanaWalletLifecycleOptions,
+} from "./solana/wallet.js";
+
+// Solana — multi-endpoint RPC provider with automatic failover (#713)
+export {
+  SolanaRpcProvider,
+  SolanaRpcFallbackExhaustedError,
+  createSolanaRpcProvider,
+  type SolanaRpcProviderOptions,
+  type SolanaProviderHealth,
+  type EndpointHealth,
+} from "./solana/rpc-provider.js";
+
+// Solana — IDL schema compatibility helpers (#712)
+export {
+  assertIdlCompatibility,
+  validateInstructionSchema,
+  CANONICAL_ACCOUNT_ORDERING,
+  INSTRUCTION_DATA_SIZES,
+  type IdlCompatibilityResult,
+} from "./solana/idl/htlc.js";
+
+// Solana — account metadata validation (#715)
+export {
+  AccountValidationError,
+  validateSolanaAddress,
+  validateOrderPda,
+  validateOrderAccountOnChain,
+  validateCreateOrderParams,
+  validateClaimOrderParams,
+  validateRefundOrderParams,
+  type AccountValidationCode,
+  type AccountValidationResult,
+} from "./solana/account-validation.js";
+
+// Solana — production readiness audit, gating checks, and operations checklist (#718)
+export {
+  assessSolanaProductionReadiness,
+  assertSolanaProductionReady,
+  SolanaProductionGatingError,
+  DEVNET_TOKEN_MINTS,
+  MAINNET_TOKEN_MINTS,
+  PUBLIC_DEVNET_RPC_ENDPOINTS,
+  SOLANA_SETTLEMENT_OPERATIONS_CHECKLIST,
+  type SolanaEnvironment,
+  type ReadinessCheckStatus,
+  type ReadinessCheckCategory,
+  type SolanaReadinessCheck,
+  type SolanaProductionReadinessReport,
+  type SolanaReadinessOptions,
+} from "./solana/production-readiness.js";
+
 // Shared utilities for hex conversion, order ID handling, and serialisation
 export {
   hexToBuffer,
@@ -181,7 +292,10 @@ export {
   isTimeoutTransition,
   isFailureTransition,
   estimateTimelockRemaining,
+  classifyRpcError,
+  retryAsync,
 } from "./shared-utils/index.js";
+export type { RetryPolicy } from "./shared-utils/index.js";
 
 // Solana — normalised adapter
 export { SolanaHTLCAdapter } from "./solana/adapter.js";

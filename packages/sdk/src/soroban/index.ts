@@ -2,7 +2,6 @@ import {
   Address as SorobanAddress,
   BASE_FEE,
   Contract,
-  Networks,
   TransactionBuilder,
   nativeToScVal,
   scValToNative,
@@ -11,11 +10,17 @@ import {
   type Transaction
 } from "@stellar/stellar-sdk";
 import { hex32ToBuffer } from "../shared-utils/index.js";
+import { HTLCError } from "../htlc-client.js";
 import {
   orchestrateTransaction,
   type OrchestrationConfig,
   type OrchestratedResult,
 } from "./orchestrator.js";
+import {
+  validateNetworkPassphrase,
+  validateRpcUrl,
+  validateSorobanAddress,
+} from "../config-validation.js";
 
 export { type OrchestrationConfig, type OrchestratedResult } from "./orchestrator.js";
 
@@ -62,10 +67,13 @@ export class SorobanHTLCClient {
   private readonly orchestrationConfig: OrchestrationConfig;
 
   constructor(opts: SorobanHTLCClientOptions) {
-    this.contractId = opts.contractId;
-    this.server = new rpc.Server(opts.rpcUrl, { allowHttp: opts.allowHttp ?? false });
-    this.contract = new Contract(opts.contractId);
-    this.networkPassphrase = opts.networkPassphrase ?? Networks.TESTNET;
+    const allowHttp = opts.allowHttp ?? false;
+    const rpcUrl = validateRpcUrl(opts.rpcUrl, "soroban.rpcUrl", { allowHttp });
+    const contractId = validateSorobanAddress(opts.contractId, "soroban.contractId");
+    this.contractId = contractId;
+    this.server = new rpc.Server(rpcUrl, { allowHttp });
+    this.contract = new Contract(contractId);
+    this.networkPassphrase = validateNetworkPassphrase(opts.networkPassphrase, "soroban.networkPassphrase");
     this.orchestrationConfig = opts.orchestration ?? {};
   }
 
@@ -177,9 +185,24 @@ export class SorobanHTLCClient {
       .addOperation(op)
       .setTimeout(180)
       .build();
-    const sim = await this.server.simulateTransaction(tx);
-    if ("error" in sim && sim.error) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+    let sim: rpc.Api.SimulateTransactionResponse;
+    try {
+      sim = await this.server.simulateTransaction(tx);
+    } catch (err) {
+      throw new HTLCError({
+        code: "chain_error",
+        message: `Soroban RPC error fetching order ${orderId}: ${err instanceof Error ? err.message : String(err)}`,
+        retryable: true,
+        cause: err,
+      });
+    }
+    if (rpc.Api.isSimulationError(sim)) {
+      throw new HTLCError({
+        code: "simulation_failed",
+        message: `Soroban simulation failed for get_order(${orderId}): ${sim.error}`,
+        retryable: false,
+        cause: new Error(sim.error),
+      });
     }
     const result = (sim as any).result;
     if (!result || !result.retval) return null;

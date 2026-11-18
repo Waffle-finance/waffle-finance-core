@@ -21,8 +21,20 @@ possible (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXIST
 | `005_schema_migrations.sql`   | Creates the `schema_migrations` tracking table               |
 | `006_stale_cleanup.sql`       | Adds `archived_at` to `orders`                                |
 | `007_audit_log.sql`           | Creates the append-only `audit_log` table                    |
+| `013_replay_safety.sql`       | Creates `processed_events` (durable replay idempotence keys) and adds status/timestamp `CHECK`s to `orders` and `order_events` |
 
 PostgreSQL uses parallel files where SQL syntax differs (e.g. `002_solana_support_postgres.sql`).
+
+### Migrations that need a table rebuild
+
+Neither SQLite nor Postgres can add a `CHECK` constraint to a populated table
+in place, so `013_replay_safety.sql` is the first migration whose new
+constraints cannot be applied to an existing database by running the file. On
+an existing deployment, drop the coordinator database file (or truncate the two
+constrained tables) and let the reconciler repopulate it from chain events —
+this is the documented recovery path for this cache, and it is the same
+procedure used for any other cache loss. Fresh databases get every constraint
+from `schema.sql` at first open and never need this step.
 
 See [`schema-contract.md`](./schema-contract.md) for the canonical per-table
 field/index/constraint contract and the policy on additive changes, backfills,

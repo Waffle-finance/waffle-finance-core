@@ -6,6 +6,7 @@
   "private": true,
   "scripts": {
     "test": "vitest run",
+    "test:smoke": "vitest run cross-chain.test.ts solana-settlement.test.ts solana-timeout-refund.test.ts lifecycle-cases.test.ts",
     "test:health": "vitest run --config health/vitest.config.ts",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts"

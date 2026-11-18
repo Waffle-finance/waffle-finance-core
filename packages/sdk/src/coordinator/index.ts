@@ -75,5 +75,20 @@ export {
 } from "./validation.js";
 export type { ValidationIssue, ValidationResult } from "./validation.js";
 
+// ── Schema validation ────────────────────────────────────────────────────────
+export {
+  validateAnnounceRequestSchema,
+  validateRevealRequestSchema,
+  validateOrderSchema,
+  validateChainLegSchema,
+  validateSecretBlockSchema,
+  validateHealthResponseSchema,
+  assertValidSchema,
+} from "./schema.js";
+export type {
+  SchemaValidationError,
+  SchemaValidationResult,
+} from "./schema.js";
+
 // ── Transforms ───────────────────────────────────────────────────────────────
 export { toOrder, toOrders } from "./transform.js";

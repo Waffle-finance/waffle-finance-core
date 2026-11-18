@@ -40,10 +40,13 @@ describe("listener metrics", () => {
   });
 
   it("records workflow dispatch decisions with path and mutation labels", async () => {
+    // Labels are passed in alphabetical order so the rendered output matches
+    // the canonical `{mutation, outcome, path}` form asserted below
+    // (prom-client v15 renders labels in insertion order).
     workflowDispatchDecisions.inc({
-      path: "live",
       mutation: "src_lock",
       outcome: "applied",
+      path: "live",
     });
 
     const metrics = await registry.metrics();

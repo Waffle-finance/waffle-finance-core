@@ -30,6 +30,73 @@ The coordinator suite passing says nothing about the relayer; a green Hardhat
 run says nothing about the Soroban contracts. Cross-package behaviour is only
 covered by the e2e suite (`pnpm test:e2e`).
 
+## Focused test runs
+
+These examples target a single file or test name without running the whole
+package suite. They complement — not replace — the suite commands above.
+
+### TypeScript services (coordinator, relayer, resolver, frontend, e2e)
+
+The `test` script for these packages is `vitest run`. Pass extra arguments
+after `--` to scope the run:
+
+```bash
+# Run a single test file (coordinator example; substitute any service filter)
+pnpm --filter @wafflefinance/coordinator exec vitest run src/services/order-service.test.ts
+
+# Run only tests whose name matches a pattern (-t accepts a substring or regex)
+pnpm --filter @wafflefinance/coordinator exec vitest run -t "recordSrcLock"
+
+# Same pattern for the relayer or resolver
+pnpm --filter @wafflefinance/relayer exec vitest run src/services/recovery-service.test.ts
+pnpm --filter @wafflefinance/resolver exec vitest run -t "cursor"
+```
+
+> These run the same `vitest run` that the `test` script uses — focused runs
+> do not bypass or replace the suite.
+
+### Solidity contracts (Hardhat)
+
+```bash
+# Run a single test file
+pnpm --filter @wafflefinance/contracts exec hardhat test test/HTLCEscrow.test.ts
+
+# Filter by test name with --grep (substring or regex)
+pnpm --filter @wafflefinance/contracts exec hardhat test --grep "claim with valid preimage"
+```
+
+> Build step: `pnpm --filter @wafflefinance/contracts build` (or
+> `pnpm --filter @wafflefinance/contracts compile`) must have run first so
+> Hardhat finds the compiled artifacts.
+
+### Soroban contracts (Cargo)
+
+```bash
+# Run a single test function
+cd soroban && cargo test test_claim_with_valid_preimage
+
+# Run all tests in a module
+cd soroban && cargo test htlc::
+
+# Show stdout for a single test
+cd soroban && cargo test test_refund_after_timelock -- --nocapture
+```
+
+> Soroban contracts are a Cargo workspace outside the pnpm workspace; no
+> `pnpm` command reaches them. Run all commands from the `soroban/` directory.
+
+### SDK — prerequisite build step
+
+Services that import `@wafflefinance/sdk` from its compiled output
+(coordinator, relayer, resolver) require the SDK to be built before tests run:
+
+```bash
+pnpm --filter @wafflefinance/sdk build   # build once before running service tests
+```
+
+The frontend and e2e suite alias SDK source directly and do **not** need a
+prior SDK build step.
+
 ## Root aggregate commands
 
 Run from the repository root. These fan out with `pnpm -r`, which visits every
@@ -124,6 +191,7 @@ on any package that imports it (`pnpm --filter @wafflefinance/sdk build`).
 | Script | Command | Validates |
 | --- | --- | --- |
 | `test` | `vitest run` | Cross-package flows against running services |
+| `test:smoke` | `vitest run cross-chain.test.ts solana-settlement.test.ts solana-timeout-refund.test.ts lifecycle-cases.test.ts` | Deterministic local degraded-mode subset: timeout, duplicate-event (double-claim/refund idempotency), and recovery/backstop-refund cases — no wallets or RPC endpoints |
 | `test:watch` | `vitest` | Watch mode |
 | `lint` | `eslint src --ext .ts` | ESLint over the test sources |
 
@@ -146,6 +214,11 @@ TypeScript-bindings generation.
 
 ## Smoke tests
 
+- **Degraded-mode local smoke (no wallets, no RPC):**
+  `pnpm --filter @wafflefinance/e2e test:smoke` runs the fast deterministic
+  subset (timeout, duplicate-event, and recovery/backstop cases). It exits
+  non-zero and names the failing case on any scenario failure. Run this
+  before changing recovery or listener code.
 - **Coordinator:** start it (`pnpm coordinator:dev`), then `pnpm health:check`
   hits `GET /health` on port 3001.
 - **Frontend:** `pnpm frontend:build && pnpm frontend:preview` serves the real
@@ -176,3 +249,42 @@ Related but separate: `pnpm validate:manifests` checks manifest names,
 versions, and export paths. Note it verifies built artifacts referenced by
 `exports`, so it needs `pnpm --filter @wafflefinance/sdk build` (or a full
 `pnpm build`) to have run first.
+
+---
+
+## CI vs local — which checks run where
+
+Use this table to understand what a green PR actually proves and what you
+still need to verify locally before opening one.
+
+| Check | Command | When it runs | Workflow / job |
+|---|---|---|---|
+| Command contract (scripts match docs) | `pnpm validate:commands` | Every push + PR | [`command-contract.yml`](../.github/workflows/command-contract.yml) → `validate` |
+| Foundry fuzz + invariant tests | `cd contracts && forge test` | Push/PR to `contracts/**` | [`foundry-contracts.yml`](../.github/workflows/foundry-contracts.yml) → `foundry` |
+| Soroban cargo test + property fuzz | `cd soroban && cargo test` | Push/PR to `soroban/**` | [`soroban-contracts.yml`](../.github/workflows/soroban-contracts.yml) → `test` |
+| Frontend Vitest (testnet + mainnet legs) | `pnpm --filter @wafflefinance/frontend test` | Push/PR to `frontend/**`, `packages/sdk/**`, `packages/config/**` | [`frontend.yml`](../.github/workflows/frontend.yml) → `vitest` |
+| Frontend TypeScript type-check | `pnpm --filter @wafflefinance/frontend build` | Same path filter as above | [`frontend.yml`](../.github/workflows/frontend.yml) → `typecheck` |
+| Frontend ESLint | `pnpm --filter @wafflefinance/frontend lint` | Same path filter as above | [`frontend.yml`](../.github/workflows/frontend.yml) → `lint` |
+| Dependency CVE + licence scan | — (GitHub action, no local equivalent) | PRs touching `pnpm-lock.yaml` or any `package.json` | [`dep-review.yml`](../.github/workflows/dep-review.yml) → `dependency-review` |
+| Cross-package dep-version alignment | `pnpm validate:deps` | Same path filter as dep-review | [`dep-review.yml`](../.github/workflows/dep-review.yml) → `validate-deps` |
+| **Coordinator tests** | `pnpm --filter @wafflefinance/coordinator test` | **Local only — no CI job** | — |
+| **Relayer tests** | `pnpm --filter @wafflefinance/relayer test` | **Local only — no CI job** | — |
+| **Resolver tests** | `pnpm --filter @wafflefinance/resolver test` | **Local only — no CI job** | — |
+| **SDK build + tests** | `pnpm --filter @wafflefinance/sdk build && pnpm --filter @wafflefinance/sdk test` | **Local only — no CI job** | — |
+| **Hardhat contract tests** (Node driver) | `pnpm --filter @wafflefinance/contracts test` | **Local only — no CI job** | — |
+| **Deployment manifest validation** | `pnpm validate:deployments` | **Local only — no CI job** | — |
+| **Doc-drift + stale links** | `pnpm validate:docs` | **Local only — no CI job** | — |
+| **Release verification** | `scripts/verify-release-locally.sh` | **Local only — no CI job** | — |
+| **E2E cross-chain suite** | `pnpm test:e2e` | **Local only — no CI job** | — |
+
+**Key takeaways:**
+
+- CI only runs the command contract, Foundry/Soroban contract tests,
+  frontend suite, and dependency review. Everything else is local only.
+- A green PR does **not** mean coordinator, relayer, resolver, or SDK tests
+  passed — you must run those locally before opening a PR if you touched
+  those packages.
+- Path filters mean CI is skipped entirely for a PR that only touches
+  `coordinator/` or `relayer/` — those packages have no dedicated CI job.
+- `pnpm validate:deployments` and `pnpm validate:docs` must be run manually;
+  they catch manifest and doc drift that CI does not detect.

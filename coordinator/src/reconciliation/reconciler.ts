@@ -56,11 +56,12 @@ import {
   type Log,
 } from "viem";
 import { sepolia, mainnet } from "viem/chains";
-import { rpc } from "@stellar/stellar-sdk";
+import { rpc, xdr } from "@stellar/stellar-sdk";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
+import type { Chain } from "../persistence/orders-repo.js";
 import {
   reconciliationRuns,
   reconciliationErrors,
@@ -71,6 +72,8 @@ import {
   reconciliationGapBlocks,
   reconciliationLookbackCoverage,
   reconciliationRestartRecoveryEvents,
+  reconciliationChainErrors,
+  reconciliationDuplicatesSkipped,
   sorobanDecodeErrors,
   workflowDispatchDecisions,
 } from "../metrics.js";
@@ -100,12 +103,30 @@ interface SorobanRpcEvent {
 }
 
 import {
+  LedgerCursor,
   computeIncrementalScanStart,
   ETH_LOOKBACK_BLOCKS,
   SOROBAN_LOOKBACK_LEDGERS,
   SOLANA_LOOKBACK_SLOTS,
   isEventBehindOrderCursor,
 } from "./ledger-cursor.js";
+import {
+  EventSeenSet,
+  ethEventKey,
+  sorobanEventKey,
+  solanaEventKey,
+  semanticKey,
+} from "./event-identity.js";
+import {
+  ReplayPolicy,
+  buildReplayDecision,
+} from "./replay-policy.js";
+import {
+  buildRecoveryReport,
+  formatRecoveryReport,
+  type ChainRecoveryInput,
+  type RecoveryReport,
+} from "./recovery-summary.js";
 
 // ─── Status types ─────────────────────────────────────────────────────────────
 
@@ -119,6 +140,8 @@ export interface ReconciliationStatus {
     soroban: number;
     solana: number;
   };
+  /** Populated after the first successful run — per-chain recovery replay. */
+  recovery?: RecoveryReport | null;
 }
 
 /**
@@ -187,6 +210,7 @@ export class Reconciler {
     lastRunAt: null,
     lastRunOk: null,
     eventsReplayed: 0,
+    recovery: null,
   };
 
   constructor(
@@ -203,6 +227,56 @@ export class Reconciler {
       allowHttp: cfg.soroban.rpcUrl.startsWith("http://"),
     });
     this.solanaConn = new Connection(cfg.solana.rpcUrl, cfg.solana.commitment);
+  }
+
+  // ─── Cursor initialisation ────────────────────────────────────────────────
+
+  /**
+   * Seed per-chain cursors from the DB on the first `run()` call.
+   * Ensures the very first reconciliation run covers the full offline gap
+   * without any manual operator action.
+   */
+  private async initCursors(): Promise<void> {
+    const [ethHwm, sorobanHwm, solanaHwm] = await Promise.all([
+      this.orders.getChainCursor("ethereum"),
+      this.orders.getChainCursor("stellar"),
+      this.orders.getChainCursor("solana"),
+    ]);
+    this.ethCursor = new LedgerCursor(ethHwm, ETH_LOOKBACK_BLOCKS);
+    this.sorobanCursor = new LedgerCursor(sorobanHwm, SOROBAN_LOOKBACK_LEDGERS);
+    this.solanaCursor = new LedgerCursor(solanaHwm, SOLANA_LOOKBACK_SLOTS);
+    this.cursorsReady = true;
+    this.log.info(
+      { ethHwm, sorobanHwm, solanaHwm },
+      "reconciler: cursors initialised from DB",
+    );
+  }
+
+  /**
+   * #734: record an event's idempotence key in the durable ledger.
+   *
+   * `seenSet.checkAndMark` is a per-run fast path only — it is cleared at the
+   * start of every run and lost entirely on restart, so a replayed window used
+   * to re-derive and re-apply every event it contained.  This claims the same
+   * key in the `processed_events` table, whose PRIMARY KEY is the actual
+   * uniqueness guarantee and does survive a restart.
+   *
+   * Returns true when this call inserted the key and false when a prior run
+   * already recorded it. Most chain replay paths use this as a pre-write
+   * dedup guard. Solana records the key after reconciling order state, so a
+   * failed persistence attempt remains eligible for a later replay.
+   */
+  private async claimEvent(
+    key: string,
+    chain: "ethereum" | "soroban" | "solana",
+    eventType: "OrderCreated" | "OrderClaimed" | "OrderRefunded"
+  ): Promise<boolean> {
+    const claimed = await this.orders.claimEvent({ eventKey: key, chain, eventType });
+    if (!claimed) {
+      reconciliationDuplicatesSkipped.inc();
+      this.log.debug({ key, chain, eventType }, "reconciler: event already processed in a previous run — skipping");
+    }
+    return claimed;
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -270,6 +344,7 @@ export class Reconciler {
     }
 
     // Update run-level status.
+    const recovery = this.buildRecoveryReport();
     this.status = {
       lastRunAt: Date.now(),
       lastRunOk: runOk,
@@ -279,7 +354,9 @@ export class Reconciler {
         soroban: this.sorobanCursor?.getHwm() ?? 0,
         solana: this.solanaCursor?.getHwm() ?? 0,
       },
+      recovery,
     };
+    this.logRecoverySummary(recovery);
 
     if (runOk) {
       reconciliationRuns.inc({ result: "success" });
@@ -433,6 +510,7 @@ export class Reconciler {
     const latest = await this.ethClient.getBlockNumber();
     const fromBlock = await this.computeEthFromBlock(latest);
 
+    const toBlock = latest;
     const [createdLogs, claimedLogs, refundedLogs] = await Promise.all([
       this.ethClient.getLogs({ address, event: ORDER_CREATED, fromBlock, toBlock }),
       this.ethClient.getLogs({ address, event: ORDER_CLAIMED, fromBlock, toBlock }),
@@ -469,6 +547,8 @@ export class Reconciler {
         this.log.debug({ key, kind: conflict.kind }, "reconciler: ETH OrderCreated dedup skip");
         continue;
       }
+
+      if (!(await this.claimEvent(key, "ethereum", "OrderCreated"))) continue;
 
       try {
         const order = await this.orders.findByHashlock(args.hashlock);
@@ -536,6 +616,7 @@ export class Reconciler {
         }
 
         await this.orders.recordSrcLock({
+          actor: "reconciler",
           publicId: order.publicId,
           orderId: args.orderId.toString(),
           txHash: log.transactionHash ?? "0x",
@@ -581,6 +662,8 @@ export class Reconciler {
 
       const conflict = this.seenSet.checkAndMark("ethereum", "OrderClaimed", key, semKey);
       if (conflict) continue;
+
+      if (!(await this.claimEvent(key, "ethereum", "OrderClaimed"))) continue;
 
       try {
         const order = await this.orders.findBySrcOrderId("ethereum", args.orderId.toString());
@@ -632,7 +715,7 @@ export class Reconciler {
           continue;
         }
 
-        await this.orders.recordSecret(order.publicId, args.preimage, log.transactionHash ?? "0x");
+        await this.orders.recordSecret(order.publicId, args.preimage, log.transactionHash ?? "0x", null, "reconciler");
         await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
         n++;
         reconciliationRestartRecoveryEvents.inc({ chain: "ethereum" });
@@ -668,6 +751,8 @@ export class Reconciler {
 
       const conflict = this.seenSet.checkAndMark("ethereum", "OrderRefunded", key, semKey);
       if (conflict) continue;
+
+      if (!(await this.claimEvent(key, "ethereum", "OrderRefunded"))) continue;
 
       try {
         const order = await this.orders.findBySrcOrderId("ethereum", args.orderId.toString());
@@ -716,7 +801,7 @@ export class Reconciler {
           continue;
         }
 
-        await this.orders.markStatus(order.publicId, "refunded");
+        await this.orders.markStatus(order.publicId, "refunded", "reconciler");
         await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
         n++;
         reconciliationRestartRecoveryEvents.inc({ chain: "ethereum" });
@@ -771,16 +856,13 @@ export class Reconciler {
 
     let replayed = 0;
     let eventIndex = 0;
-
-    try {
-      const latest = await this.sorobanServer.getLatestLedger();
-      const startLedger = await this.computeSorobanFromLedger(latest.sequence);
+    let pageCursor: string | undefined = this.sorobanRpcCursor;
 
     try {
       do {
         const events = await this.sorobanServer.getEvents({
           filters: [{ type: "contract", contractIds: [contractId] }],
-          startLedger: pageCursor ? undefined : startLedger,
+          startLedger: pageCursor ? undefined : decision.fromBlock,
           cursor: pageCursor,
           limit: 200,
         });
@@ -789,11 +871,12 @@ export class Reconciler {
           replayed += await this.replaySorobanEvent(ev, eventIndex++);
         }
 
-        cursor = events.cursor ?? undefined;
+        pageCursor = events.cursor ?? undefined;
+        this.sorobanRpcCursor = pageCursor;
         if (events.events.length < 200) break;
-      } while (cursor);
+      } while (pageCursor);
 
-      await this.orders.setChainCursor("stellar", latest.sequence);
+      await this.orders.setChainCursor("stellar", tip);
     } catch (err) {
       // Stale page cursor — clear it so the next run re-scans from HWM.
       this.sorobanRpcCursor = undefined;
@@ -805,7 +888,7 @@ export class Reconciler {
     return replayed;
   }
 
-  private async replaySorobanEvent(ev: any): Promise<number> {
+  private async replaySorobanEvent(ev: any, eventIndex: number = 0): Promise<number> {
     const result = decodeHtlcEvent(ev.topic ?? [], ev.value);
 
     if (isMalformedEvent(result)) {
@@ -819,6 +902,19 @@ export class Reconciler {
     }
 
     if (result === null) return 0;
+
+    // Dedup: skip events already seen in this reconciler run.
+    const sorobanEventTypeMap = { created: "OrderCreated", claimed: "OrderClaimed", refunded: "OrderRefunded" } as const;
+    const sorobanEvType = sorobanEventTypeMap[result.kind];
+    const sorobanIdentifier = result.kind === "created" ? result.hashlock : result.orderId.toString();
+    const sorobanDedupKey = sorobanEventKey(sorobanEvType, ev.txHash ?? "", ev.ledger ?? 0, eventIndex);
+    const sorobanSemKey = semanticKey("soroban", sorobanEvType, sorobanIdentifier);
+    if (this.seenSet.checkAndMark("soroban", sorobanEvType, sorobanDedupKey, sorobanSemKey)) {
+      reconciliationDuplicatesSkipped.inc();
+      return 0;
+    }
+
+    if (!(await this.claimEvent(sorobanDedupKey, "soroban", sorobanEvType))) return 0;
 
     if (result.kind === "created") {
       try {
@@ -848,6 +944,7 @@ export class Reconciler {
           return 0;
         }
         await this.orders.recordSrcLock({
+          actor: "reconciler",
           publicId: order.publicId,
           orderId: result.orderId.toString(),
           txHash: ev.txHash,
@@ -904,7 +1001,7 @@ export class Reconciler {
           await this.advanceOrderCursor(order.publicId, "stellar", ev.ledger);
           return 0;
         }
-        await this.orders.recordSecret(order.publicId, result.preimage, ev.txHash);
+        await this.orders.recordSecret(order.publicId, result.preimage, ev.txHash, null, "reconciler");
         await this.advanceOrderCursor(order.publicId, "stellar", ev.ledger);
         reconciliationRestartRecoveryEvents.inc({ chain: "stellar" });
         this.log.info({ orderId: result.orderId.toString() }, "reconciler: replayed Soroban claimed");
@@ -952,7 +1049,7 @@ export class Reconciler {
           }
           return 0;
         }
-        await this.orders.markStatus(order.publicId, "refunded");
+        await this.orders.markStatus(order.publicId, "refunded", "reconciler");
         await this.advanceOrderCursor(order.publicId, "stellar", ev.ledger);
         reconciliationRestartRecoveryEvents.inc({ chain: "stellar" });
         this.log.info({ orderId: result.orderId.toString() }, "reconciler: replayed Soroban refunded");
@@ -1022,7 +1119,15 @@ export class Reconciler {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 0,
           });
-          if (!tx?.meta?.logMessages) continue;
+          if (!tx?.meta) continue;
+          if (tx.meta.err) {
+            this.log.warn(
+              { sig: sigInfo.signature, err: tx.meta.err },
+              "reconciler: Solana transaction failed on-chain; skipping event replay"
+            );
+            continue;
+          }
+          if (!tx.meta.logMessages) continue;
           replayed += await this.replaySolanaLogs(
             sigInfo.signature,
             tx.meta.logMessages,
@@ -1078,6 +1183,7 @@ export class Reconciler {
         }
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
+          await this.claimEvent(key, "solana", "OrderCreated");
           return 0;
         }
         const decision = decideDispatch({
@@ -1091,20 +1197,25 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "solana", slot);
+          await this.claimEvent(key, "solana", "OrderCreated");
           if (isTerminal(order.status)) {
             reconciliationConflicts.inc({ chain: "solana", conflict_type: "chain_ahead" });
           }
           return 0;
         }
-        await this.orders.recordSrcLock({ publicId: order.publicId, orderId, txHash: sig, blockNumber: slot, timelock: timelock ?? 0 });
+        await this.orders.recordSrcLock({ actor: "reconciler", publicId: order.publicId, orderId, txHash: sig, blockNumber: slot, timelock: timelock ?? 0 });
         await this.advanceOrderCursor(order.publicId, "solana", slot);
+        await this.claimEvent(key, "solana", "OrderCreated");
         reconciliationRestartRecoveryEvents.inc({ chain: "solana" });
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot record") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "already_applied" });
           const order = hashlock ? await this.orders.findByHashlock(hashlock) : null;
-          if (order) await this.advanceOrderCursor(order.publicId, "solana", slot);
+          if (order) {
+            await this.advanceOrderCursor(order.publicId, "solana", slot);
+            await this.claimEvent(key, "solana", "OrderCreated");
+          }
           return 0;
         }
         this.log.warn({ err, hashlock }, "reconciler: Solana OrderCreated replay error");
@@ -1129,6 +1240,7 @@ export class Reconciler {
         }
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
+          await this.claimEvent(key, "solana", "OrderClaimed");
           return 0;
         }
         const decision = decideDispatch({
@@ -1142,6 +1254,7 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "solana", slot);
+          await this.claimEvent(key, "solana", "OrderClaimed");
           return 0;
         }
         if (!validatePreimage(preimage, order.hashlock)) {
@@ -1149,17 +1262,22 @@ export class Reconciler {
           this.log.warn({ orderId, publicId: order.publicId }, "reconciler: Solana OrderClaimed preimage/hashlock mismatch — manual review required");
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "preimage_mismatch" });
           await this.advanceOrderCursor(order.publicId, "solana", slot);
+          await this.claimEvent(key, "solana", "OrderClaimed");
           return 0;
         }
-        await this.orders.recordSecret(order.publicId, preimage, sig);
+        await this.orders.recordSecret(order.publicId, preimage, sig, null, "reconciler");
         await this.advanceOrderCursor(order.publicId, "solana", slot);
+        await this.claimEvent(key, "solana", "OrderClaimed");
         reconciliationRestartRecoveryEvents.inc({ chain: "solana" });
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot record") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "already_applied" });
           const order = orderId ? await this.orders.findBySrcOrderId("solana", orderId) : null;
-          if (order) await this.advanceOrderCursor(order.publicId, "solana", slot);
+          if (order) {
+            await this.advanceOrderCursor(order.publicId, "solana", slot);
+            await this.claimEvent(key, "solana", "OrderClaimed");
+          }
           return 0;
         }
         this.log.warn({ err }, "reconciler: Solana OrderClaimed replay error");
@@ -1184,6 +1302,7 @@ export class Reconciler {
         }
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
+          await this.claimEvent(key, "solana", "OrderRefunded");
           return 0;
         }
         const decision = decideDispatch({
@@ -1197,21 +1316,26 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "solana", slot);
+          await this.claimEvent(key, "solana", "OrderRefunded");
           if (order.status === "completed") {
             reconciliationConflicts.inc({ chain: "solana", conflict_type: "terminal_clash" });
             this.log.error({ publicId: order.publicId, orderId }, "reconciler: Solana OrderRefunded conflicts with DB status=completed — manual review required");
           }
           return 0;
         }
-        await this.orders.markStatus(order.publicId, "refunded");
+        await this.orders.markStatus(order.publicId, "refunded", "reconciler");
         await this.advanceOrderCursor(order.publicId, "solana", slot);
+        await this.claimEvent(key, "solana", "OrderRefunded");
         reconciliationRestartRecoveryEvents.inc({ chain: "solana" });
         return 1;
       } catch (err: any) {
         if (err?.message?.includes("cannot transition") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "already_applied" });
           const order = orderId ? await this.orders.findBySrcOrderId("solana", orderId) : null;
-          if (order) await this.advanceOrderCursor(order.publicId, "solana", slot);
+          if (order) {
+            await this.advanceOrderCursor(order.publicId, "solana", slot);
+            await this.claimEvent(key, "solana", "OrderRefunded");
+          }
           return 0;
         }
         this.log.warn({ err }, "reconciler: Solana OrderRefunded replay error");
@@ -1220,5 +1344,73 @@ export class Reconciler {
     }
 
     return 0;
+  }
+
+  /**
+   * Build the operator-facing recovery report for the run that just finished.
+   *
+   * Uses each replay decision's effective `toBlock` as the tip and recomputes
+   * the scanner's actual from/to per chain, so the report is consistent with
+   * what was scanned even after a lookback fallback or forced re-sync.
+   */
+  private buildRecoveryReport(): RecoveryReport {
+    const hwmByChain: Record<string, number> = {
+      ethereum: this.ethCursor?.getHwm() ?? 0,
+      stellar: this.sorobanCursor?.getHwm() ?? 0,
+      solana: this.solanaCursor?.getHwm() ?? 0,
+    };
+
+    const inputs: ChainRecoveryInput[] = this.policy.getDecisions().map((decision) => ({
+      chain: decision.chain as Chain,
+      hwm: hwmByChain[decision.chain] ?? 0,
+      tip: decision.toBlock,
+      fromBlock: decision.fromBlock,
+    }));
+
+    return buildRecoveryReport(inputs);
+  }
+
+  /**
+   * Log the recovery replay summary with an appropriate level per overall
+   * verdict: info while catching up, warn when at risk, error on forced
+   * re-sync (events may have been permanently missed).
+   */
+  private logRecoverySummary(recovery: RecoveryReport): void {
+    if (recovery.chainSummaries.length === 0) return;
+    const message = formatRecoveryReport(recovery);
+    switch (recovery.overall) {
+      case "intervention_required":
+        this.log.error({ recovery: recovery.chainSummaries, overall: recovery.overall }, message);
+        break;
+      case "at_risk":
+        this.log.warn({ recovery: recovery.chainSummaries, overall: recovery.overall }, message);
+        break;
+      case "recovering":
+        this.log.info({ recovery: recovery.chainSummaries, overall: recovery.overall }, message);
+        break;
+      default:
+        break; // healthy — nothing to flag; regular run logs cover it.
+    }
+  }
+
+  private emitPolicyMetrics(): void {
+    for (const decision of this.policy.getDecisions()) {
+      reconciliationGapBlocks.set({ chain: decision.chain }, decision.toBlock - decision.fromBlock);
+      reconciliationLookbackCoverage.set({ chain: decision.chain }, decision.windowSize);
+
+      if (decision.forcedHistoricalResync) {
+        this.log.warn(
+          {
+            chain: decision.chain,
+            fromBlock: decision.fromBlock,
+            toBlock: decision.toBlock,
+            gapSeverity: decision.gapSeverity,
+            lookbackExceeded: decision.lookbackExceeded,
+          },
+          "reconciler: forced historical re-sync triggered — gap exceeds 3× lookback window; events before the window may be permanently missed"
+        );
+        reconciliationConflicts.inc({ chain: decision.chain, conflict_type: "forced_historical_resync" });
+      }
+    }
   }
 }

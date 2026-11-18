@@ -402,13 +402,13 @@ describe('Gas Regression Suite', () => {
 
         // Slash the resolver
         const slashAmount = ethers.parseEther('1');
-        const tx = await registry.connect(owner).slash(resolver.address, slashAmount);
+        const tx = await registry.connect(owner).slash(resolver.address, slashAmount, 0n);
 
         const gas = await measureGas(tx);
         assertGasBelow(gas, GAS_THRESHOLDS.slash, 'slash');
       });
 
-      it('slash with amount > stake should not regress', async () => {
+      it('slash full stake should not regress', async () => {
         const [owner, resolver] = await ethers.getSigners();
         const { registry, stakeToken } = await deployResolverRegistry();
 
@@ -416,12 +416,11 @@ describe('Gas Regression Suite', () => {
         await stakeToken.connect(resolver).approve(await registry.getAddress(), MIN_STAKE);
         await registry.connect(resolver).register(MIN_STAKE);
 
-        // Slash with amount exceeding stake
-        const excessiveSlashAmount = MIN_STAKE * 2n;
-        const tx = await registry.connect(owner).slash(resolver.address, excessiveSlashAmount);
+        // Slash the full stake (contract rejects amounts exceeding the stake)
+        const tx = await registry.connect(owner).slash(resolver.address, MIN_STAKE, 0n);
 
         const gas = await measureGas(tx);
-        assertGasBelow(gas, GAS_THRESHOLDS.slash, 'slash(excessive)');
+        assertGasBelow(gas, GAS_THRESHOLDS.slash, 'slash(full-stake)');
       });
     });
   });

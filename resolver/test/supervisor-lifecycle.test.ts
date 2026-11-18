@@ -277,6 +277,48 @@ describe("Supervisor — isStopped (deprecated accessor)", () => {
   });
 });
 
+// ── Shutdown during listener startup (race) ───────────────────────────────────
+
+describe("Supervisor — shutdown during listener startup", () => {
+  it("shutdown wins the startup race: late listener is stopped, lifecycle stays terminal", async () => {
+    const supervisor = makeSupervisor();
+
+    // Deferred startup: the mock connection completes only when released.
+    let resolveStart!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      resolveStart = resolve;
+    });
+    const start = vi.fn().mockImplementation(() => startGate);
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    const runPromise = supervisor.run({ start, stop });
+
+    // Let run() enter the pending start().
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Shutdown arrives while the listener is still connecting.
+    supervisor.stop();
+    expect(supervisor.state).toBe("stopping");
+
+    // The late connection now completes — after shutdown had begun.
+    resolveStart();
+    await runPromise;
+
+    // The late-created subscription is torn down, not leaked.
+    expect(stop).toHaveBeenCalledTimes(1);
+    // Lifecycle remains terminal: never (re)marked running after shutdown.
+    expect(supervisor.state).toBe("stopped");
+
+    // Repeated stop remains safe.
+    expect(() => {
+      supervisor.stop();
+      supervisor.stop();
+    }).not.toThrow();
+    expect(supervisor.state).toBe("stopped");
+  });
+});
+
 // ── Health endpoint state reflection ─────────────────────────────────────────
 
 describe("resolver health endpoints — supervisor state", () => {

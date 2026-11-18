@@ -31,7 +31,7 @@ ehthumbs.db
 Thumbs.db
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -45,36 +45,26 @@ pids
 *.seed
 *.pid.lock
 
-# Coverage directory used by tools like istanbul
+# Coverage
 coverage/
+.coverage/
 *.lcov
-
-# nyc test coverage
 .nyc_output
 
-# Solidity
+# Solidity / Hardhat / Foundry
 artifacts/
 cache/
 forge-cache/
 typechain-types/
-
-# Hardhat
 artifacts-zk/
 cache-zk/
 
-# Frontend specific
-# Vite
+# Vite / Frontend
 .vite/
-
-# React
 .eslintcache
 
 # Stellar
 .stellar/
-
-# Relayer
-logs/
-temp/
 
 # Database files
 *.db
@@ -85,23 +75,33 @@ temp/
 wafflefinance.db
 coordinator/oversync.db
 
-# Package manager lockfiles (keep only one)
+# Package manager lockfiles (keep only pnpm)
 package-lock.json
 yarn.lock
 
-# Keep pnpm lockfile
-# pnpm-lock.yaml
+# TypeScript build info
+*.tsbuildinfo
 
-# Testing
-.coverage/
-junit.xml
-# Vitest / Jest snapshot directories and files
+# Test snapshots and artifacts
 **/__snapshots__/
-*.snap
-# Vitest HTML report and blob report outputs
+**/*.snap
+*.snap.new
+**/snapshots/
+**/test-snapshots/
+**/test_snapshots/
+
+# Vitest / Jest cache and reports
+.vitest-cache/
+.jest-cache/
 html-report/
 blob-reports/
-.vitest-cache/
+junit.xml
+
+# Playwright / Cypress / E2E artifacts
+e2e-results/
+playwright-report/
+cypress/videos/
+cypress/screenshots/
 
 # Cursor stores (runtime state — not source)
 .cursor/
@@ -109,88 +109,6 @@ blob-reports/
 
 # Kiro agent workspace (local tooling state)
 .kilo/
-
-# Test snapshots (vitest, jest, snapbox, etc.)
-*.snap
-*.snap.new
-**/__snapshots__/
-**/snapshots/
-**/snapshots/*.snap.new
-**/test-snapshots/
-**/test_snapshots/
-
-# Vitest coverage
-coverage/
-
-# Playwright / Cypress / E2E artifacts
-e2e-results/
-playwright-report/
-cypress/videos/
-cypress/screenshots/
-
-# Misc
-*.tmp
-*.bak
-*.orig
-
-# Test snapshots (vitest, jest, snapbox, etc.)
-*.snap
-*.snap.new
-**/__snapshots__/
-**/snapshots/
-**/snapshots/*.snap.new
-**/test-snapshots/
-**/test_snapshots/
-
-# Vitest coverage
-coverage/
-
-# Playwright / Cypress / E2E artifacts
-e2e-results/
-playwright-report/
-cypress/videos/
-cypress/screenshots/
-
-# Misc
-*.tmp
-*.bak
-*.orig
-
-# Test snapshots
-**/__snapshots__/
-**/*.snap
-
-# Jest
-__snapshots__/
-*.snap
-
-# Test snapshots
-**/__snapshots__/
-*.snap
-
-# Vitest / Jest cache
-.vitest-cache/
-.jest-cache/
-
-# TypeScript build info
-*.tsbuildinfo
-
-# Miscellaneous
-.cache/
-.parcel-cache/
-.next/
-.nuxt/
-.vercel/
-.netlify/
-
-# Temporary folders
-tmp/
-temp/
-
-# Test snapshots and artifacts
-**/__snapshots__/
-**/*.snap
-proptest-regressions/
 
 # Rust
 target/
@@ -203,7 +121,36 @@ docker-compose.override.yml
 # Turbo
 .turbo/
 
-# Misc
+# Misc build/tool caches
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+.vercel/
+.netlify/
+tmp/
+temp/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Test snapshots
+**/__snapshots__/
+**/*.snap
+**/test-snapshots/
+
+# Local config files
+*.local
+# Test snapshots and artifacts
+**/__snapshots__/
+**/*.snap
+proptest-regressions/
+
+# Miscellaneous
 AGENTS.md
 .kilocode/
  

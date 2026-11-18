@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Clock, RefreshCw, ShieldCheck } from "lucide-react";
 import { createWalletClient, createPublicClient, custom, http, type Address } from "viem";
 import { mainnet, sepolia } from "viem/chains";
 import { makeEthereumHTLCClient } from "../../lib/sdk-context";
 import { isTestnet } from "../../config/networks";
 import { useNetworkMode } from "../../lib/useNetworkMode";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 /**
  * Two on-chain refund flavors are supported:
@@ -80,7 +81,22 @@ export function RefundDialog(props: RefundDialogProps) {
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const titleId = "refund-dialog-title";
+
+  // Trap focus inside this dialog while it is mounted.
+  useFocusTrap(containerRef, true);
+
   const networkState = useNetworkMode({ ethAddress: props.userAddress });
+
+  // Dismiss on Escape key.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose?.();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [props.onClose]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5_000);
@@ -166,11 +182,31 @@ export function RefundDialog(props: RefundDialogProps) {
 
   const explorer = isTestnet() ? "https://sepolia.etherscan.io" : "https://etherscan.io";
 
+  // Human-readable status for the aria-live status region.
+  const statusAnnouncement =
+    phase === "submitting" ? "Submitting refund transaction…" :
+    phase === "done"       ? "Refund submitted successfully." :
+    phase === "error"      ? `Refund failed: ${error ?? "unknown error"}` :
+    phase === "waiting"    ? `Refund not yet available. Time remaining: ${formatRemaining(remaining)}` :
+    phase === "ready"      ? "The timelock has expired. You can refund this order." :
+    "";
+
   return (
-    <div className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full">
+    <div
+      ref={containerRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="max-w-md rounded-2xl border border-cyan-200/20 bg-[#070b1c]/95 p-6 shadow-2xl shadow-black/55 backdrop-blur-2xl w-full"
+    >
+      {/* Hidden live region — announces phase changes to screen readers */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {statusAnnouncement}
+      </div>
+
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold text-white mb-1">Refund order</h2>
+          <h2 id={titleId} className="text-xl font-bold text-white mb-1">Refund order</h2>
           <p className="text-gray-400 text-sm">
             Refund is permissionless — your wallet calls the contract directly.
           </p>
@@ -178,8 +214,8 @@ export function RefundDialog(props: RefundDialogProps) {
         {props.onClose && (
           <button
             onClick={props.onClose}
-            className="text-gray-400 hover:text-white transition-colors text-sm"
-            aria-label="Close"
+            className="text-gray-400 hover:text-white transition-colors text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 rounded"
+            aria-label="Close refund dialog"
           >
             ✕
           </button>
@@ -203,7 +239,7 @@ export function RefundDialog(props: RefundDialogProps) {
 
       {phase === "waiting" && (
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
-          <Clock className="h-5 w-5 text-yellow-400" />
+          <Clock className="h-5 w-5 text-yellow-400" aria-hidden="true" />
           <div className="text-sm">
             <p className="text-yellow-300">Refund not yet available.</p>
             <p className="text-gray-400">Time remaining: {formatRemaining(remaining)}</p>
@@ -213,7 +249,7 @@ export function RefundDialog(props: RefundDialogProps) {
 
       {phase === "ready" && (
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 mb-4">
-          <ShieldCheck className="h-5 w-5 text-emerald-400" />
+          <ShieldCheck className="h-5 w-5 text-emerald-400" aria-hidden="true" />
           <p className="text-sm text-emerald-300">
             The timelock has expired. You can refund this order at any time.
           </p>
@@ -221,8 +257,11 @@ export function RefundDialog(props: RefundDialogProps) {
       )}
 
       {phase === "error" && error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4">
-          <AlertCircle className="h-5 w-5 text-red-400 mt-0.5" />
+        <div
+          role="alert"
+          className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-start gap-2 mb-4"
+        >
+          <AlertCircle className="h-5 w-5 text-red-400 mt-0.5" aria-hidden="true" />
           <div className="text-sm">
             <p className="text-red-300 font-medium">Refund failed</p>
             <p className="text-gray-400 break-all">{error}</p>
@@ -247,10 +286,10 @@ export function RefundDialog(props: RefundDialogProps) {
       <button
         onClick={handleRefund}
         disabled={(phase !== "ready" && phase !== "error") || networkState.hasAnyMismatch}
-        className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+        className="brand-cta flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
       >
-        {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" />}
-        {phase === "submitting" ? "Submitting refund..." : "Refund from contract"}
+        {phase === "submitting" && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
+        {phase === "submitting" ? "Submitting refund…" : "Refund from contract"}
       </button>
     </div>
   );

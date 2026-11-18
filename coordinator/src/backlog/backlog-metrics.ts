@@ -57,3 +57,26 @@ export const backlogDropped = new Counter({
   labelNames: ["priority"] as const,
   registers: [registry],
 });
+
+/**
+ * Jobs that were killed because they exceeded their configured timeout.
+ * A non-zero rate indicates stuck background jobs — investigate which job
+ * is timing out and why (RPC stall, DB lock, etc.).
+ */
+export const backlogJobTimeouts = new Counter({
+  name: "coordinator_backlog_job_timeouts_total",
+  help: "Jobs aborted because they exceeded the per-job timeout",
+  labelNames: ["priority", "name"] as const,
+  registers: [registry],
+});
+
+/**
+ * Whether the BacklogScheduler is currently in RESTRAINED pressure mode.
+ * 1 = restrained (queue depth exceeded threshold), 0 = normal.
+ * Operators can alert on this gauge to detect sustained overload.
+ */
+export const backlogPressureRestrained = new Gauge({
+  name: "coordinator_backlog_pressure_restrained",
+  help: "1 when the backlog pressure controller is in RESTRAINED mode, 0 when NORMAL",
+  registers: [registry],
+});

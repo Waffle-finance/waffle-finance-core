@@ -76,11 +76,19 @@ export interface CoordinatorPhasePresentation {
 
 // ── Raw coordinator → normalised OrderStatus ──────────────────────────────────
 
+/**
+ * Raw coordinator → normalised OrderStatus.
+ *
+ * This map mirrors the SDK's canonical `ORDER_STATUS_TO_DISPLAY`
+ * (`@wafflefinance/sdk/status-display`); the conformance suite
+ * (`statusConformance.test.ts`) pins it to that table so the presentation
+ * layer and the rest of the UI agree on what each coordinator atom means.
+ */
 const COORDINATOR_STATE_MAP: Record<string, OrderStatus> = {
   announced:       'pending',
   src_locked:      'pending',
-  dst_locked:      'pending',
-  secret_revealed: 'pending',
+  dst_locked:      'confirmed',
+  secret_revealed: 'confirmed',
   claim_pending:   'pending',
   processing:      'pending',
   pending:         'pending',
@@ -91,6 +99,7 @@ const COORDINATOR_STATE_MAP: Record<string, OrderStatus> = {
   expired:         'expired',
   timed_out:       'timed_out',
   refunded:        'refunded',
+  abandoned:       'cancelled',
 };
 
 /**
@@ -186,6 +195,14 @@ export function presentCoordinatorPhase(raw: string): CoordinatorPhasePresentati
         stepLabel: 'Cancelled',
         stepDescription:
           'This swap was cancelled before funds were locked on-chain.',
+        userAction: '',
+      };
+
+    case 'abandoned':
+      return {
+        stepLabel: 'Cancelled',
+        stepDescription:
+          'This swap was dropped because the source funds were never locked on-chain.',
         userAction: '',
       };
 

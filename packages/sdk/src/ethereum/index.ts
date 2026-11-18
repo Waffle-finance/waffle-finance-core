@@ -7,12 +7,15 @@ import {
 } from "viem";
 import { HTLC_ESCROW_ABI } from "./abi.js";
 import { escrowNativeValue } from "../shared-utils/index.js";
+import { validateEthereumAddress } from "../config-validation.js";
 
 export { HTLC_ESCROW_ABI } from "./abi.js";
 
 export interface EthereumHTLCClientOptions {
   /** Address of the deployed HTLCEscrow contract. */
   address: Address;
+  /** Expected EVM chain id. Validated against publicClient.chain.id when available. */
+  chainId?: number;
   publicClient: PublicClient;
   /** Optional wallet client. Read-only operations don't need it. */
   walletClient?: WalletClient;
@@ -62,7 +65,13 @@ export class EthereumHTLCClient {
   private readonly walletClient?: WalletClient;
 
   constructor(opts: EthereumHTLCClientOptions) {
-    this.address = opts.address;
+    const actualChainId = opts.publicClient.chain?.id;
+    if (opts.chainId !== undefined && actualChainId !== undefined && opts.chainId !== actualChainId) {
+      throw new Error(
+        `Invalid SDK configuration: chainId expected ${opts.chainId}, publicClient is connected to ${actualChainId}`
+      );
+    }
+    this.address = validateEthereumAddress(opts.address, "ethereum.address");
     this.publicClient = opts.publicClient;
     this.walletClient = opts.walletClient;
   }

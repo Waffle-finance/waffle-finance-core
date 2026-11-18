@@ -299,8 +299,28 @@ export function toBigIntSafe(value: bigint | number | string, field: string): bi
 /** Poll interval when none is supplied. Registration/stake status changes far less often than order events, so this is deliberately much coarser than the chain listeners' poll interval. */
 export const DEFAULT_STATUS_POLL_INTERVAL_MS = 60_000;
 
+/**
+ * Age after which a cached registry status is considered stale.
+ * Defaults to twice the poll interval: one missed poll is tolerated, two
+ * consecutive misses (or an equivalent time span without a successful read)
+ * mark the cached value stale. Staleness never changes readiness — it only
+ * tells operators/UI whether the last-known value is still fresh.
+ */
+export const DEFAULT_STATUS_STALE_AFTER_MS = 2 * DEFAULT_STATUS_POLL_INTERVAL_MS;
+
+export interface RegistryChainStatus {
+  chain: RegistryChain;
+  state: ResolverLifecycleState;
+  /** Epoch ms of the last successful probe for this chain, or null if never read. */
+  lastUpdatedAt: number | null;
+  /** True when no successful read has occurred within `staleAfterMs`. */
+  stale: boolean;
+}
+
 export interface ResolverStatusMonitorOptions {
   intervalMs?: number;
+  /** Age in ms after which cached status counts as stale. Defaults to `DEFAULT_STATUS_STALE_AFTER_MS`. */
+  staleAfterMs?: number;
   /** Overrideable probes — primarily for testing without live RPC (mirrors validation.ts's probe injection). */
   evmProbe?: RegistryProbe;
   sorobanProbe?: RegistryProbe;
@@ -328,6 +348,8 @@ export class ResolverStatusMonitor {
   private readonly evmProbe: RegistryProbe;
   private readonly sorobanProbe: RegistryProbe;
   private readonly lastState = new Map<RegistryChain, ResolverLifecycleState>();
+  private readonly lastUpdatedAt = new Map<RegistryChain, number>();
+  private readonly staleAfterMs: number;
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = true;
 
@@ -335,6 +357,7 @@ export class ResolverStatusMonitor {
     this.cfg = cfg;
     this.log = log.child({ component: "ResolverStatusMonitor" });
     this.intervalMs = options.intervalMs ?? DEFAULT_STATUS_POLL_INTERVAL_MS;
+    this.staleAfterMs = options.staleAfterMs ?? DEFAULT_STATUS_STALE_AFTER_MS;
     this.evmProbe = options.evmProbe ?? fetchEvmRegistryInfo;
     this.sorobanProbe = options.sorobanProbe ?? fetchSorobanRegistryInfo;
   }
@@ -374,6 +397,40 @@ export class ResolverStatusMonitor {
     return this.lastState.get(chain);
   }
 
+  /** Epoch ms of the last successful probe for a chain, or null if never read. */
+  getLastUpdatedAt(chain: RegistryChain): number | null {
+    return this.lastUpdatedAt.get(chain) ?? null;
+  }
+
+  /**
+   * Whether the cached status for a chain is stale: never successfully read,
+   * or the last successful read is older than `staleAfterMs`. A failed
+   * refresh preserves the last-known state but still marks it stale once it
+   * ages out — staleness is reported separately so health never depends on an
+   * old successful read.
+   */
+  isStale(chain: RegistryChain, now: number = Date.now()): boolean {
+    if (!this.lastState.has(chain)) return true;
+    const updatedAt = this.lastUpdatedAt.get(chain);
+    if (updatedAt == null) return true;
+    return now - updatedAt > this.staleAfterMs;
+  }
+
+  /** Freshness-annotated snapshot of every chain with a cached status. */
+  getStatusSnapshot(now: number = Date.now()): RegistryChainStatus[] {
+    const out: RegistryChainStatus[] = [];
+    for (const [chain, state] of this.lastState) {
+      const lastUpdatedAt = this.lastUpdatedAt.get(chain) ?? null;
+      out.push({
+        chain,
+        state,
+        lastUpdatedAt,
+        stale: lastUpdatedAt == null || now - lastUpdatedAt > this.staleAfterMs,
+      });
+    }
+    return out;
+  }
+
   /** True unless a currently-tracked chain is in a non-ready state. Chains never probed (not configured) don't block readiness. */
   isReady(): boolean {
     for (const state of this.lastState.values()) {
@@ -388,6 +445,8 @@ export class ResolverStatusMonitor {
       info = await probe(this.cfg, this.log);
     } catch (err) {
       this.log.warn({ chain, err }, "failed to fetch resolver registry status");
+      // Preserve last-known state and its timestamp: a failed refresh must
+      // not erase useful data nor reset the freshness clock.
       return;
     }
     if (info === null) return;
@@ -395,6 +454,7 @@ export class ResolverStatusMonitor {
     const state = deriveLifecycleState(info);
     const previous = this.lastState.get(chain);
     this.lastState.set(chain, state);
+    this.lastUpdatedAt.set(chain, Date.now());
 
     registrationInfo.set({ chain }, state === "active" ? 1 : 0);
     for (const s of ALL_LIFECYCLE_STATES) {

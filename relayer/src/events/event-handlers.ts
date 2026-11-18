@@ -7,6 +7,9 @@ import { EventEmitter } from 'events';
 import { OrdersService } from './orders.js';
 import ProgressiveFillManager from './partial-fills.js';
 import { sanitizeForLog } from '../utils/sanitize-for-log.js';
+import { getLogger } from '../logger.js';
+
+const log = getLogger().child({ component: 'event-handlers' });
 
 // 1inch Fusion+ compliant event types
 export enum EventType {
@@ -284,7 +287,7 @@ export class FusionEventManager extends EventEmitter {
     };
 
     this.eventListeners.set(id, fullListener);
-    console.log(`📡 Event listener registered: ${id} for ${Array.from(listener.eventTypes).join(', ')}`);
+    log.info({ listenerId: id, eventTypes: Array.from(listener.eventTypes) }, 'event listener registered');
     return id;
   }
 
@@ -294,7 +297,7 @@ export class FusionEventManager extends EventEmitter {
   removeEventListener(id: string): boolean {
     const removed = this.eventListeners.delete(id);
     if (removed) {
-      console.log(`📡 Event listener removed: ${id}`);
+      log.info({ listenerId: id }, 'event listener removed');
     }
     return removed;
   }
@@ -313,8 +316,7 @@ export class FusionEventManager extends EventEmitter {
     }
 
     if (this.processedEventKeys.has(idempotencyKey)) {
-      const hashTag = metadata.orderHash ? ` orderHash=${metadata.orderHash}` : '';
-      console.log(`📡${hashTag} Duplicate event ignored: ${eventType}`);
+      log.debug({ orderHash: metadata.orderHash, eventType }, 'duplicate event ignored');
       return;
     }
     
@@ -349,14 +351,13 @@ export class FusionEventManager extends EventEmitter {
           listener.lastNotified = Date.now();
           notifiedCount++;
         } catch (error) {
-          const hashTag = eventMessage.metadata.orderHash ? ` orderHash=${eventMessage.metadata.orderHash}` : '';
-          console.error(`❌${hashTag} Error notifying listener ${listener.id}:`, sanitizeForLog(error));
+          log.error({ listenerId: listener.id, orderHash: eventMessage.metadata.orderHash, err: sanitizeForLog(error) }, 'error notifying listener');
         }
       }
     });
 
     const hashTag = metadata.orderHash ? ` orderHash=${metadata.orderHash}` : '';
-    console.log(`📡${hashTag} Event ${eventType} broadcasted to ${notifiedCount} listeners`);
+    log.info({ orderHash: metadata.orderHash, eventType, listenerCount: notifiedCount }, 'event broadcasted');
 
     // Also emit through EventEmitter for internal use
     this.emit(eventType, eventMessage);
@@ -447,7 +448,7 @@ export class FusionEventManager extends EventEmitter {
    * Trigger test events for development
    */
   triggerTestEvents(orderHash: string): void {
-    console.log(`🧪 orderHash=${orderHash} Triggering test events for order: ${orderHash}`);
+    log.info({ orderHash }, 'triggering test events');
 
     // Order created
     this.emitEvent(EventType.OrderCreated, {

@@ -2,13 +2,14 @@
 /**
  * Retry utilities for coordinator startup and runtime dependency checks.
  *
- * Design goals:
- *  - Distinguish fatal configuration errors from transient service outages.
- *  - Provide structured logging hooks so callers can emit context-rich
- *    log entries rather than raw console output.
- *  - Support a `shouldRetry` predicate so callers can escalate certain
- *    errors to fatal without swallowing them in the retry loop.
+ * Re-exports the shared retry implementation from @wafflefinance/sdk with
+ * coordinator-specific policies and the FatalStartupError class.
  */
+
+export {
+  retryAsync as retryAsyncBase,
+  type RetryPolicy,
+} from "@wafflefinance/sdk";
 
 // ── FatalStartupError ────────────────────────────────────────────────────────
 
@@ -70,59 +71,37 @@ export async function retryAsync<T>(
   opts: RetryOptions = {}
 ): Promise<T> {
   const {
-    maxAttempts = 5,
-    baseDelayMs = 500,
-    maxDelayMs = 30_000,
-    jitterMs = 200,
-    shouldRetry,
+    shouldRetry: userShouldRetry,
     onRetry,
+    ...restOpts
   } = opts;
 
-  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
-    throw new RangeError(`maxAttempts must be a positive integer, got ${maxAttempts}`);
-  }
-
-  if (baseDelayMs < 0) {
-    throw new RangeError(`baseDelayMs must be non-negative, got ${baseDelayMs}`);
-  }
-
-  if (maxDelayMs < 0) {
-    throw new RangeError(`maxDelayMs must be non-negative, got ${maxDelayMs}`);
-  }
-
-  if (jitterMs < 0) {
-    throw new RangeError(`jitterMs must be non-negative, got ${jitterMs}`);
-  }
-
-  let attempt = 0;
-
-  while (true) {
-    try {
-      return await fn();
-    } catch (err) {
-      // FatalStartupError is never retried — propagate immediately.
-      if (err instanceof FatalStartupError) {
-        throw err;
-      }
-
-      // Caller-supplied predicate can mark any error as non-retryable.
-      if (shouldRetry && !shouldRetry(err)) {
-        throw err;
-      }
-
-      attempt++;
-
-      if (attempt >= maxAttempts) {
-        throw err;
-      }
-
-      const expBackoff = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
-      const jitter = Math.floor(Math.random() * jitterMs);
-      const delayMs = expBackoff + jitter;
-
-      onRetry?.({ attempt, maxAttempts, delayMs, err });
-
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  // Wrap shouldRetry to check for FatalStartupError first
+  const shouldRetry = (err: unknown, attempt: number): boolean => {
+    // FatalStartupError is never retried — propagate immediately.
+    if (err instanceof FatalStartupError) {
+      return false;
     }
-  }
+
+    // Caller-supplied predicate can mark any error as non-retryable.
+    if (userShouldRetry && !userShouldRetry(err)) {
+      return false;
+    }
+
+    return true;
+  };
+
+  return retryAsyncBase(fn, {
+    ...restOpts,
+    shouldRetry,
+    onRetry: onRetry
+      ? ({ attempt, delayMs, err }) =>
+          onRetry({
+            attempt,
+            maxAttempts: opts.maxAttempts ?? 5,
+            delayMs,
+            err,
+          })
+      : undefined,
+  });
 }

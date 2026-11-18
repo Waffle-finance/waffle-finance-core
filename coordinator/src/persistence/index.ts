@@ -9,3 +9,8 @@ export type {
   SorobanCheckpoint,
   SorobanRecoveryMarker,
 } from './orders-repo.js';
+
+// ── Kysely ORM exports (issue #479) ──────────────────────────────────────────
+export { createKyselyDb, KyselyMigrationRunner } from './kysely-db.js';
+export { KyselyOrdersRepository } from './orders-repo-kysely.js';
+export type { CoordinatorDatabase, KyselyCoordinatorDb } from './schema-types.js';

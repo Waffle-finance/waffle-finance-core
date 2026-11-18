@@ -61,7 +61,8 @@ describe("StaleCleanupService", () => {
 
     const updated = await repo.findByPublicId(order.publicId);
     expect(updated!.archivedAt).not.toBeNull();
-    expect(updated!.status).toBe("announced"); // status unchanged
+    expect(updated!.status).toBe("abandoned");
+    expect(updated!.cancellationReason).toBe("stale:no_src_lock");
   });
 
   it("does not archive orders younger than the retention window", async () => {
@@ -175,5 +176,121 @@ describe("StaleCleanupService", () => {
 
     expect(runsAfter).toBe(runsBefore + 1);
     expect(archivedAfter).toBe(archivedBefore + 1);
+  });
+
+  it("publishes the stale-order backlog gauge per direction", async () => {
+    const { staleCleanupBacklog } = await import("../src/metrics.js");
+
+    const repo = await freshRepo();
+    // 3 stale eth->xlm orders and 2 stale xlm->eth orders.
+    for (let i = 0; i < 3; i++) {
+      const order = await repo.announce({
+        ...BASE_ORDER,
+        hashlock: "0x" + `c${i}`.repeat(32),
+      });
+      await backdateOrder(repo, order.publicId, 31 * 24 * 60 * 60);
+    }
+    for (let i = 0; i < 2; i++) {
+      const order = await repo.announce({
+        ...BASE_ORDER,
+        direction: "xlm_to_eth",
+        srcChain: "stellar",
+        dstChain: "ethereum",
+        hashlock: "0x" + `d${i}`.repeat(32),
+      });
+      await backdateOrder(repo, order.publicId, 31 * 24 * 60 * 60);
+    }
+
+    const svc = new StaleCleanupService(repo, nullLog, 30, 100);
+    await svc.run();
+
+    const values = (await staleCleanupBacklog.get()).values;
+    const ethToXlm = values.find((v) => v.labels.direction === "eth_to_xlm")?.value ?? 0;
+    const xlmToEth = values.find((v) => v.labels.direction === "xlm_to_eth")?.value ?? 0;
+    expect(ethToXlm).toBe(3);
+    expect(xlmToEth).toBe(2);
+  });
+
+  it("publishes the remaining-backlog gauge when the batch size truncates the run", async () => {
+    const { staleCleanupRemaining } = await import("../src/metrics.js");
+
+    const repo = await freshRepo();
+    for (let i = 0; i < 5; i++) {
+      const order = await repo.announce({
+        ...BASE_ORDER,
+        hashlock: "0x" + `e${i}`.repeat(32),
+      });
+      await backdateOrder(repo, order.publicId, 31 * 24 * 60 * 60);
+    }
+
+    // batchSize = 3 → 3 archived, 2 left for the next run.
+    const svc = new StaleCleanupService(repo, nullLog, 30, 3);
+    const result = await svc.run();
+    expect(result.archivedCount).toBe(3);
+
+    const values = (await staleCleanupRemaining.get()).values;
+    const remaining = values.find((v) => v.labels.direction === "eth_to_xlm")?.value ?? 0;
+    expect(remaining).toBe(2);
+  });
+
+  it("observes run duration and archived-age histograms", async () => {
+    const { staleCleanupRunDuration, staleOrdersArchivedAgeSeconds } = await import(
+      "../src/metrics.js"
+    );
+
+    // The registry is cumulative across the file's tests, so assert on the
+    // delta produced by this run rather than absolute counts.
+    const countOf = (
+      histogram: typeof staleCleanupRunDuration,
+      metricName: string
+    ): number =>
+      histogram.values.find((v) => v.metricName === metricName)?.value ?? 0;
+
+    const durationBefore = countOf(
+      await staleCleanupRunDuration.get(),
+      "coordinator_stale_cleanup_run_duration_seconds_count"
+    );
+    const ageBefore = countOf(
+      await staleOrdersArchivedAgeSeconds.get(),
+      "coordinator_stale_orders_archived_age_seconds_count"
+    );
+
+    const repo = await freshRepo();
+    const order = await repo.announce({ ...BASE_ORDER, hashlock: "0x" + "f1".repeat(32) });
+    await backdateOrder(repo, order.publicId, 31 * 24 * 60 * 60);
+
+    const svc = new StaleCleanupService(repo, nullLog, 30);
+    await svc.run();
+
+    const durationAfter = countOf(
+      await staleCleanupRunDuration.get(),
+      "coordinator_stale_cleanup_run_duration_seconds_count"
+    );
+    const ageAfter = countOf(
+      await staleOrdersArchivedAgeSeconds.get(),
+      "coordinator_stale_orders_archived_age_seconds_count"
+    );
+
+    expect(durationAfter).toBe(durationBefore + 1); // one run observed
+    expect(ageAfter).toBe(ageBefore + 1); // one order archived
+  });
+
+  it("distinguishes failures: increments the failure counter and rethrows", async () => {
+    const { staleCleanupRuns } = await import("../src/metrics.js");
+
+    const repo = await freshRepo();
+    const failureBefore = (await staleCleanupRuns.get()).values.find(
+      (v) => v.labels.result === "failure"
+    )?.value ?? 0;
+
+    vi.spyOn(repo, "findStaleAnnounced").mockRejectedValueOnce(new Error("db down"));
+
+    const svc = new StaleCleanupService(repo, nullLog, 30);
+    await expect(svc.run()).rejects.toThrow("db down");
+
+    const failureAfter = (await staleCleanupRuns.get()).values.find(
+      (v) => v.labels.result === "failure"
+    )?.value ?? 0;
+    expect(failureAfter).toBe(failureBefore + 1);
   });
 });

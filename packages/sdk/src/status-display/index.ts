@@ -4,6 +4,7 @@ export type DisplayStatus =
   | "pending"
   | "confirmed"
   | "completed"
+  | "cancelled"
   | "failed"
   | "refunded"
   | "expired"
@@ -33,9 +34,9 @@ const STATUS_DISPLAY: Record<DisplayStatus, StatusDisplay> = {
     label: "Confirmed",
     shortLabel: "Confirmed",
     message:
-      "Your cross-chain transfer is complete. The destination funds have been delivered to your wallet and the transaction is confirmed.",
-    action: "No further action is required. You can verify the transaction using the block explorer link.",
-    tone: "success",
+      "Your funds are locked on both sides of the swap and settlement can no longer be cancelled. The transfer is finishing its final confirmations.",
+    action: "No action needed. Final confirmation usually lands within a few minutes — refresh this page to check for updates.",
+    tone: "info",
   },
   completed: {
     status: "completed",
@@ -45,6 +46,15 @@ const STATUS_DISPLAY: Record<DisplayStatus, StatusDisplay> = {
       "Your cross-chain transfer is complete. The destination funds have been delivered to your wallet and the transaction is confirmed.",
     action: "No further action is required. You can verify the transaction using the block explorer link.",
     tone: "success",
+  },
+  cancelled: {
+    status: "cancelled",
+    label: "Cancelled",
+    shortLabel: "Cancelled",
+    message:
+      "This transfer was cancelled before any funds were locked on-chain. Nothing was sent and no action is required.",
+    action: "No further action is required. You can start a new transfer from the swap form.",
+    tone: "neutral",
   },
   failed: {
     status: "failed",
@@ -87,15 +97,39 @@ const STATUS_DISPLAY: Record<DisplayStatus, StatusDisplay> = {
   },
 };
 
-const ORDER_STATUS_TO_DISPLAY: Record<OrderStatus, DisplayStatus> = {
+/**
+ * Canonical order-status → display-status mapping.
+ *
+ * Every {@link OrderStatus} atom maps to exactly one user-facing display
+ * status, and the conformance suite pins the frontend's own mappings to this
+ * table so the UI never invents a different meaning for the same atom:
+ *
+ *   ┌──────────────────┬─────────────┬──────────────────────────────────────┐
+ *   │ OrderStatus      │ Display     │ Why                                  │
+ *   ├──────────────────┼─────────────┼──────────────────────────────────────┤
+ *   │ announced        │ pending     │ one leg only, user still acting       │
+ *   │ src_locked       │ pending     │ funds committed on one side only      │
+ *   │ dst_locked       │ confirmed   │ both legs on chain → irreversible     │
+ *   │ secret_revealed  │ confirmed   │ preimage out; settlement finalising   │
+ *   │ completed        │ completed   │ funds delivered on the destination    │
+ *   │ refunded         │ refunded    │ user got funds back                   │
+ *   │ failed           │ failed      │ fatal, unusable                       │
+ *   │ expired          │ expired     │ soft state: timelock passed, no refund│
+ *   │ cancelled        │ cancelled   │ withdrawn pre-lock                    │
+ *   │ abandoned        │ cancelled   │ stale-cleanup, funds never locked     │
+ *   └──────────────────┴─────────────┴──────────────────────────────────────┘
+ */
+export const ORDER_STATUS_TO_DISPLAY: Record<OrderStatus, DisplayStatus> = {
   announced: "pending",
   src_locked: "pending",
-  dst_locked: "pending",
-  secret_revealed: "pending",
-  completed: "confirmed",
-  failed: "failed",
+  dst_locked: "confirmed",
+  secret_revealed: "confirmed",
+  completed: "completed",
   refunded: "refunded",
-  expired: "timed_out",
+  failed: "failed",
+  expired: "expired",
+  cancelled: "cancelled",
+  abandoned: "cancelled",
 };
 
 export function displayStatusFor(orderStatus: OrderStatus): DisplayStatus {
@@ -118,6 +152,7 @@ export const ALL_DISPLAY_STATUSES: readonly DisplayStatus[] = [
   "pending",
   "confirmed",
   "completed",
+  "cancelled",
   "failed",
   "refunded",
   "expired",

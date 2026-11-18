@@ -7,15 +7,52 @@ export type Direction =
   | "xlm_to_sol"
   | "sol_to_xlm";
 
-export type OrderStatus =
-  | "announced"
-  | "src_locked"
-  | "dst_locked"
-  | "secret_revealed"
-  | "completed"
-  | "refunded"
-  | "failed"
-  | "expired";
+/**
+ * Canonical order lifecycle vocabulary.
+ *
+ * This is the single source of truth for how an order's state is *named*
+ * across the SDK, coordinator services, and frontend. The coordinator's
+ * `OrderStatus` (orders-repo.ts) and the shared state machine
+ * {@link ../state-machine/index.ts} are pinned to this list by conformance
+ * tests — adding a status here without updating those consumers surfaces as
+ * a test failure rather than silently divergent UI.
+ */
+export const ORDER_STATUSES = [
+  "announced",
+  "src_locked",
+  "dst_locked",
+  "secret_revealed",
+  "completed",
+  "refunded",
+  "failed",
+  "expired",
+  "cancelled",
+  "abandoned",
+] as const;
+
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+/**
+ * Statuses from which no further progression is possible.
+ *
+ * These mirror the empty-next-state terminal set of the state machine
+ * ({@link ../state-machine/index.ts isTerminal}); the conformance suite keeps
+ * the two in lock-step.
+ */
+export const TERMINAL_ORDER_STATUSES = [
+  "completed",
+  "refunded",
+  "failed",
+  "cancelled",
+  "abandoned",
+] as const;
+
+export type TerminalOrderStatus = (typeof TERMINAL_ORDER_STATUSES)[number];
+
+/** Runtime guard: is `value` one of the canonical order status atoms? */
+export function isOrderStatus(value: unknown): value is OrderStatus {
+  return typeof value === "string" && (ORDER_STATUSES as readonly unknown[]).includes(value);
+}
 
 /** Cross-chain swap order as visible to clients of the SDK. */
 export interface Order {

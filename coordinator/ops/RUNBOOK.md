@@ -20,14 +20,14 @@
 
 ### 1. Expose Coordinator Metrics
 
-The coordinator exports metrics on port 3000 at `/metrics` endpoint using Prometheus format.
+The coordinator exports metrics on port 3001 at `/metrics` endpoint using Prometheus format.
 
 **Configuration** (via environment variables in deployment):
 
 ```bash
 # No special config needed — metrics are always exported
 # Verify with:
-curl http://coordinator:3000/metrics | head -30
+curl http://coordinator:3001/metrics | head -30
 ```
 
 ### 2. Configure Prometheus Scraping
@@ -47,7 +47,7 @@ global:
 scrape_configs:
   - job_name: "wafflefinance-coordinator"
     static_configs:
-      - targets: ["coordinator.internal:3000"]  # or specific IP
+      - targets: ["coordinator.internal:3001"]  # or specific IP
         labels:
           service: coordinator
           datacenter: us-east-1
@@ -82,7 +82,7 @@ storage:
 # 3. Should show "UP" in green
 #
 # If DOWN, check:
-curl http://coordinator:3000/metrics
+curl http://coordinator:3001/metrics
 # Should return metrics in text format
 ```
 
@@ -250,7 +250,7 @@ email_configs:
 
 - [ ] **Verify coordinator is running**
   ```bash
-  curl http://coordinator:3000/health
+  curl http://coordinator:3001/health
   ```
   Expected: `{"ok":true}`
 
@@ -479,7 +479,7 @@ Threshold: Keep < 0.1%
 **Diagnosis**:
 ```bash
 # 1. Verify coordinator is serving metrics
-curl http://coordinator:3000/metrics | grep coordinator_
+curl http://coordinator:3001/metrics | grep coordinator_
 
 # 2. Verify Prometheus scrape is working
 # In Prometheus UI: Status > Targets
@@ -522,7 +522,7 @@ grep -A 5 "job_name.*coordinator" /etc/prometheus/prometheus.yml
 coordinator_process_resident_memory_bytes
 
 # Enable detailed heap profiling
-curl http://coordinator:3000/debug/heapdump > heap.heapsnapshot
+curl http://coordinator:3001/debug/heapdump > heap.heapsnapshot
 
 # Analyze with Node debugging tools
 node --inspect=0.0.0.0:9229
@@ -553,7 +553,7 @@ node --inspect=0.0.0.0:9229
 
 ## Metrics Reference
 
-All metrics are exposed at `http://coordinator:3000/metrics` in Prometheus text format.
+All metrics are exposed at `http://coordinator:3001/metrics` in Prometheus text format.
 
 ### Core Metrics
 

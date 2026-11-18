@@ -139,7 +139,12 @@ function malformed(
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-function bytesToHex(value: Uint8Array | Buffer | string): string {
+/**
+ * Normalise a raw bytes or hex-string value to a lowercase hex string without
+ * a `0x` prefix.  Exported so callers (tests, tools) can reuse the same
+ * normalisation the decoder applies to hashlock and preimage fields.
+ */
+export function toHex(value: Uint8Array | Buffer | string): string {
   if (typeof value === "string") {
     const hex = value.replace(/^0x/i, "");
     if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
@@ -239,7 +244,7 @@ export function decodeHtlcEvent(
       schemaVersion: HTLC_EVENT_SCHEMA_VERSION,
       kind: "created",
       orderId,
-      hashlock: bytesToHex(hashlockRaw as Uint8Array),
+      hashlock: toHex(hashlockRaw as Uint8Array),
       timelock: Number(timelock),
       sender,
       beneficiary,
@@ -290,8 +295,8 @@ export function decodeHtlcEvent(
       schemaVersion: HTLC_EVENT_SCHEMA_VERSION,
       kind: "claimed",
       orderId,
-      hashlock: bytesToHex(hashlockRaw as Uint8Array),
-      preimage: bytesToHex(preimageRaw as Uint8Array),
+      hashlock: toHex(hashlockRaw as Uint8Array),
+      preimage: toHex(preimageRaw as Uint8Array),
       beneficiary,
     };
   }
@@ -331,7 +336,7 @@ export function decodeHtlcEvent(
     schemaVersion: HTLC_EVENT_SCHEMA_VERSION,
     kind: "refunded",
     orderId,
-    hashlock: bytesToHex(hashlockRaw as Uint8Array),
+    hashlock: toHex(hashlockRaw as Uint8Array),
     refundAddress,
   };
 }

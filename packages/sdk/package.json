@@ -8,65 +8,98 @@
   "sideEffects": false,
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./ethereum": {
-      "import": "./dist/ethereum/index.js",
-      "types": "./dist/ethereum/index.d.ts"
+      "types": "./dist/ethereum/index.d.ts",
+      "import": "./dist/ethereum/index.js"
     },
     "./soroban": {
-      "import": "./dist/soroban/index.js",
-      "types": "./dist/soroban/index.d.ts"
+      "types": "./dist/soroban/index.d.ts",
+      "import": "./dist/soroban/index.js"
     },
     "./secrets": {
-      "import": "./dist/secrets/index.js",
-      "types": "./dist/secrets/index.d.ts"
+      "types": "./dist/secrets/index.d.ts",
+      "import": "./dist/secrets/index.js"
     },
     "./state-machine": {
-      "import": "./dist/state-machine/index.js",
-      "types": "./dist/state-machine/index.d.ts"
+      "types": "./dist/state-machine/index.d.ts",
+      "import": "./dist/state-machine/index.js"
     },
     "./solana": {
-      "import": "./dist/solana/index.js",
-      "types": "./dist/solana/index.d.ts"
+      "types": "./dist/solana/index.d.ts",
+      "import": "./dist/solana/index.js"
     },
     "./assets": {
-      "import": "./dist/assets/index.js",
-      "types": "./dist/assets/index.d.ts"
+      "types": "./dist/assets/index.d.ts",
+      "import": "./dist/assets/index.js"
     },
     "./types": {
-      "import": "./dist/types/index.js",
-      "types": "./dist/types/index.d.ts"
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/types/index.js"
     },
     "./routes": {
-      "import": "./dist/routes/index.js",
-      "types": "./dist/routes/index.d.ts"
+      "types": "./dist/routes/index.d.ts",
+      "import": "./dist/routes/index.js"
+    },
+    "./routes/fee-policy": {
+      "types": "./dist/routes/fee-policy.d.ts",
+      "import": "./dist/routes/fee-policy.js"
+    },
+    "./config-validation": {
+      "import": "./dist/config-validation.js",
+      "types": "./dist/config-validation.d.ts"
     },
     "./htlc-client": {
-      "import": "./dist/htlc-client.js",
-      "types": "./dist/htlc-client.d.ts"
+      "types": "./dist/htlc-client.d.ts",
+      "import": "./dist/htlc-client.js"
+    },
+    "./approval": {
+      "types": "./dist/approval.d.ts",
+      "import": "./dist/approval.js"
     },
     "./ethereum/adapter": {
-      "import": "./dist/ethereum/adapter.js",
-      "types": "./dist/ethereum/adapter.d.ts"
+      "types": "./dist/ethereum/adapter.d.ts",
+      "import": "./dist/ethereum/adapter.js"
     },
     "./soroban/adapter": {
-      "import": "./dist/soroban/adapter.js",
-      "types": "./dist/soroban/adapter.d.ts"
+      "types": "./dist/soroban/adapter.d.ts",
+      "import": "./dist/soroban/adapter.js"
+    },
+    "./soroban/orchestrator": {
+      "types": "./dist/soroban/orchestrator.d.ts",
+      "import": "./dist/soroban/orchestrator.js"
     },
     "./solana/adapter": {
-      "import": "./dist/solana/adapter.js",
-      "types": "./dist/solana/adapter.d.ts"
+      "types": "./dist/solana/adapter.d.ts",
+      "import": "./dist/solana/adapter.js"
     },
-    "./shared-utils": {
-      "import": "./dist/shared-utils/index.js",
-      "types": "./dist/shared-utils/index.d.ts"
+    "./solana/rpc-provider": {
+      "types": "./dist/solana/rpc-provider.d.ts",
+      "import": "./dist/solana/rpc-provider.js"
+    },
+    "./solana/account-validation": {
+      "types": "./dist/solana/account-validation.d.ts",
+      "import": "./dist/solana/account-validation.js"
+    },
+    "./solana/wallet": {
+      "types": "./dist/solana/wallet.d.ts",
+      "import": "./dist/solana/wallet.js"
+    },
+    "./solana/idl": {
+      "types": "./dist/solana/idl/htlc.d.ts",
+      "import": "./dist/solana/idl/htlc.js"
+    },
+    "./internal/fixtures": {
+      "types": "./dist/fixtures/index.d.ts",
+      "import": "./dist/fixtures/index.js"
     },
     "./coordinator": {
-      "import": "./dist/coordinator/index.js",
-      "types": "./dist/coordinator/index.d.ts"
-    }
+      "types": "./dist/coordinator/index.d.ts",
+      "import": "./dist/coordinator/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"
@@ -75,6 +108,9 @@
     "build": "tsc",
     "build:analyze": "tsc && npm run analyze",
     "analyze": "node scripts/analyze-bundle.js",
+    "analyze:cost": "node scripts/measure-entry-cost.mjs",
+    "analyze:cost:bundle": "node scripts/measure-entry-cost.mjs --bundle",
+    "verify:subpaths": "node scripts/verify-subpath-isolation.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

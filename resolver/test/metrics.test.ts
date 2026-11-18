@@ -111,4 +111,38 @@ describe("resolver metrics", () => {
     expect(resolverMetrics.operationFailuresTotal).toBeDefined();
     expect(resolverMetrics.activeOperations).toBeDefined();
   });
+
+  it("uses only bounded label names (no per-order high-cardinality labels)", async () => {
+    const { registry: reg } = await import("../src/metrics.js");
+    const allowedLabels = new Set([
+      "chain",
+      "event_type",
+      "error_type",
+      "result",
+      "reason",
+      "state",
+      "from",
+      "to",
+      "action",
+      "operation",
+      "failure_reason",
+    ]);
+    const forbidden = ["order_id", "orderid", "tx_hash", "txhash", "hash", "secret", "url", "endpoint"];
+    for (const metric of (reg as any).getMetricsAsArray()) {
+      const names: string[] = metric.labelNames ?? [];
+      for (const name of names) {
+        expect(allowedLabels.has(name), `unexpected label "${name}" on ${metric.name}`).toBe(true);
+        expect(forbidden).not.toContain(name.toLowerCase());
+      }
+    }
+    const exposition = await reg.metrics();
+    const labelLines = exposition.split("\n").filter((l) => l.includes("{"));
+    expect(labelLines.length).toBeGreaterThan(0);
+    for (const line of labelLines) {
+      expect(line).not.toMatch(/order_?id\s*=/i);
+      expect(line).not.toMatch(/tx_?hash\s*=/i);
+      expect(line).not.toMatch(/secret\s*=/i);
+      expect(line).not.toMatch(/https?:\/\//);
+    }
+  });
 });

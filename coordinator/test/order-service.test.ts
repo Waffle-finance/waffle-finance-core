@@ -444,6 +444,39 @@ describe("expireStaleOrders", () => {
     const expired = await orders.expireStaleOrders();
     expect(expired).toBe(0);
   });
+
+  it("publishes the expired-orders backlog gauge as orders expire and settle", async () => {
+    const { expiredOrdersBacklog } = await import("../src/metrics.js");
+
+    const db = await freshDb();
+    const orders = new OrderService(new OrdersRepository(db), log);
+
+    const order = await orders.announce(BASE_ANNOUNCE_INPUT);
+    const pastTimelock = Math.floor(Date.now() / 1000) - 3600;
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "7",
+      txHash: "0xexpired-backlog",
+      blockNumber: 1,
+      timelock: pastTimelock,
+    });
+
+    // The gauge is derived from a module-level snapshot shared across tests,
+    // so assert on the delta this test's transitions produce.
+    const gaugeValue = async (): Promise<number> =>
+      (await expiredOrdersBacklog.get()).values.find(
+        (v) => v.labels.direction === "eth_to_xlm"
+      )?.value ?? 0;
+
+    const before = await gaugeValue();
+
+    await orders.expireStaleOrders();
+    expect(await gaugeValue()).toBe(before + 1);
+
+    // Once the expired order settles, the backlog gauge steps back down.
+    await orders.markStatus(order.publicId, "refunded");
+    expect(await gaugeValue()).toBe(before);
+  });
 });
 
 describe("PostgresStatement", () => {

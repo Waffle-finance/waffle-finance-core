@@ -23,6 +23,25 @@ import { sepolia } from "viem/chains";
 
 import type { AsyncHtlcSim, CreateOrderInput, Hex, OrderStatus, OrderView } from "./sim.js";
 
+// Type-only, so the runtime `await import("@solana/web3.js")` below stays lazy.
+import type { Connection, PublicKey } from "@solana/web3.js";
+
+// Solana account sizes, PDA seeds, and the rent/safety-rail helpers come from
+// the SDK so this script cannot drift from the layout the SDK encodes against.
+// Previously every one of these was an inline literal (`Buffer.from("state")`,
+// the counter offset `8`), so a layout change silently desynchronised the
+// devnet harness from the SDK rather than failing a test.
+import {
+  ORDER_REGISTRY_SEED,
+  ORDER_REGISTRY_ACCOUNT_SIZE,
+  ANCHOR_DISCRIMINATOR_SIZE,
+  readOrderCount,
+  getRentExemptMinimum,
+  assertPayerCanFund,
+  accountSizeFor,
+  SolanaAccountInitError,
+} from "@wafflefinance/sdk/solana";
+
 // ── HTLCEscrow minimal ABI ────────────────────────────────────────────────────
 
 const HTLC_ESCROW_ABI = [
@@ -494,7 +513,13 @@ export interface SolanaDevnetConfig {
   secretKey: Uint8Array | string;
   /** Deployed HTLC Anchor program ID (base-58). */
   programId: string;
-  /** Amount to lock per order in lamports. */
+  /**
+   * Amount to lock per order in lamports.
+   *
+   * This is the *amount under escrow*, not rent. The rent the payer must cover
+   * on top of it is always queried from the cluster at submission time via
+   * `getMinimumBalanceForRentExemption` — it is never assumed.
+   */
   amount?: bigint;
 }
 
@@ -553,28 +578,33 @@ export class SolanaHtlcDevnet implements AsyncHtlcSim {
     return web3.Keypair.fromSecretKey(secretKey);
   }
 
-  async createOrder(input: CreateOrderInput): Promise<bigint> {
+async createOrder(input: CreateOrderInput): Promise<bigint> {
     const web3 = await this.solana();
     const keypair   = await this.makeKeypair(web3);
     const conn      = new web3.Connection(this.cfg.rpcUrl, "confirmed");
     const programId = new web3.PublicKey(this.cfg.programId);
 
-    // Fetch current order counter from the program's global state PDA.
+    // ── Registry (order counter) ────────────────────────────────────────────
+    // Seed and size come from the SDK's shared table, not literals. An absent
+    // state account means the program has never been initialised, so the
+    // counter starts at 1 — a documented, deliberate default.
     const [statePda] = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("state")],
+      [ORDER_REGISTRY_SEED],
       programId,
     );
     const stateAccount = await conn.getAccountInfo(statePda);
-    // The first 8 bytes are the Anchor account discriminator; next 8 bytes
-    // hold the u64 order counter (little-endian).
-    const nextId = stateAccount
-      ? BigInt(stateAccount.data.readBigUInt64LE(8))
-      : 1n;
+    const nextId = stateAccount ? readOrderCount(stateAccount.data) : 1n;
 
     const [orderPda] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("order"), writeBigInt64LE(nextId)],
       programId,
     );
+
+    // ── Preflight: rent from the cluster + payer solvency ───────────────────
+    // Both run before the transaction is built so a mis-sized account or an
+    // under-funded keypair fails with a named shortfall instead of an opaque
+    // runtime error after fees are spent.
+    await this.assertCanFundOrder(conn, keypair.publicKey, orderPda);
 
     const hashlockBytes = Buffer.from(input.hashlock.slice(2), "hex");
     const data = Buffer.concat([
@@ -599,6 +629,52 @@ export class SolanaHtlcDevnet implements AsyncHtlcSim {
     const tx = new web3.Transaction().add(ix);
     await web3.sendAndConfirmTransaction(conn, tx, [keypair], { commitment: "confirmed" });
     return nextId;
+  }
+
+  /**
+   * Verify the payer can cover the order account's rent plus the escrow amount
+   * and the transaction fee, using the cluster's own rent table.
+   *
+   * Sizes come from the SDK's shared field table rather than byte counts, so
+   * the figure fed to the rent calculation is the same number the SDK encodes
+   * against. Rent is never assumed or hardcoded.
+   */
+  private async assertCanFundOrder(
+    conn: Connection,
+    payer: PublicKey,
+    orderPda: PublicKey
+  ): Promise<void> {
+    const orderSize = accountSizeFor("htlcOrder");
+    const registrySize = ORDER_REGISTRY_ACCOUNT_SIZE;
+
+    // A size at or below the bare discriminator means the layout table itself is
+    // broken. Fail with both numbers rather than quoting rent for nonsense.
+    if (orderSize <= ANCHOR_DISCRIMINATOR_SIZE || registrySize <= ANCHOR_DISCRIMINATOR_SIZE) {
+      throw new SolanaAccountInitError(
+        "InvalidAccountSize",
+        `Solana account size configuration is broken: order ${orderSize} bytes, ` +
+        `registry ${registrySize} bytes (the Anchor discriminator alone is ` +
+        `${ANCHOR_DISCRIMINATOR_SIZE}). Fix SOLANA_ANCHOR_ACCOUNT_LAYOUTS in ` +
+        `@wafflefinance/sdk/src/solana/account-sizing.ts.`
+      );
+    }
+
+    // Rent for BOTH accounts this transaction touches: the order PDA, and the
+    // registry when it has not been created yet.
+    const [orderRent, registryRent] = await Promise.all([
+      getRentExemptMinimum(conn, orderSize),
+      getRentExemptMinimum(conn, registrySize),
+    ]);
+
+    const balance = BigInt(await conn.getBalance(payer, "confirmed"));
+    assertPayerCanFund({
+      payer,
+      account: `order ${orderPda.toBase58()}`,
+      rentLamports: orderRent + registryRent,
+      amountLamports: this.cfg.amount,
+      signatureCount: 1,
+      balanceLamports: balance,
+    });
   }
 
   async claimOrder(id: bigint, preimage: Hex): Promise<void> {
@@ -674,6 +750,20 @@ export class SolanaHtlcDevnet implements AsyncHtlcSim {
     const info = await conn.getAccountInfo(orderPda);
     if (!info) throw new Error(`Order account not found for id=${id}`);
 
+    // ⚠ KNOWN DIVERGENCE — do not "fix" this without a program decision.
+    //
+    // This harness targets a *different* on-chain order layout than the SDK IDL
+    // (`packages/sdk/src/solana/idl/htlc.ts`), and the two cannot both match one
+    // deployed program:
+    //
+    //   here: seeds [b"order", u64_le(id)], 56-byte create_order, 65-byte account
+    //   SDK:  seeds [b"order", hashlock_32],   64-byte create_order, 227-byte account
+    //
+    // The offsets below are left exactly as the live devnet program defines
+    // them. Reconciling them is a product decision (see
+    // docs/SOLANA_ACCOUNT_INIT_RENT_AUDIT.md §2.2 F15), not a cleanup — so the
+    // divergence is asserted here rather than papered over.
+    //
     // Anchor account layout (after 8-byte discriminator):
     //   hashlock:         [u8; 32]   — bytes 8..40
     //   timelock_absolute: u64 LE    — bytes 40..48
@@ -681,6 +771,24 @@ export class SolanaHtlcDevnet implements AsyncHtlcSim {
     //   finalised_at:      u64 LE    — bytes 56..64
     //   status:            u8        — byte 64
     const d = info.data;
+
+    // Smallest byte index the reads below touch. Buffer.readBigUInt64LE on a
+    // short buffer does not throw — it yields 0 — so without this guard a
+    // truncated account silently reports "funded at time 0", which would let a
+    // claim/refund scenario pass against a corrupt account.
+    const REQUIRED_BYTES = 65;
+    if (d.length < REQUIRED_BYTES) {
+      throw new Error(
+        `Solana order account ${orderPda.toBase58()} (id=${id}) is ${d.length} bytes; ` +
+        `this harness's layout needs at least ${REQUIRED_BYTES} ` +
+        `(${ANCHOR_DISCRIMINATOR_SIZE} discriminator + 57 field bytes). The account is ` +
+        `truncated or was created by a different program version. ` +
+        `The SDK's declared size for an HtlcOrder is ${accountSizeFor("htlcOrder")} bytes — ` +
+        `if this account is meant to be a full HtlcOrder, the deployed program's ` +
+        `space = ... disagrees with the SDK IDL.`
+      );
+    }
+
     const hashlock       = `0x${d.subarray(8,  40).toString("hex")}` as Hex;
     const timelockAbs    = Number(d.readBigUInt64LE(40));
     const createdAt      = Number(d.readBigUInt64LE(48));

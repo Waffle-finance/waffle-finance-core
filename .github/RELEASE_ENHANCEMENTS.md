@@ -1,3 +1,17 @@
+> **ARCHIVAL NOTICE — design reference only, not current operating procedure**
+>
+> This document summarises the implementation of a `.github/workflows/release.yml`
+> that **does not exist** in this repository. The `verify-artifacts` job,
+> gated Docker publish, and artifact retention described here were designed
+> but never committed. No part of this document reflects active CI behaviour.
+>
+> **Current release gate:** run `scripts/verify-release-locally.sh` manually.
+> See [docs/DOC_MAP.md](../docs/DOC_MAP.md) for the four workflows that
+> actually run.
+>
+> This file is preserved as a design reference for a future automated
+> release pipeline.
+
 # Release Workflow Enhancements - Implementation Summary
 
 ## Overview

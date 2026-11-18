@@ -61,6 +61,82 @@ re-exported from the registry.
 All asset resolution pivots through Ethereum today, which is why there's no
 direct Stellar↔Solana resolver.
 
+Use `validateChainPair` (`@wafflefinance/sdk/config-validation`) when a caller
+starts from chain names instead of a direction. It derives the direction from
+the same route matrix and rejects undeclared, planned, or wrong-network pairs
+before checkout or order processing begins:
+
+```typescript
+import { validateChainPair } from '@wafflefinance/sdk/config-validation';
+
+validateChainPair({ src: 'ethereum', dst: 'stellar', network: 'testnet' });
+validateChainPair({ src: 'stellar', dst: 'solana', network: 'testnet' }); // throws: route_not_live
+```
+
+## Runtime configuration validation
+
+The SDK validates required runtime configuration at client construction time so
+frontend, coordinator, relayer, and resolver fail before the first RPC call when
+an env var is missing or points at the wrong network.
+
+```typescript
+import {
+  SdkConfigurationError,
+  validateRpcUrl,
+  validateEthereumAddress,
+  validateChainId,
+} from '@wafflefinance/sdk/config-validation';
+
+try {
+  validateRpcUrl(process.env.ETH_RPC_URL, 'ETH_RPC_URL');
+  validateChainId(process.env.ETH_CHAIN_ID, 'ETH_CHAIN_ID');
+  validateEthereumAddress(process.env.ETH_HTLC_ESCROW, 'ETH_HTLC_ESCROW');
+} catch (err) {
+  if (err instanceof SdkConfigurationError) {
+    console.error(err.issues); // field, code, actionable message
+  }
+}
+```
+
+Constructors run the same checks:
+
+- `EthereumHTLCClient` validates the escrow address and, when `chainId` is
+  supplied, checks it against `publicClient.chain.id`.
+- `SorobanHTLCClient` validates RPC URL, network passphrase, and contract id.
+  Plain HTTP requires `allowHttp: true` and should only be used for local
+  sandboxes.
+- `SolanaHTLCClient` validates RPC URL and program id. Simulation mode is
+  explicit: use `programId: "PLACEHOLDER"`. Empty program ids are rejected.
+
+Required production inputs are RPC URL, chain/network id or passphrase, deployed
+HTLC contract/program id, and any resolver-registry address used by the calling
+service. Registry addresses should be validated with the same chain-local
+address helper before service startup.
+
+## Chain-specific constraints
+
+| Chain | Timing | Wallet/account constraints | Settlement constraints |
+| --- | --- | --- | --- |
+| Ethereum | Source-side HTLCs use the longer refund window in the canonical flow. The contract stores an absolute `timelock` derived from `block.timestamp + timelockSeconds`. | Mutating calls require `walletClient.account`. ERC-20 orders require allowance for `amount` before `createOrder`; native ETH orders send `amount + safetyDeposit` as `msg.value`. | Native ETH uses `address(0)`. If a native payout push fails, funds move to pull-payment credit for the beneficiary/refund address. `claimOrder` accepts SDK sha256 hashlocks and the EVM dual-hash compatibility path. |
+| Stellar/Soroban | Ledgers are final once accepted. The destination leg normally uses the shorter 12h-style window so the resolver can refund before the user's source refund opens. | Signers receive XDR and must return signed XDR. Source accounts must exist and have sequence numbers available through Soroban RPC. | Asset ids are Stellar/Soroban addresses. Contract state has TTL/rent behavior; operators must keep deployed contract state alive. |
+| Solana | The SDK converts `timelockSeconds` to an absolute unix timestamp before building the Anchor instruction. | Signers expose a `PublicKey` and `signTransaction`. PDA derivation uses `[b"order", hashlock_bytes]`; duplicate hashlocks produce the same order PDA. | Mints are case-sensitive base58 public keys. `NATIVE_SOL_MINT` represents native SOL. `validateBeforeSubmit` can check account ownership and duplicate orders before sending. |
+
+Common recovery workflows:
+
+- Missing or malformed config: catch `SdkConfigurationError`, surface
+  `.issues`, and stop startup. Do not retry with defaults.
+- Unsupported source/destination pair: use `validateChainPair` or
+  `assertSupportedRoute` before wallet prompts. Show the route rejection reason.
+- Unsupported asset: use `assertSupported*` helpers before resolving assets.
+  The lenient `resolve*` functions still fall back to native assets for older
+  read paths and should not be used as the only validation before settlement.
+- Timelock expiry: users can refund source funds directly from the HTLC after
+  the source timelock; services are convenience layers, not custody points.
+
+See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md#cross-chain-invariants)
+for the protocol invariants behind timelock asymmetry, native payment fallback,
+and coordinator-independent settlement.
+
 ## Stability tiers
 
 | Tier | Surfaces | What it means |
@@ -143,12 +219,14 @@ so callers can use `instanceof` instead of parsing messages:
 
 | Error class | Thrown by | Meaning |
 | --- | --- | --- |
+| `SdkConfigurationError` | SDK config validators and chain-client constructors | Required runtime config is missing or malformed. Has `.issues[]` with `field`, `code`, and `message`. |
 | `CoordinatorValidationError` | `CoordinatorClient`, `validateAnnounceRequest` | Request was invalid and **never sent** — fix the input. Has `.field` and `.details`. |
 | `CoordinatorApiError` | `CoordinatorClient` | Coordinator responded with 4xx/5xx. Has `.status`, `.code` (stable machine-readable), and `.retryable`. |
 | `CoordinatorNetworkError` | `CoordinatorClient` | No response received (DNS/timeout/connection reset). Always safe to retry. |
 | `CoordinatorParseError` | `CoordinatorClient` | Response received but not valid JSON. |
 | `HTLCError` | All chain clients/adapters | Expected on-chain failure. Has `.code` (`wallet_unavailable`, `simulation_failed`, `tx_rejected`, `order_not_found`, `timelock_not_expired`, `invalid_preimage`, `simulation_mode`, `chain_error`) and `.retryable`. |
 | `UnsupportedAssetError` | `assertSupportedEthToStellar` and friends (`@wafflefinance/sdk/assets`) | No asset mapping exists for the given direction/network. Has `.asset`, `.network`, `.direction`. |
+| `InvalidAssetIdentifierError` | `toCanonicalId`, `assertCanonical*` helpers (`@wafflefinance/sdk/assets`) | A chain-local identifier is malformed before mapping lookup or contract use. |
 
 All coordinator errors extend `CoordinatorError`, so a single
 `catch (err) { if (err instanceof CoordinatorError) ... }` catches any of
@@ -157,24 +235,51 @@ tested classifier that maps every error class above to a UI-facing category.
 
 ## Subpath exports
 
-| Subpath | Contents |
-| --- | --- |
-| `@wafflefinance/sdk` | Everything below, re-exported from one entry point (largest bundle — prefer subpaths in size-sensitive code). |
-| `@wafflefinance/sdk/types` | `Chain`, `Direction`, `OrderStatus`, `Order`, `ChainLeg`, `ResolverInfo`, external-bridge route types. Zero runtime cost (types only). |
-| `@wafflefinance/sdk/htlc-client` | `IHTLCClient`, `HTLCError`, `HTLCErrorCode`, result types. |
-| `@wafflefinance/sdk/coordinator` | `CoordinatorClient`, `HistoryClient`, `OrderSubscriber`, validation helpers, transforms, wire-contract types, error classes. |
-| `@wafflefinance/sdk/secrets` | `generateSecret`, `hashSecret`, `verifyPreimage`. |
-| `@wafflefinance/sdk/state-machine` | SDK-local order transition guards (`canTransition`, `requireTransition`, `isTerminal`, `nextStatesOf`). |
-| `@wafflefinance/sdk/assets` | Asset resolution/normalisation/validation helpers — see [ASSET_MAPPING_CONTRACT.md](./ASSET_MAPPING_CONTRACT.md). |
-| `@wafflefinance/sdk/routes` | Route-identity registry: route validation, serialised route ids, per-network availability — see [ROUTE_REGISTRY.md](./ROUTE_REGISTRY.md). |
-| `@wafflefinance/sdk/ethereum`, `/ethereum/adapter` | `EthereumHTLCClient`, `EthereumHTLCAdapter`. |
-| `@wafflefinance/sdk/soroban`, `/soroban/adapter` | `SorobanHTLCClient`, `SorobanHTLCAdapter`, order-ref encode/decode. |
-| `@wafflefinance/sdk/solana`, `/solana/adapter` | `SolanaHTLCClient`, `SolanaHTLCAdapter`. |
-| `@wafflefinance/sdk/shared-utils` | Hex/buffer conversion, order-ID/hashlock helpers, timelock estimation. |
+The intended package shape is one narrow subpath per concern, grouped so that a
+consumer only ever loads the chain(s) it actually uses. `.` is the
+convenience barrel over all of them and stays supported for compatibility; the
+subpaths are what you should reach for in size- or start-up-sensitive code.
+See [TREE_SHAKING.md](./TREE_SHAKING.md) for the measured cost of each entry
+point and the reasoning behind the layout (#731).
+
+| Subpath | Contents | Chain SDK loaded |
+| --- | --- | --- |
+| `@wafflefinance/sdk` | Everything below, re-exported from one entry point (largest graph — prefer subpaths in size-sensitive code). | all three |
+| **Chain-neutral** | | |
+| `@wafflefinance/sdk/types` | `Chain`, `Direction`, `OrderStatus`, `Order`, `ChainLeg`, `ResolverInfo`, external-bridge route types. Zero runtime cost (types only). | none |
+| `@wafflefinance/sdk/htlc-client` | `IHTLCClient`, `HTLCError`, `HTLCErrorCode`, result types. | none |
+| `@wafflefinance/sdk/secrets` | `generateSecret`, `hashSecret`, `verifyPreimage`. | viem¹ |
+| `@wafflefinance/sdk/state-machine` | SDK-local order transition guards (`canTransition`, `requireTransition`, `isTerminal`, `nextStatesOf`). | none |
+| `@wafflefinance/sdk/status-display` | `describeOrderStatus`, `displayStatusFor`, `statusDisplay`, `ALL_DISPLAY_STATUSES` — user-facing status copy. | none |
+| `@wafflefinance/sdk/approval` | `APPROVAL_SEMANTICS`, `normalizeApprovalMessage`, `isApprovalError` — per-chain approval guidance. | none |
+| `@wafflefinance/sdk/assets` | Asset resolution/normalisation/validation helpers — see [ASSET_MAPPING_CONTRACT.md](./ASSET_MAPPING_CONTRACT.md). | none |
+| `@wafflefinance/sdk/routes` | Route-identity registry: route validation, serialised route ids, per-network availability — see [ROUTE_REGISTRY.md](./ROUTE_REGISTRY.md). | none |
+| `@wafflefinance/sdk/routes/fee-policy` | `estimateRouteFee`, `getRouteFeePolicy`, `ROUTE_FEE_POLICIES` on their own, without the registry. | none |
+| `@wafflefinance/sdk/coordinator` | `CoordinatorClient`, `HistoryClient`, `OrderSubscriber`, validation helpers, transforms, wire-contract types, error classes. | none |
+| **Ethereum** | | |
+| `@wafflefinance/sdk/ethereum` | `EthereumHTLCClient`, `HTLC_ESCROW_ABI`. | viem |
+| `@wafflefinance/sdk/ethereum/adapter` | `EthereumHTLCAdapter` — normalised `IHTLCClient` implementation. | none² |
+| **Soroban** | | |
+| `@wafflefinance/sdk/soroban` | `SorobanHTLCClient`, `makeKeypairSigner`. | stellar-sdk |
+| `@wafflefinance/sdk/soroban/adapter` | `SorobanHTLCAdapter`, order-ref encode/decode. | stellar-sdk |
+| `@wafflefinance/sdk/soroban/orchestrator` | `orchestrateTransaction` and its config/result types. | stellar-sdk |
+| **Solana** | | |
+| `@wafflefinance/sdk/solana` | `SolanaHTLCClient`, instruction builders, account deserialisation. | web3.js |
+| `@wafflefinance/sdk/solana/adapter` | `SolanaHTLCAdapter`. | none² |
+| `@wafflefinance/sdk/solana/rpc-provider` | `SolanaRpcProvider`, `createSolanaRpcProvider` — multi-endpoint failover (#713). | none |
+| `@wafflefinance/sdk/solana/account-validation` | Pre-submission account/PDA validation (#715). | web3.js |
+| `@wafflefinance/sdk/solana/idl` | Anchor IDL constants and `assertIdlCompatibility` (#712). | none |
+
+¹ `secrets` hashes via viem because viem is the SDK's only source of keccak256.
+Tracked in `KNOWN_COUPLINGS` in `scripts/verify-subpath-isolation.mjs`.
+² The `*/adapter` entries import their chain client only for types, so they
+resolve without the chain SDK at runtime.
 
 Deep imports outside this table (e.g. `@wafflefinance/sdk/coordinator/client`)
 are not exposed by `package.json#exports` and will fail to resolve — that's
-enforced by Node, not just documented convention.
+enforced by Node, not just documented convention. Every entry above is checked
+against the build output by `npm run analyze`; the table cannot drift from
+`package.json` without CI noticing.
 
 ## Soroban contract schema
 
@@ -209,7 +314,9 @@ npm run typecheck   # tsc --noEmit — also checks test/ and examples/
 npm test            # vitest run
 npm run test:watch  # vitest, watch mode
 npm run lint        # eslint src
-npm run build:analyze # build + bundle/tree-shaking sanity check
+npm run analyze     # every exports subpath resolves in dist/, nothing unreachable
+npm run analyze:cost # per-entry module count, chain SDKs, real bundle bytes (#731)
+npm run verify:subpaths # runtime proof that a subpath does not pull other chains
 ```
 
 See also [TREE_SHAKING.md](./TREE_SHAKING.md) (bundle optimisation),

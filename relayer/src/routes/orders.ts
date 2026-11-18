@@ -48,6 +48,8 @@ import {
   checkOrderSettleable,
   type SettlementAccountConfig,
 } from '../settlement-permissions.js';
+import { assertSettlementRoute } from '../services/route-validator.js';
+import { getCoordinatorClient, assertCoordinatorSafe } from '../services/coordinator-client.js';
 import {
   settlementVerificationTotal,
   settlementProofReplaysTotal,
@@ -420,6 +422,16 @@ export function ordersRouter(options: OrdersRouterOptions): Router {
 
           logger.info({ orderId, verifiedXlm: verifiedPayment.amount, ethAmountWei: ethAmountWei.toString(), ethFormatted: ethers.formatEther(ethAmountWei) }, 'XLM→ETH amount calc (process)');
 
+          // #755: validate chain/asset pair before building any transaction
+          const routeCheck755a = assertSettlementRoute({ direction: (storedOrder.direction as string) ?? 'xlm_to_eth', fromChain: 'stellar', toChain: 'ethereum' });
+          if (!routeCheck755a.valid) { return res.status(400).json({ error: 'invalid_route', code: routeCheck755a.code, details: routeCheck755a.reason }); }
+
+          // #754: block settlement when coordinator metadata is stale/unavailable
+          const coordClient754a = getCoordinatorClient();
+          const coordMeta754a = await coordClient754a.getOrderMetadata(orderId);
+          const coordSafe754a = assertCoordinatorSafe(coordClient754a, orderId, coordMeta754a);
+          if (!coordSafe754a.safe) { logger.warn({ orderId, reason: coordSafe754a.reason }, 'Settlement blocked: coordinator unavailable (process)'); return res.status(503).json({ error: 'coordinator_unavailable', reason: coordSafe754a.reason }); }
+
           const auth = authorizeSettlementCommand(supportPolicy, RELAYER_CONFIG as unknown as SettlementAccountConfig, { command: 'settle', direction: (storedOrder.direction as string) ?? 'xlm_to_eth', chain: 'ethereum' });
           if (!auth.authorized) { const d = auth as import('../settlement-permissions.js').AuthorizationDenial; logger.warn({ code: d.code }, 'Settlement denied (process)'); return res.status(403).json({ error: 'settlement_permission_denied', code: d.code, details: d.reason }); }
 
@@ -545,6 +557,16 @@ export function ordersRouter(options: OrdersRouterOptions): Router {
       if (!consumed) { settlementProofReplaysTotal.inc({ network_mode: orderNet }); return res.status(409).json({ error: 'Stellar tx consumed by concurrent request', stellarTxHash }); }
 
       try {
+        // #755: validate chain/asset pair before building any transaction
+        const routeCheck755b = assertSettlementRoute({ direction: (storedOrder.direction as string) ?? 'xlm_to_eth', fromChain: 'stellar', toChain: 'ethereum' });
+        if (!routeCheck755b.valid) { return res.status(400).json({ error: 'invalid_route', code: routeCheck755b.code, details: routeCheck755b.reason }); }
+
+        // #754: block settlement when coordinator metadata is stale/unavailable
+        const coordClient754b = getCoordinatorClient();
+        const coordMeta754b = await coordClient754b.getOrderMetadata(orderId);
+        const coordSafe754b = assertCoordinatorSafe(coordClient754b, orderId, coordMeta754b);
+        if (!coordSafe754b.safe) { logger.warn({ orderId, reason: coordSafe754b.reason }, 'Settlement blocked: coordinator unavailable (xlm-to-eth)'); return res.status(503).json({ error: 'coordinator_unavailable', reason: coordSafe754b.reason }); }
+
         const auth = authorizeSettlementCommand(supportPolicy, RELAYER_CONFIG as unknown as SettlementAccountConfig, { command: 'settle', direction: (storedOrder.direction as string) ?? 'xlm_to_eth', chain: 'ethereum' });
         if (!auth.authorized) { const d = auth as import('../settlement-permissions.js').AuthorizationDenial; logger.warn({ code: d.code }, 'Settlement denied (xlm-to-eth)'); return res.status(403).json({ error: 'settlement_permission_denied', code: d.code, details: d.reason }); }
 

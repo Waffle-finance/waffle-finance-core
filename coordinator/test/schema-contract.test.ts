@@ -197,6 +197,60 @@ describe("schema.sql shape vs. schema-contract.md — order_events, resolver_hea
   });
 });
 
+// #734: the durable idempotence ledger. Its PRIMARY KEY on event_key is the
+// replay-safety guarantee, so both the shape and the uniqueness must hold.
+describe("schema.sql shape vs. schema-contract.md — processed_events", () => {
+  it("has the documented columns", async () => {
+    const db = await freshDb();
+    const cols = (db as any).prepare("PRAGMA table_info(processed_events)").all().map((c: any) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining(["event_key", "chain", "event_type", "order_id", "created_at"])
+    );
+  });
+
+  it("uses event_key as the primary key", async () => {
+    const db = await freshDb();
+    const pk = (db as any)
+      .prepare("PRAGMA table_info(processed_events)")
+      .all()
+      .filter((c: any) => c.pk > 0)
+      .map((c: any) => c.name);
+    expect(pk).toEqual(["event_key"]);
+  });
+
+  it("has the documented partial index", async () => {
+    const db = await freshDb();
+    const indexes = (db as any)
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='processed_events'")
+      .all()
+      .map((r: any) => r.name);
+    expect(indexes).toContain("idx_processed_events_order");
+  });
+
+  it("refuses a duplicate event_key at the storage layer", async () => {
+    const db = await freshDb();
+    const insert = "INSERT INTO processed_events (event_key, chain, event_type) VALUES (?, ?, ?)";
+    (db as any).prepare(insert).run("eth:OrderCreated:0x1:0", "ethereum", "OrderCreated");
+    expect(() =>
+      (db as any).prepare(insert).run("eth:OrderCreated:0x1:0", "ethereum", "OrderCreated")
+    ).toThrow();
+  });
+
+  it("rejects a recovery_marker-style escape hatch: chain and event_type are closed sets", async () => {
+    const db = await freshDb();
+    expect(() =>
+      (db as any)
+        .prepare("INSERT INTO processed_events (event_key, chain, event_type) VALUES (?, ?, ?)")
+        .run("k", "bitcoin", "OrderCreated")
+    ).toThrow();
+    expect(() =>
+      (db as any)
+        .prepare("INSERT INTO processed_events (event_key, chain, event_type) VALUES (?, ?, ?)")
+        .run("k2", "ethereum", "OrderTeleported")
+    ).toThrow();
+  });
+});
+
 describe("schema.sql shape vs. schema-contract.md — soroban_checkpoints", () => {
   it("has the documented columns", async () => {
     const db = await freshDb();

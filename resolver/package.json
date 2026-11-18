@@ -14,6 +14,8 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:smoke": "vitest run test/smoke",
+    "test:smoke:watch": "vitest test/smoke",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },
@@ -28,6 +30,7 @@
     "viem": "^2.21.0"
   },
   "devDependencies": {
+    "@wafflefinance/sdk": "workspace:*",
     "@solana/web3.js": "^1.98.4",
     "@types/express": "^4.17.25",
     "@types/node": "^20.12.0",

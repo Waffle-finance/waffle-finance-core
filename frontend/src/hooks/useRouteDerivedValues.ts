@@ -99,8 +99,10 @@ function deriveEstimatedAmount(
   if (!fromUsd || !toUsd) return '';
 
   const output   = (num * fromUsd) / toUsd;
-  const decimals = to === 'ETH' || to === 'SOL' ? 6 : 2;
-  return output.toFixed(decimals);
+  // Prefer UI-friendly formatting using shared util
+  const { formatAmount } = await import('../lib/formatAmount');
+  const asset = to === 'ETH' ? (await import('../lib/assetNormalization')).getNativeAsset('ethereum') : to === 'SOL' ? (await import('../lib/assetNormalization')).getNativeAsset('solana') : (await import('../lib/assetNormalization')).getNativeAsset('stellar');
+  return formatAmount(output, asset, { showSymbol: false });
 }
 
 export function useRouteDerivedValues({
