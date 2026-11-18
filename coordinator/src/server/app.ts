@@ -128,6 +128,10 @@ export function createApp(deps: AppDeps): Express {
   // surfaced through the application's structured log stream.  The shared
   // abuse detector is also threaded through so cross-route enumeration is
   // tracked automatically.
+  // Static export paths must precede /orders/:id.
+  if (deps.orderExport) {
+    app.use("/api", exportRoutes(deps.orderExport, deps.log));
+  }
   app.use("/api", ordersRoutes(deps.orders, deps.log, abuseDetector));
   app.use("/api", secretsRoutes(deps.secrets, deps.log, abuseDetector));
   // quotes routes expose /api/quotes/eth-xlm, /api/quotes/eth-sol, and
@@ -153,13 +157,6 @@ export function createApp(deps: AppDeps): Express {
   if (deps.auditRepo) {
     const exporter = new AuditExporter(deps.auditRepo);
     app.use("/api", auditRoutes(deps.auditRepo, exporter, deps.log, deps.ordersRepo));
-  }
-
-  // Order export endpoints — only mounted when an OrderExportService is injected.
-  // These routes are intended for compliance and incident response, so they should
-  // be gated behind authentication in production.
-  if (deps.orderExport) {
-    app.use("/api", exportRoutes(deps.orderExport, deps.log));
   }
 
   // SSE endpoint — only mounted when a SseBroker is injected.

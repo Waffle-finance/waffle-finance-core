@@ -62,7 +62,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 8
 
       - name: Get pnpm store path
         id: pnpm-cache
@@ -123,7 +123,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 8
 
       - name: Get pnpm store path
         id: pnpm-cache
@@ -164,7 +164,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 8
 
       - name: Get pnpm store path
         id: pnpm-cache

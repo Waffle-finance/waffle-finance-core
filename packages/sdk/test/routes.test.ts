@@ -370,6 +370,29 @@ describe("unknown-route rejection", () => {
     }
   });
 
+  // #895: an unsupported route must fail deterministically with the specific
+  // UnknownRouteError reason *and* still let the caller discover what IS
+  // supported via listRoutes()/getRoute() metadata, rather than surfacing a
+  // generic/RPC-looking failure.
+  it.each([
+    { name: "planned but not-yet-live direction (xlm_to_sol)", selector: { direction: "xlm_to_sol" }, reason: "route_not_live" },
+    { name: "planned but not-yet-live direction (sol_to_xlm)", selector: { direction: "sol_to_xlm" }, reason: "route_not_live" },
+    { name: "live route requested off its enabled network", selector: { direction: "sol_to_eth", tokenGroup: "usdc", network: "mainnet" }, reason: "route_not_on_network" },
+  ])("surfaces supported-route metadata alongside the $reason failure for $name", ({ selector, reason }) => {
+    expect(() => assertSupportedRoute(selector)).toThrow(UnknownRouteError);
+    try {
+      assertSupportedRoute(selector);
+    } catch (err) {
+      expect((err as UnknownRouteError).reason).toBe(reason);
+    }
+    // The registry still knows about the route (metadata is discoverable)
+    // even though it cannot be used right now — this is what distinguishes
+    // "unsupported route" from "malformed RPC/address input", which never
+    // appears in the registry at all.
+    const declared = listRoutes({ direction: selector.direction as any });
+    expect(declared.length).toBeGreaterThan(0);
+  });
+
   it("returns undefined from getRoute for undeclared ids", () => {
     expect(getRoute("eth_to_btc:native:wafflefinance-htlc")).toBeUndefined();
     expect(getRoute("not-a-route-id")).toBeUndefined();

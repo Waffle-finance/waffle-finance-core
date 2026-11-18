@@ -102,3 +102,51 @@ describe("SDK client constructors fail fast", () => {
     })).toThrow(SdkConfigurationError);
   });
 });
+
+describe("table-driven required-field validation (#896)", () => {
+  const cases: Array<{
+    name: string;
+    run: () => unknown;
+    expectedField: string;
+  }> = [
+    { name: "missing rpcUrl", run: () => validateRpcUrl(undefined, "rpcUrl"), expectedField: "rpcUrl" },
+    { name: "malformed rpcUrl", run: () => validateRpcUrl("not-a-url", "rpcUrl"), expectedField: "rpcUrl" },
+    { name: "missing chainId", run: () => validateChainId(undefined, "chainId"), expectedField: "chainId" },
+    { name: "malformed chainId", run: () => validateChainId("abc", "chainId"), expectedField: "chainId" },
+    { name: "missing ethereum address", run: () => validateEthereumAddress(undefined, "address"), expectedField: "address" },
+    { name: "malformed ethereum address", run: () => validateEthereumAddress("not-hex", "address"), expectedField: "address" },
+    { name: "missing solana address", run: () => validateSolanaAddress(undefined, "address"), expectedField: "address" },
+    { name: "missing soroban address", run: () => validateSorobanAddress(undefined, "address"), expectedField: "address" },
+    { name: "missing network passphrase", run: () => validateNetworkPassphrase(undefined, "networkPassphrase"), expectedField: "networkPassphrase" },
+  ];
+
+  it.each(cases)("$name produces a typed error naming the field", ({ run, expectedField }) => {
+    try {
+      run();
+      throw new Error("expected validation to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SdkConfigurationError);
+      const issues = (err as SdkConfigurationError).issues;
+      expect(issues.some((i) => i.field === expectedField)).toBe(true);
+    }
+  });
+
+  it("rejects a cross-network mismatch (route valid for testnet, not for mainnet+tokenGroup)", () => {
+    expect(() =>
+      validateChainPair({ src: "ethereum", dst: "stellar", network: "mainnet", tokenGroup: "usdc" }),
+    ).toThrow(SdkConfigurationError);
+  });
+
+  it("accepts one valid config per supported chain", () => {
+    expect(validateRpcUrl("https://eth.example", "rpcUrl")).toBe("https://eth.example");
+    expect(validateEthereumAddress("0x1111111111111111111111111111111111111111", "address"))
+      .toBe("0x1111111111111111111111111111111111111111");
+
+    expect(validateRpcUrl("https://api.devnet.solana.com", "rpcUrl")).toBe("https://api.devnet.solana.com");
+    expect(validateSolanaAddress(SOLANA_PROGRAM, "address")).toBe(SOLANA_PROGRAM);
+
+    expect(validateRpcUrl("https://soroban.example", "rpcUrl")).toBe("https://soroban.example");
+    expect(validateSorobanAddress(SOROBAN_CONTRACT, "address")).toBe(SOROBAN_CONTRACT);
+    expect(validateNetworkPassphrase(Networks.TESTNET, "networkPassphrase")).toBe(Networks.TESTNET);
+  });
+});

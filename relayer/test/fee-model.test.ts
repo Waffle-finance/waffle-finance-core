@@ -372,3 +372,258 @@ describe('Utility converters', () => {
     expect(stroopsToXlm(stroops)).toBeCloseTo(xlm, 3);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Boundary / table-driven tests
+//
+// These tests verify the fee model never returns a negative deposit, NaN,
+// Infinity, or a value outside configured limits when fed extreme inputs.
+// They use table-driven patterns so new boundary inputs can be added without
+// changing the model design.
+// ---------------------------------------------------------------------------
+
+describe('FeeModel — boundary: zero amount', () => {
+  it('zero orderAmountNative with zero deposit and zero payout is unprofitable', () => {
+    const model = makeModel();
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: 0n,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: 0n,
+      gasLimitUnits: 200_000n,
+    });
+    // Net profit = 0 payout - gas cost (positive) - 0 deposit = negative
+    expect(dec.verdict).toBe('unprofitable');
+    expect(dec.netProfitUsd).toBeLessThan(0);
+    // Safety deposit must not be negative.
+    expect(dec.safetyDepositUsd).toBe(0);
+  });
+
+  it('zero safetyDepositWei never produces a negative deposit USD', () => {
+    const model = makeModel();
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: WEI,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: 0n,
+    });
+    expect(dec.safetyDepositUsd).toBe(0);
+    expect(dec.safetyDepositUsd).toBeGreaterThanOrEqual(0);
+  });
+
+  it('zero gasLimitUnits (gas-price > 0) produces zero gas cost', () => {
+    // gasLimitUnits = 0n is rejected by validation, but the boundary case
+    // at 1n approaches zero cost. Since 0n throws, verify 1n is valid.
+    const model = makeModel({ gasPriceGwei: 20 });
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: WEI,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: 0n,
+      gasLimitUnits: 1n,
+    });
+    // 1 gas unit * 20 gwei * $3000/ETH = tiny but valid non-negative cost
+    expect(dec.gasCostUsd).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(dec.gasCostUsd)).toBe(true);
+  });
+});
+
+describe('FeeModel — boundary: minimum amount', () => {
+  it('minimum non-zero payout (1 wei) produces finite USD payout close to zero', () => {
+    const model = makeModel({ ethPriceUsd: 3_000 });
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: 1n,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: 1n,
+      gasLimitUnits: 1n,
+    });
+    // 1 wei * $3000 / 1e18 = $3e-15 — extremely small but not NaN or negative
+    expect(Number.isFinite(dec.expectedPayoutUsd)).toBe(true);
+    expect(dec.expectedPayoutUsd).toBeGreaterThanOrEqual(0);
+    expect(dec.safetyDepositUsd).toBeGreaterThanOrEqual(0);
+  });
+
+  it('minimum payout in stroops (1 stroop XLM) produces finite USD payout', () => {
+    const model = makeModel({ xlmPriceUsd: 0.10 });
+    const dec = model.computeRelayDecision({
+      route: 'xlm_to_eth',
+      orderAmountNative: 1n,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: 1n,  // 1 stroop = 1e-7 XLM
+      gasLimitUnits: 1n,
+    });
+    expect(Number.isFinite(dec.expectedPayoutUsd)).toBe(true);
+    expect(dec.expectedPayoutUsd).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('FeeModel — boundary: large inputs', () => {
+  // Table of large but representable bigint inputs.
+  const LARGE_WEI = 1_000_000n * WEI;            // 1 million ETH
+  const LARGE_STROOP = 1_000_000_000n * STROOP;  // 1 billion XLM
+
+  it('very large payout does not produce NaN or Infinity', () => {
+    const model = makeModel({ ethPriceUsd: 3_000 });
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: LARGE_WEI,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: LARGE_WEI,
+      gasLimitUnits: 200_000n,
+    });
+    expect(Number.isFinite(dec.expectedPayoutUsd)).toBe(true);
+    expect(Number.isFinite(dec.gasCostUsd)).toBe(true);
+    expect(Number.isFinite(dec.netProfitUsd)).toBe(true);
+    expect(Number.isNaN(dec.netProfitUsd)).toBe(false);
+  });
+
+  it('very large safety deposit does not produce NaN or negative deposit USD', () => {
+    const model = makeModel({ ethPriceUsd: 3_000 });
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: LARGE_WEI,
+      safetyDepositWei: LARGE_WEI,
+      expectedPayoutNative: LARGE_WEI,
+      gasLimitUnits: 200_000n,
+    });
+    expect(Number.isFinite(dec.safetyDepositUsd)).toBe(true);
+    expect(dec.safetyDepositUsd).toBeGreaterThanOrEqual(0);
+    expect(Number.isNaN(dec.safetyDepositUsd)).toBe(false);
+  });
+
+  it('very large stroop payout on xlm_to_eth does not produce NaN', () => {
+    const model = makeModel({ xlmPriceUsd: 0.12 });
+    const dec = model.computeRelayDecision({
+      route: 'xlm_to_eth',
+      orderAmountNative: LARGE_STROOP,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: LARGE_STROOP,
+      gasLimitUnits: 200_000n,
+    });
+    expect(Number.isFinite(dec.expectedPayoutUsd)).toBe(true);
+    expect(Number.isNaN(dec.expectedPayoutUsd)).toBe(false);
+  });
+
+  it('table: extreme inputs all produce finite, non-negative deposits', () => {
+    const model = makeModel({ ethPriceUsd: 3_000, xlmPriceUsd: 0.10 });
+
+    type Row = {
+      label: string;
+      input: Parameters<typeof model.computeRelayDecision>[0];
+    };
+
+    const table: Row[] = [
+      {
+        label: 'zero everything',
+        input: { route: 'eth_to_xlm', orderAmountNative: 0n, safetyDepositWei: 0n, expectedPayoutNative: 0n, gasLimitUnits: 1n },
+      },
+      {
+        label: 'min amounts',
+        input: { route: 'eth_to_xlm', orderAmountNative: 1n, safetyDepositWei: 1n, expectedPayoutNative: 1n, gasLimitUnits: 1n },
+      },
+      {
+        label: 'large eth payout',
+        input: { route: 'eth_to_xlm', orderAmountNative: LARGE_WEI, safetyDepositWei: WEI, expectedPayoutNative: LARGE_WEI, gasLimitUnits: 300_000n },
+      },
+      {
+        label: 'large xlm payout',
+        input: { route: 'xlm_to_eth', orderAmountNative: LARGE_STROOP, safetyDepositWei: 0n, expectedPayoutNative: LARGE_STROOP, gasLimitUnits: 200_000n },
+      },
+      {
+        label: 'zero payout high deposit',
+        input: { route: 'eth_to_xlm', orderAmountNative: WEI, safetyDepositWei: 100n * WEI, expectedPayoutNative: 0n, gasLimitUnits: 200_000n },
+      },
+      {
+        label: 'unknown route suppresses payout',
+        input: { route: 'unknown' as const, orderAmountNative: WEI, safetyDepositWei: 0n, expectedPayoutNative: WEI, gasLimitUnits: 200_000n },
+      },
+    ];
+
+    for (const { label, input } of table) {
+      const dec = model.computeRelayDecision(input);
+      expect(Number.isFinite(dec.safetyDepositUsd), `${label}: safetyDepositUsd must be finite`).toBe(true);
+      expect(dec.safetyDepositUsd, `${label}: safetyDepositUsd must be >= 0`).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(dec.gasCostUsd), `${label}: gasCostUsd must be finite`).toBe(true);
+      expect(dec.gasCostUsd, `${label}: gasCostUsd must be >= 0`).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(dec.netProfitUsd), `${label}: netProfitUsd must be finite`).toBe(true);
+      expect(Number.isNaN(dec.netProfitUsd), `${label}: netProfitUsd must not be NaN`).toBe(false);
+      // shouldRelay must be a boolean (never undefined).
+      expect(typeof dec.shouldRelay, `${label}: shouldRelay must be a boolean`).toBe('boolean');
+    }
+  });
+});
+
+describe('FeeModel — boundary: clamping / configured limits', () => {
+  it('netProfitUsd does not exceed a theoretical upper bound given configured prices', () => {
+    // Upper bound: payout minus zero costs (zero deposit, zero gas).
+    const model = makeModel({ ethPriceUsd: 3_000, gasPriceGwei: 0 });
+    const payoutWei = 100n * WEI; // 100 ETH = $300,000
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: payoutWei,
+      safetyDepositWei: 0n,
+      expectedPayoutNative: payoutWei,
+      gasLimitUnits: 200_000n,
+    });
+    // With gas = 0, net profit == payout (theoretical max). Must not exceed it.
+    expect(dec.netProfitUsd).toBeLessThanOrEqual(dec.expectedPayoutUsd + 1e-9); // floating-point tolerance
+    expect(dec.netProfitUsd).toBeGreaterThanOrEqual(0);
+  });
+
+  it('unprofitable relay never returns positive netProfitUsd', () => {
+    const model = makeModel();
+    const dec = model.computeRelayDecision(unprofitableInput());
+    expect(dec.netProfitUsd).toBeLessThan(0);
+    expect(dec.verdict).toBe('unprofitable');
+  });
+
+  it('deposit does not exceed the input safetyDepositWei converted to USD', () => {
+    const model = makeModel({ ethPriceUsd: 3_000 });
+    const depositWei = 10n * WEI;  // 10 ETH = $30,000
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: WEI,
+      safetyDepositWei: depositWei,
+      expectedPayoutNative: 0n,
+      gasLimitUnits: 1n,
+    });
+    // safetyDepositUsd must be exactly 10 ETH * $3000 = $30,000 (±float precision)
+    expect(dec.safetyDepositUsd).toBeCloseTo(30_000, 4);
+    // Must not exceed input-implied value.
+    expect(dec.safetyDepositUsd).toBeLessThanOrEqual(30_000 + 1e-6);
+  });
+
+  it('base-unit rounding: 1 wei safety deposit is a positive but tiny USD value', () => {
+    const model = makeModel({ ethPriceUsd: 3_000 });
+    const dec = model.computeRelayDecision({
+      route: 'eth_to_xlm',
+      orderAmountNative: 1n,
+      safetyDepositWei: 1n,
+      expectedPayoutNative: 0n,
+      gasLimitUnits: 1n,
+    });
+    // 1 wei = $3e-15 at $3000/ETH — positive, finite, not NaN.
+    expect(dec.safetyDepositUsd).toBeGreaterThan(0);
+    expect(dec.safetyDepositUsd).toBeLessThan(1e-10); // sanity upper bound
+    expect(Number.isFinite(dec.safetyDepositUsd)).toBe(true);
+  });
+
+  it('verdict is one of the three defined strings for every boundary input', () => {
+    const model = makeModel();
+    const validVerdicts = new Set(['profitable', 'neutral', 'unprofitable']);
+
+    const inputs = [
+      profitableInput(),
+      unprofitableInput(),
+      { route: 'eth_to_xlm' as const, orderAmountNative: 0n, safetyDepositWei: 0n, expectedPayoutNative: 0n, gasLimitUnits: 1n },
+      { route: 'xlm_to_eth' as const, orderAmountNative: 1n, safetyDepositWei: 0n, expectedPayoutNative: 1n, gasLimitUnits: 1n },
+    ];
+
+    for (const input of inputs) {
+      const dec = model.computeRelayDecision(input);
+      expect(validVerdicts.has(dec.verdict)).toBe(true);
+    }
+  });
+});

@@ -4,6 +4,8 @@ import type { ReconciliationStatus } from './reconciliation/reconciler.js';
 import type { CacheVerificationStatus } from './reconciliation/cache-verifier.js';
 import type { ReadinessCheck } from './server/routes/health.js';
 import { isSolanaPlaceholder } from './config.js';
+import { validateSchemaVersion, MigrationValidationError } from './persistence/db.js';
+import { FatalStartupError } from './retry.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,11 +70,13 @@ async function timedCheck(name: string, probe: () => Promise<void>): Promise<Rea
   try {
     await probe();
     return { name, ok: true, latencyMs: Date.now() - startedAt };
-  } catch {
+  } catch (err) {
     return {
       name,
       ok: false,
-      detail: 'unavailable',
+      detail: err instanceof FatalStartupError && err.cause instanceof MigrationValidationError
+        ? (err.cause.code === 'MISSING_MIGRATIONS' ? 'missing_migrations' : 'schema_mismatch')
+        : 'unavailable',
       latencyMs: Date.now() - startedAt,
     };
   }
@@ -82,9 +86,10 @@ async function probeDatabase(db: Database): Promise<void> {
   const stmt = db.prepare('SELECT 1 AS ok');
   if ('getAsync' in stmt && typeof stmt.getAsync === 'function') {
     await stmt.getAsync();
-    return;
+  } else {
+    stmt.get();
   }
-  stmt.get();
+  await validateSchemaVersion(db);
 }
 
 async function probeJsonRpc(

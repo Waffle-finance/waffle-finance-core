@@ -73,6 +73,7 @@ export class SolanaListener {
   private readonly rpcProvider: SolanaRpcProvider;
   private readonly log: Logger;
   private stopped = false;
+  private startingOrStarted = false;
   private timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   /** Last confirmed slot we observed — used to detect regressions. */
@@ -113,6 +114,7 @@ export class SolanaListener {
   }
 
   start(): void {
+    if (this.startingOrStarted) return;
     if (isSolanaPlaceholder(this.cfg.solana.programId)) {
       this.log.warn(
         { programId: this.cfg.solana.programId },
@@ -121,6 +123,7 @@ export class SolanaListener {
       return;
     }
     this.log.info({ program: this.cfg.solana.programId }, 'Solana listener starting');
+    this.startingOrStarted = true;
     void this.loop();
   }
 

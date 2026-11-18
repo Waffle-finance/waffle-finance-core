@@ -1,3 +1,4 @@
+import { sanitizeAuditPayload } from '../utils/sanitize-for-log.js';
 /**
  * @file audit-repo-kysely.ts
  *
@@ -86,10 +87,10 @@ export class KyselyAuditRepository {
    */
   async append(input: AuditEntryInput): Promise<number> {
     try {
-      JSON.parse(input.payloadJson);
+      sanitizeAuditPayload(input.payloadJson);
     } catch {
       throw new SyntaxError(
-        `KyselyAuditRepository.append: payloadJson is not valid JSON: ${input.payloadJson}`
+        `KyselyAuditRepository.append: payloadJson is not valid JSON`
       );
     }
 
@@ -100,7 +101,7 @@ export class KyselyAuditRepository {
         event_type: input.eventType,
         order_id: input.orderId ?? null,
         request_id: input.requestId ?? null,
-        payload_json: input.payloadJson,
+        payload_json: sanitizeAuditPayload(input.payloadJson),
       })
       .executeTakeFirstOrThrow();
 
@@ -131,10 +132,10 @@ export class KyselyAuditRepository {
     await this.db.transaction().execute(async (trx) => {
       for (const input of inputs) {
         try {
-          JSON.parse(input.payloadJson);
+          sanitizeAuditPayload(input.payloadJson);
         } catch {
           throw new SyntaxError(
-            `KyselyAuditRepository.appendBatch: payloadJson is not valid JSON: ${input.payloadJson}`
+            `KyselyAuditRepository.appendBatch: payloadJson is not valid JSON`
           );
         }
 
@@ -145,7 +146,7 @@ export class KyselyAuditRepository {
             event_type: input.eventType,
             order_id: input.orderId ?? null,
             request_id: input.requestId ?? null,
-            payload_json: input.payloadJson,
+            payload_json: sanitizeAuditPayload(input.payloadJson),
           })
           .executeTakeFirstOrThrow();
 

@@ -240,6 +240,7 @@ export class OrdersRepository {
   private byPublicId!: Statement;
   private byHashlock!: Statement;
   private byAddress!: Statement;
+  private byStatus!: Statement;
   private byAddressCursor!: Statement;
   private bySrcOrderId!: Statement;
   private byDstOrderId!: Statement;
@@ -278,6 +279,12 @@ export class OrdersRepository {
         )
         ORDER BY created_at DESC
         LIMIT :limit OFFSET :offset
+      `,
+      byStatus: `
+        SELECT * FROM orders
+        WHERE status = :status
+        ORDER BY created_at DESC
+        LIMIT :limit
       `,
       byAddressCursor: `
         SELECT * FROM orders
@@ -544,6 +551,18 @@ export class OrdersRepository {
 
   async findByAddress(addr: string, limit = 50, offset = 0): Promise<OrderRow[]> {
     const rows = await this.all<OrderDbRow>(this.byAddress, { addr, limit, offset });
+    return rows.map(rowToOrder);
+  }
+
+  /**
+   * Find orders by status, most recent first.
+   *
+   * Used by `OrderExportService.findOrdersByFilters` for the documented
+   * status filter (optionally narrowed further by a created/updated date
+   * range in-memory on this bounded result set).
+   */
+  async findByStatus(status: OrderStatus, limit = 100): Promise<OrderRow[]> {
+    const rows = await this.all<OrderDbRow>(this.byStatus, { status, limit });
     return rows.map(rowToOrder);
   }
 

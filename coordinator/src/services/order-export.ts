@@ -64,7 +64,8 @@ export interface OrderLifecycleExport {
   /** Secret reveal details (if revealed) */
   secret: {
     revealed: boolean;
-    preimage: string | null;
+    /** Always null: preimages are excluded from compliance exports. */
+    preimage: null;
     revealedTx: string | null;
   };
 
@@ -144,6 +145,39 @@ export interface OrderExportResult {
   };
 }
 
+/**
+ * Thrown when `OrderExportFilters` describe a combination this service does
+ * not (yet) support with the available repository query methods.
+ *
+ * Supported combinations:
+ *  - `orderId` (exact match)
+ *  - `orderIds` (exact matches)
+ *  - `status` alone, optionally narrowed by `createdAfter`/`createdBefore`,
+ *    `updatedAfter`/`updatedBefore`, and `includeArchived`
+ *
+ * Anything else (e.g. `srcChain`/`dstChain` filters, or a date range with no
+ * `status`) is rejected here rather than silently returning zero rows.
+ */
+export class UnsupportedExportFilterError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedExportFilterError";
+  }
+}
+
+function omitPreimages(payload: Record<string, unknown>): Record<string, unknown> {
+  const clean = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(clean);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).filter(([key]) =>
+        !/preimage|secret/i.test(key)
+      ).map(([key, entry]) => [key, clean(entry)]));
+    }
+    return value;
+  };
+  return clean(payload) as Record<string, unknown>;
+}
+
 export class OrderExportService {
   constructor(
     private readonly ordersRepo: OrdersRepository,
@@ -213,13 +247,14 @@ export class OrderExportService {
       try {
         payload = JSON.parse(entry.payloadJson);
       } catch {
-        payload = { raw: entry.payloadJson };
+        // Malformed raw JSON may still contain a preimage; never echo it.
+        payload = { parseError: true };
       }
 
       return {
         type: entry.eventType,
         timestamp: entry.createdAt,
-        payload,
+        payload: omitPreimages(payload),
         requestId: entry.requestId ?? undefined,
       };
     });
@@ -261,7 +296,7 @@ export class OrderExportService {
       },
       secret: {
         revealed: order.preimage !== null,
-        preimage: order.preimage,
+        preimage: null,
         revealedTx: order.secretRevealedTx,
       },
       timestamps: {
@@ -296,16 +331,37 @@ export class OrderExportService {
       return orders.filter((o): o is OrderRow => o !== null);
     }
 
-    // General filters: implement a basic query builder
-    // In production, this would be a more sophisticated WHERE clause builder
-    // For now, fetch all orders and filter in memory (inefficient, but correct)
-    this.log.warn(
-      "OrderExportService.findOrdersByFilters is using in-memory filtering. " +
-      "Implement a proper query builder for production."
-    );
+    // Unsupported dimensions: no repository query exists for these, and
+    // adding a general-purpose query builder is out of scope. Fail clearly
+    // instead of silently returning no rows.
+    if (filters.srcChain || filters.dstChain) {
+      throw new UnsupportedExportFilterError(
+        "Filtering by srcChain/dstChain is not supported. " +
+        "Supported filters: orderId, orderIds, or status (optionally combined with a date range)."
+      );
+    }
 
-    // Placeholder: return empty array for complex filters
-    // TODO: Implement proper SQL query builder for complex filters
-    return [];
+    // Status filter — the only supported general filter. Optionally narrow
+    // further by date range on the (bounded, status-scoped) result set.
+    if (filters.status) {
+      const rows = await this.ordersRepo.findByStatus(filters.status, limit);
+
+      return rows.filter((order) => {
+        if (filters.createdAfter !== undefined && order.createdAt < filters.createdAfter) return false;
+        if (filters.createdBefore !== undefined && order.createdAt > filters.createdBefore) return false;
+        if (filters.updatedAfter !== undefined && order.updatedAt < filters.updatedAfter) return false;
+        if (filters.updatedBefore !== undefined && order.updatedAt > filters.updatedBefore) return false;
+        if (!filters.includeArchived && order.archivedAt !== null) return false;
+        return true;
+      });
+    }
+
+    // No orderId/orderIds/status given: a bare date range (or no filters at
+    // all) has no supported repository query to scope it. Reject rather than
+    // returning an unbounded or empty result.
+    throw new UnsupportedExportFilterError(
+      "Unsupported filter combination: supply orderId, orderIds, or status " +
+      "(optionally combined with a date range)."
+    );
   }
 }

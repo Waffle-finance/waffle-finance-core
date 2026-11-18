@@ -88,6 +88,13 @@ export function sseRoutes(
       return;
     }
 
+    req.once("aborted", cleanup);
+    res.once("close", () => req.removeListener("aborted", cleanup));
+    if (req.aborted) {
+      cleanup();
+      return;
+    }
+
     // 7. Send connected comment so the client knows the stream is live
     res.write(SSE_CONNECTED_FRAME);
 

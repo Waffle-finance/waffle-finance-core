@@ -1,5 +1,9 @@
 # Release Checklist
 
+- [ ] For relayer chain changes, review the [network-to-ABI reference](../relayer/NETWORK_ABI_REFERENCE.md)
+  and record execution versus skipped coverage for each affected mode. Testnet
+  success alone does not validate the mainnet factory ABI.
+
 > **Owner:** Engineering team  
 > **Status:** Current — use this for all releases.  
 > **Related docs:**

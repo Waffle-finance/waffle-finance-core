@@ -272,6 +272,29 @@ Write-Success "Frontend typecheck passed"
 Write-Host ""
 
 # ========================================
+# Soroban Contract Test Verification
+# ========================================
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "Soroban Contract Test Verification" -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host ""
+
+$sorobanStatus = "skipped"
+if (Get-Command cargo -ErrorAction SilentlyContinue) {
+    Write-Info "Running Soroban (Rust) contract tests from soroban/..."
+    Push-Location soroban
+    cargo test --workspace --locked
+    $cargoExitCode = $LASTEXITCODE
+    Pop-Location
+    if ($cargoExitCode -ne 0) { Write-Error-Message "Soroban cargo tests failed" }
+    $sorobanStatus = "passed"
+    Write-Success "Soroban cargo tests passed"
+} else {
+    Write-Warning-Message "SKIPPED: cargo not found - Soroban Rust tests were NOT run. Install the Rust toolchain and re-run this script to verify Soroban contracts."
+}
+Write-Host ""
+
+# ========================================
 # Final Report
 # ========================================
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -284,6 +307,11 @@ Write-Success "Contract artifacts verified"
 Write-Success "SDK package verified"
 Write-Success "All packages built successfully"
 Write-Success "All typechecks passed"
+if ($sorobanStatus -eq "passed") {
+    Write-Success "Soroban (Rust) tests passed"
+} else {
+    Write-Warning-Message "Soroban (Rust) tests SKIPPED (cargo not found)"
+}
 Write-Host ""
 Write-Host "Checksums:" -ForegroundColor White
 Write-Host "----------" -ForegroundColor White

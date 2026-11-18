@@ -8,6 +8,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
+import { EventEmitter } from "node:events";
+import { sseRoutes } from "../src/server/routes/sse.js";
 import pino from "pino";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +24,52 @@ import { SseBroker, MAX_SUBSCRIBERS } from "../src/sse/sse-broker.js";
 import { buildOrderCreatedPayload } from "../src/sse/event-builders.js";
 
 const log = pino({ level: "silent" });
+
+describe("SSE disconnect cleanup without sockets", () => {
+  it.each(["close", "aborted"])("removes a client exactly once after %s", async (event) => {
+    vi.useFakeTimers();
+    const broker = new SseBroker({ keepAliveIntervalMs: 30_000 });
+    try {
+      const id = "wf_0x" + "a".repeat(64);
+      const orders = { get: vi.fn().mockResolvedValue({ publicId: id }) };
+      const router = sseRoutes(orders as unknown as OrderService, broker);
+      const handler = router.stack.find(layer => layer.route?.path === "/orders/:id/events")!
+        .route.stack[0].handle;
+      const connect = async () => {
+        const req = Object.assign(new EventEmitter(), { params: { id }, headers: {}, aborted: false });
+        const res = Object.assign(new EventEmitter(), {
+          writableEnded: false,
+          status: vi.fn().mockReturnThis(), set: vi.fn().mockReturnThis(),
+          flushHeaders: vi.fn(), write: vi.fn().mockReturnValue(true), end: vi.fn(),
+        });
+        await handler(req, res, () => {});
+        res.write.mockClear();
+        return { req, res };
+      };
+      const closed = await connect();
+      const remaining = await connect();
+      expect(broker.subscriberCount).toBe(2);
+      if (event === "aborted") closed.req.emit("aborted");
+      else closed.res.emit("close");
+      expect(broker.subscriberCount).toBe(1);
+      closed.req.emit("aborted");
+      closed.res.emit("close");
+      closed.res.emit("close");
+      expect(broker.subscriberCount).toBe(1);
+      broker.broadcast(id, buildOrderCreatedPayload({
+        publicId: id, srcChain: "ethereum", srcLockTx: "0xfake", srcLockBlock: 1, srcTimelock: 100,
+      }));
+      expect(closed.res.write).not.toHaveBeenCalled();
+      expect(remaining.res.write).toHaveBeenCalledTimes(1);
+      expect(remaining.res.write.mock.calls[0][0]).toContain("OrderCreated");
+      remaining.res.emit("close");
+      expect(broker.subscriberCount).toBe(0);
+    } finally {
+      broker.shutdown();
+      vi.useRealTimers();
+    }
+  });
+});
 
 const VALID_HASHLOCK = "0x" + "ab".repeat(32);
 const VALID_ETH_ADDR = "0x1111111111111111111111111111111111111111";

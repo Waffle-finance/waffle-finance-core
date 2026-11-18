@@ -134,6 +134,11 @@ describe("secret-cipher: deriveKey", () => {
     expect(() => deriveKey("deadbeef")).toThrow(/32 bytes/);
   });
 
+  it("rejects a key that is too long", () => {
+    const tooLong = randomBytes(48).toString("hex"); // 96 hex chars = 48 bytes
+    expect(() => deriveKey(tooLong)).toThrow(/32 bytes/);
+  });
+
   it("rejects a key with invalid characters", () => {
     expect(() => deriveKey("z".repeat(64))).toThrow(/32 bytes/);
   });
@@ -213,11 +218,72 @@ describe("secret-cipher: isEncryptedBlob", () => {
 // SecretService integration tests (with real SQLite DB)
 // ---------------------------------------------------------------------------
 
+describe("SecretService: production (mainnet) mode guard", () => {
+  it("refuses to start on mainnet without SECRET_STORAGE_KEY", () => {
+    expect(() => new SecretService({} as any, log, undefined, "mainnet")).toThrow(
+      /SECRET_STORAGE_KEY is required when network=mainnet/
+    );
+  });
+
+  it("does not leak key material or preimages in the startup error", () => {
+    let caught: Error | undefined;
+    try {
+      new SecretService({} as any, log, undefined, "mainnet");
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).not.toMatch(/0x[0-9a-fA-F]{16,}/);
+  });
+
+  it("starts successfully on mainnet with a valid key configured", () => {
+    expect(() => new SecretService({} as any, log, VALID_KEY_HEX, "mainnet")).not.toThrow();
+  });
+
+  it("still allows plaintext (no key) on testnet/local-development", () => {
+    expect(() => new SecretService({} as any, log, undefined, "testnet")).not.toThrow();
+  });
+
+  it("defaults to testnet behaviour (no key, no network arg) for existing dev/test callers", () => {
+    expect(() => new SecretService({} as any, log)).not.toThrow();
+  });
+});
+
 describe("SecretService: encryption DISABLED (plaintext mode)", () => {
   it("rejects construction with an invalid key", () => {
     expect(() => new SecretService({} as any, log, "tooshort")).toThrow(
       /invalid SECRET_STORAGE_KEY/
     );
+  });
+
+  it("rejects construction with a malformed (non-hex, non-base64) key of the right length", () => {
+    const malformed = "!".repeat(64);
+    expect(() => new SecretService({} as any, log, malformed)).toThrow(
+      /invalid SECRET_STORAGE_KEY/
+    );
+  });
+
+  it("rejects construction with a too-long key", () => {
+    const tooLong = randomBytes(48).toString("hex");
+    expect(() => new SecretService({} as any, log, tooLong)).toThrow(
+      /invalid SECRET_STORAGE_KEY/
+    );
+  });
+
+  it("names the setting in the startup error without echoing the supplied key value", () => {
+    const secretValue = "tooshort-secret-do-not-leak";
+    try {
+      new SecretService({} as any, log, secretValue);
+      throw new Error("expected construction to throw");
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toContain("SECRET_STORAGE_KEY");
+      expect(message).not.toContain(secretValue);
+    }
+  });
+
+  it("accepts a correctly encoded key at construction", () => {
+    expect(() => new SecretService({} as any, log, VALID_KEY_HEX)).not.toThrow();
   });
 
   it("stores and retrieves a preimage as plaintext", async () => {

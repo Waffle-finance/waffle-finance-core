@@ -39,6 +39,7 @@ import { sql } from 'kysely';
 import type { KyselyCoordinatorDb } from './kysely-db.js';
 import {
   SQLITE_MIGRATIONS,
+  SQLITE_MIGRATION_OVERRIDES,
   POSTGRES_MIGRATION_FILES,
 } from './db.js';
 
@@ -99,7 +100,8 @@ export class KyselyMigrationRunner {
 
       if (existing) continue;
 
-      const migrationSql = loadMigrationSql(this.migrationsDir, file);
+      const sqlFile = this.isPostgres ? file : (SQLITE_MIGRATION_OVERRIDES[file] ?? file);
+      const migrationSql = loadMigrationSql(this.migrationsDir, sqlFile);
       const t0 = Date.now();
 
       // Execute the raw SQL inside a transaction so a partial migration

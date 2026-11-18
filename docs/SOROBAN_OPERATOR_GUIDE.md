@@ -191,6 +191,40 @@ Optional fields that disable the corresponding feature if absent (no error, warn
 | `SOROBAN_HTLC_TESTNET` / `SOROBAN_HTLC_MAINNET` | Soroban settlement flows disabled |
 | `SOROBAN_RESOLVER_REGISTRY_TESTNET` / `SOROBAN_RESOLVER_REGISTRY_MAINNET` | On-chain resolver lookup disabled |
 
+### Network identity preflight (passphrase and RPC)
+
+A wrong network passphrase or RPC endpoint can make valid contract calls fail or point the resolver at the wrong environment. Verify the configured network identity **before** starting any listener.
+
+**Expected passphrases** — sourced from the `STELLAR_TESTNET_PASSPHRASE` and `STELLAR_MAINNET_PASSPHRASE` constants in `packages/config/src/soroban-chain-config.ts`:
+
+| `NETWORK_MODE` | Required `STELLAR_NETWORK_PASSPHRASE` |
+|---|---|
+| `testnet` | `Test SDF Network ; September 2015` |
+| `mainnet` | `Public Global Stellar Network ; September 2015` |
+
+**Preflight steps:**
+
+1. Confirm `STELLAR_NETWORK_PASSPHRASE` matches the table above for the active `NETWORK_MODE`. `validateSorobanChainConfig()` reports a `PASSPHRASE_MISMATCH` configuration error when the two disagree.
+2. Ask the configured endpoint which network it actually serves. This diagnostic prints only the passphrase — no credentials from the `SOROBAN_RPC_URL` appear in the output:
+
+   ```bash
+   curl -s "$SOROBAN_RPC_URL" -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getNetwork"}' | jq -r '.result.passphrase'
+   ```
+
+   The result must equal the expected passphrase for the active `NETWORK_MODE`.
+3. Run the resolver's redacted config check without starting listeners:
+
+   ```bash
+   wafflefinance-resolver config-summary
+   ```
+
+   It validates the runtime configuration, prints a per-chain summary with every RPC endpoint reduced to its origin, and exits non-zero when the config is invalid.
+
+**Failure semantics.** At startup the resolver runs `validateResolverConfig()`, whose Soroban probe (`assertSorobanReachable()`) compares the endpoint's reported passphrase with the configured one. A passphrase mismatch — like an unreachable endpoint — raises `ConfigValidationError`, the resolver logs `startup aborted: invalid configuration`, and the process exits before any listener attaches. A mismatch is therefore a **startup failure, not a retryable order error**: no order-level retry is ever attempted against the wrong network. Only after this preflight passes do runtime retry policies (e.g. `TRY_AGAIN_LATER` handling in [RPC Degradation Behaviour](#rpc-degradation-behaviour)) apply.
+
+**Credential redaction.** Validation errors and `config-summary` output reduce RPC URLs to their origin (scheme + host), so an API key embedded in the URL path or query — e.g. `https://vendor.example/v3/<project-key>` — never reaches logs or shared diagnostics. Example output shows only `rpc=https://vendor.example`. When reporting a preflight failure, share the `jq` passphrase output or the `config-summary` lines rather than the raw `SOROBAN_RPC_URL`.
+
 ### Readiness probe
 
 The `/readyz` endpoint (coordinator: port 3000) includes a `soroban_rpc` check:

@@ -4,7 +4,24 @@
  *              across Ethereum, Solana, and Stellar chains.
  */
 
-import type { OrderRow } from '../../persistence/orders-repo.js';
+/** Minimal order view consumed by the relayer recovery handlers. */
+export interface RecoveryOrder {
+  publicId: string;
+  orderHash?: string;
+  status: string;
+  srcChain: string;
+  dstChain: string;
+  srcTimelock?: number | null;
+  dstTimelock?: number | null;
+  makingAmount?: string;
+  takingAmount?: string;
+  srcAsset?: string;
+  takerAsset?: string;
+  refundTxHash?: string | null;
+  archivedAt?: number | null;
+  metadata?: Record<string, unknown>;
+}
+type OrderRow = RecoveryOrder;
 
 // ---------------------------------------------------------------------------
 // Recovery Request Types
@@ -34,7 +51,7 @@ export interface RecoveryRequest {
   orderHash: string;
   type: RecoveryType;
   status: RecoveryStatus;
-  chain: ChainType;
+  chain: ChainType | 'unknown';
   initiator: string;
   reason: string;
   metadata: {
@@ -49,6 +66,11 @@ export interface RecoveryRequest {
   };
   createdAt: number;
   updatedAt: number;
+  /** Total submissions including the first; maximum five. */
+  attempts?: number;
+  lastAttemptAt?: number | null;
+  /** Epoch milliseconds; null means no automatic retry. */
+  nextAttemptAt?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +131,7 @@ export interface RecoveryResult {
   amount?: string;
   ledger?: number;
   timestamp: number;
-  chain: ChainType;
+  chain: ChainType | 'unknown';
   error?: string;
   errorType?: 'transient' | 'terminal' | 'ambiguous';
 }

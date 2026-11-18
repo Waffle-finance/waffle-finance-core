@@ -1108,6 +1108,66 @@ const SOLANA_CFG: CoordinatorConfig = {
   },
 };
 
+describe("Repeated coordinator listener wake (start)", () => {
+  it.each([false, true])("keeps one Ethereum subscription per event after catch-up failure=%s", async (failCatchup) => {
+    vi.useFakeTimers();
+    const orders = await freshOrders();
+    const listener = new EthereumListener(BASE_CFG, orders, log);
+    const client = (listener as any).client;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    client.getBlockNumber.mockImplementationOnce(async () => {
+      await gate;
+      if (failCatchup) throw new Error("temporary RPC failure");
+      return mockLatestBlock;
+    });
+    try {
+      await Promise.all(Array.from({ length: 5 }, async () => listener.start()));
+      expect(client.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(client.watchEvent).not.toHaveBeenCalled();
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      // The documented fallback watches live events when historical catch-up fails.
+      expect(client.watchEvent).toHaveBeenCalledTimes(3);
+      for (const name of ["OrderCreated", "OrderClaimed", "OrderRefunded"]) {
+        expect(client.watchEvent.mock.calls.filter(([options]: any[]) => options.event.name === name)).toHaveLength(1);
+      }
+      const timers = vi.getTimerCount();
+      listener.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.watchEvent).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(timers);
+    } finally {
+      release();
+      listener.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["soroban", "solana"])("starts one %s polling loop across concurrent and later wakes", async chain => {
+    const orders = await freshOrders();
+    const listener = chain === "soroban"
+      ? new SorobanListener(BASE_CFG, orders, log)
+      : new SolanaListener(SOLANA_CFG, orders, log);
+    const method = chain === "soroban" ? "bootstrapAndLoop" : "loop";
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const loop = vi.spyOn(listener as any, method).mockReturnValue(pending);
+    try {
+      await Promise.all(Array.from({ length: 5 }, async () => listener.start()));
+      expect(loop).toHaveBeenCalledTimes(1);
+      release();
+      await pending;
+      listener.start();
+      expect(loop).toHaveBeenCalledTimes(1);
+    } finally {
+      listener.stop();
+      release();
+      loop.mockRestore();
+    }
+  });
+});
+
 /** Build a fake signature info entry (returned by getSignaturesForAddress). */
 function fakeSigInfo(sig: string, slot: number, err: null | object = null) {
   return { signature: sig, slot, err, memo: null, blockTime: null };

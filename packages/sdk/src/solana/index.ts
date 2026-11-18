@@ -96,17 +96,8 @@ export {
   type SolanaWalletLifecycleOptions,
 } from "./wallet.js";
 
-// The multi-endpoint RPC provider is part of the Solana surface: the relayer and
-// the coordinator both import it from this subpath. It previously existed only
-// on the package root, so `@wafflefinance/sdk/solana` resolved to `undefined`
-// at runtime (`createSolanaRpcProvider is not a function`) even though the
-// TypeScript import looked fine in editors that resolved the root entrypoint.
-export {
-  SolanaRpcProvider,
-  createSolanaRpcProvider,
-} from "./rpc-provider.js";
-
-// Multi-endpoint RPC provider with automatic failover (#713)
+// Multi-endpoint RPC provider with automatic failover (#713).
+// Re-exported here so `@wafflefinance/sdk/solana` resolves correctly at runtime.
 export {
   SolanaRpcProvider,
   createSolanaRpcProvider,

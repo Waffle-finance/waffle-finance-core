@@ -31,6 +31,7 @@ import {
   getMigrationsDir,
   MigrationValidationError,
   SQLITE_MIGRATIONS,
+  SQLITE_MIGRATION_OVERRIDES,
   POSTGRES_MIGRATION_FILES,
 } from "../src/persistence/db.js";
 
@@ -138,7 +139,10 @@ describe("validateMigrationRegistry — real repository conformance", () => {
     const files = listMigrationFiles(getMigrationsDir());
     expect(files.length).toBeGreaterThan(0);
     // Every on-disk file must be a member of the sqlite or postgres list.
-    const registered = new Set([...SQLITE_MIGRATIONS, ...POSTGRES_MIGRATION_FILES]);
+    const registered = new Set<string>([
+      ...SQLITE_MIGRATIONS, ...POSTGRES_MIGRATION_FILES,
+      ...Object.values(SQLITE_MIGRATION_OVERRIDES),
+    ]);
     for (const f of files) {
       expect(registered.has(f), `expected ${f} to be registered`).toBe(true);
     }

@@ -7,15 +7,17 @@
  *  - Incident responders investigating failures
  *  - Operators analyzing completion rates and failure modes
  *
- * Security: these routes should be gated behind authentication in production.
+ * Security: all export routes require an operator bearer token (401 if absent,
+ * 403 if invalid). API rate-limit keys do not grant operator permissions.
  * Exported data includes sensitive order details (addresses, amounts, etc.).
  */
 
-import { Router } from "express";
+import { Router, type ErrorRequestHandler } from "express";
 import { z } from "zod";
 import type { Logger } from "pino";
-import type { OrderExportService, OrderLifecycleExport } from "../../services/order-export.js";
-import { validationError, notFoundError } from "../errors.js";
+import { OrderExportService, UnsupportedExportFilterError, type OrderLifecycleExport } from "../../services/order-export.js";
+import { validationError, notFoundError, orderValidationError } from "../errors.js";
+import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 
 /** Supported download formats for the user-facing export endpoint. */
 export type ExportFormat = "json" | "csv";
@@ -121,7 +123,7 @@ const exportOrderSchema = z.object({
 
 /** Validation schema for bulk export filter requests. */
 const exportFiltersSchema = z.object({
-  orderIds: z.array(z.string()).optional(),
+  orderIds: z.array(z.string().trim().min(1)).min(1).optional(),
   status: z.enum([
     "announced",
     "src_locked",
@@ -223,6 +225,8 @@ const downloadQuerySchema = z.object({
  */
 export function exportRoutes(exportService: OrderExportService, log?: Logger): Router {
   const router = Router();
+  const authorize = requireRole("operator", { operatorKeys: loadOperatorKeys(), log });
+  router.use(["/export/orders", "/orders/export"], authorize);
 
   /**
    * GET /export/orders/:orderId
@@ -277,6 +281,10 @@ export function exportRoutes(exportService: OrderExportService, log?: Logger): R
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json(validationError(err.errors));
+        return;
+      }
+      if (err instanceof UnsupportedExportFilterError) {
+        res.status(400).json(orderValidationError(err.message));
         return;
       }
       next(err);
@@ -353,9 +361,18 @@ export function exportRoutes(exportService: OrderExportService, log?: Logger): R
         res.status(400).json(validationError(err.errors));
         return;
       }
+      if (err instanceof UnsupportedExportFilterError) {
+        res.status(400).json(orderValidationError(err.message));
+        return;
+      }
       next(err);
     }
   });
 
+  const exportErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+    log?.error({ err }, "Order export failed");
+    res.status(500).json({ error: "internal_error", message: "Order export failed" });
+  };
+  router.use(exportErrorHandler);
   return router;
 }

@@ -5,8 +5,8 @@
  */
 
 import { IRecoveryHandler, RecoveryResult, RecoveryType, ChainType, IRecoveryOrchestrator } from './IRecoveryService.js';
-import type { OrderRow } from '../orders-repo.js';
-import { getLogger } from '../logger.js';
+import type { RecoveryOrder as OrderRow } from './IRecoveryService.js';
+import { getLogger } from '../../logger.js';
 import { EthereumRecoveryHandler } from './ethereum/EthereumRecoveryHandler.js';
 import { StellarRecoveryHandler } from './stellar/StellarRecoveryHandler.js';
 

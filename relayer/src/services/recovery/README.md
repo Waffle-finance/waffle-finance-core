@@ -241,3 +241,23 @@ The new centralized service:
 3. Enhanced metrics and alerting
 4. Support for partial settlements
 5. Recovery prioritization based on age and value
+
+## Automatic retry policy
+
+The centralized `RecoveryService` keeps request retry state in memory. Each
+request permits five total submissions, including the initial attempt. Explicit
+transient failures return to `pending` with `attempts`, `lastAttemptAt`, and
+`nextAttemptAt` (epoch milliseconds). The shared retry engine's backoff helper
+uses a 1-second base, doubles the delay, adds 20% jitter, and caps at 30 seconds.
+The 60-second monitor submits only when eligible; it may run later than the
+recorded eligibility time. Concurrent ticks skip `in_progress` requests.
+
+Success clears the next attempt and prevents resubmission. Terminal errors and
+exhaustion end in `failed`; ambiguous results or thrown exceptions require
+operator review to avoid duplicating a transaction that may already have landed.
+An order that becomes terminal before its next attempt cancels the request.
+Retry state does not survive process restarts. Returned request views omit the
+internal order reference. Request logs use structured `orderId`, `orderHash`,
+`requestId`, `action`, `status`, `attempts`, and `nextAttemptAt` fields without
+copying raw errors, reasons, RPC URLs, or order payloads.
+

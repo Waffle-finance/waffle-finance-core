@@ -193,3 +193,189 @@ describe('sanitizeForLog — JSON serialisation safety', () => {
     expect(serialised).toContain('wf_abc123');
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Sanitized error boundary — provider/RPC errors that may carry credentials
+// or preimage-like data. These tests prove those secrets do not escape
+// through the transaction/recovery logging boundary while keeping the
+// error category and operation context diagnosable.
+//
+// The test does NOT depend on an external RPC provider — synthetic errors
+// are passed through sanitizeForLog directly.
+// ---------------------------------------------------------------------------
+
+import { sanitizeString } from '../src/utils/sanitize-for-log.js';
+
+// Synthetic secrets used across the boundary tests. These mimic what a
+// real provider error might surface: an RPC URL with embedded credentials
+// and a preimage leaked into an error message body.
+const RPC_USER = 'rpc-user-7f3a';
+const RPC_PASS = 'super-secret-passw0rd!';
+const RPC_CRED_URL = `https://${RPC_USER}:${RPC_PASS}@mainnet.infura.io/v3/abc123`;
+const PREIMAGE_LEAK = '0x' + 'cd'.repeat(32);   // 64 hex chars — HTLC preimage
+const PRIVATE_KEY_LEAK = '0x' + 'ab'.repeat(32); // 64 hex chars — private key
+
+describe('sanitizeForLog — provider error credential boundary', () => {
+  it('redacts credentials embedded in an RPC URL string', () => {
+    const sanitized = sanitizeForLog(`RPC failed: ${RPC_CRED_URL}`);
+    expect(sanitized).not.toContain(RPC_USER);
+    expect(sanitized).not.toContain(RPC_PASS);
+    expect(sanitized).toContain('[REDACTED_CREDENTIALS]');
+    // The host is preserved so the operator can still diagnose the endpoint.
+    expect(sanitized).toContain('mainnet.infura.io');
+  });
+
+  it('redacts credentials in an Error message containing an RPC URL', () => {
+    const err = new Error(`Horizon request failed for ${RPC_CRED_URL}`);
+    const sanitized = sanitizeForLog(err) as Error;
+
+    expect(sanitized.message).not.toContain(RPC_USER);
+    expect(sanitized.message).not.toContain(RPC_PASS);
+    expect(sanitized.message).toContain('[REDACTED_CREDENTIALS]');
+    expect(sanitized.message).toContain('mainnet.infura.io');
+  });
+
+  it('redacts a preimage leaked into a provider error message', () => {
+    const err = new Error(
+      `preimage reveal failed: preimage=${PREIMAGE_LEAK} for order wf_abc`,
+    );
+    const sanitized = sanitizeForLog(err) as Error;
+
+    expect(sanitized.message).not.toContain('cd'.repeat(32));
+    expect(sanitized.message).toContain('[REDACTED_SECRET]');
+    // Safe context remains diagnosable.
+    expect(sanitized.message).toContain('order wf_abc');
+  });
+
+  it('redacts both credentials and a preimage in the same error message', () => {
+    const err = new Error(
+      `submit to ${RPC_CRED_URL} rejected preimage=${PREIMAGE_LEAK}`,
+    );
+    const sanitized = sanitizeForLog(err) as Error;
+
+    const serialised = JSON.stringify({
+      message: sanitized.message,
+      name: sanitized.name,
+    });
+
+    expect(serialised).not.toContain(RPC_USER);
+    expect(serialised).not.toContain(RPC_PASS);
+    expect(serialised).not.toContain('cd'.repeat(32));
+    expect(serialised).toContain('[REDACTED_CREDENTIALS]');
+    expect(serialised).toContain('[REDACTED_SECRET]');
+    expect(serialised).toContain('mainnet.infura.io');
+  });
+
+  it('preserves the error name and category so operators can diagnose it', () => {
+    class ProviderTimeoutError extends Error {
+      readonly category = 'rpc_timeout';
+      constructor(message: string) {
+        super(message);
+        this.name = 'ProviderTimeoutError';
+      }
+    }
+    const err = new ProviderTimeoutError(
+      `request to ${RPC_CRED_URL} timed out (preimage=${PREIMAGE_LEAK})`,
+    );
+
+    const sanitized = sanitizeForLog(err) as ProviderTimeoutError;
+
+    expect(sanitized).toBeInstanceOf(Error);
+    expect(sanitized.name).toBe('ProviderTimeoutError');
+    expect((sanitized as any).category).toBe('rpc_timeout');
+    // Secrets are still redacted.
+    expect(sanitized.message).not.toContain(RPC_USER);
+    expect(sanitized.message).not.toContain(RPC_PASS);
+    expect(sanitized.message).not.toContain('cd'.repeat(32));
+  });
+
+  it('redacts credentials carried in a custom error property', () => {
+    const err = Object.assign(new Error('RPC connection error'), {
+      endpoint: RPC_CRED_URL,
+      preimage: PREIMAGE_LEAK,
+    }) as Error & { endpoint: string; preimage: string };
+
+    const sanitized = sanitizeForLog(err) as typeof err;
+    expect(sanitized.endpoint).not.toContain(RPC_USER);
+    expect(sanitized.endpoint).not.toContain(RPC_PASS);
+    expect(sanitized.endpoint).toContain('[REDACTED_CREDENTIALS]');
+    expect(sanitized.preimage).toBe('[REDACTED_SECRET]');
+  });
+
+  it('preserves a private key in a transaction-context object boundary', () => {
+    // Simulate the transaction/recovery logging boundary: a provider error
+    // wrapped with transaction context that includes a leaked private key.
+    const providerErr = Object.assign(new Error('submit failed'), {
+      response: {
+        status: 400,
+        url: RPC_CRED_URL,
+        data: `tx rejected, preimage=${PREIMAGE_LEAK}`,
+      },
+    });
+
+    const txContext = {
+      orderId: 'wf_order_123',
+      route: 'eth_to_xlm',
+      stage: 'chain_action_failed',
+      error: providerErr,
+    };
+
+    const sanitized = sanitizeForLog(txContext) as typeof txContext;
+    const serialised = JSON.stringify(sanitized);
+
+    // Safe chain and transaction context remains available.
+    expect(serialised).toContain('wf_order_123');
+    expect(serialised).toContain('eth_to_xlm');
+    expect(serialised).toContain('chain_action_failed');
+
+    // Secrets are absent from the emitted (serialised) log.
+    expect(serialised).not.toContain(RPC_USER);
+    expect(serialised).not.toContain(RPC_PASS);
+    expect(serialised).not.toContain('cd'.repeat(32));
+    expect(serialised).not.toContain('ab'.repeat(32));
+
+    // Redaction markers are present.
+    expect(serialised).toContain('[REDACTED_CREDENTIALS]');
+    expect(serialised).toContain('[REDACTED_SECRET]');
+  });
+
+  it('does not depend on an external RPC provider — synthetic only', () => {
+    // This test documents that the boundary is self-contained: it exercises
+    // sanitizeForLog with a synthetic error and asserts no network access
+    // is required.
+    const synthetic = new Error(`synthetic ${RPC_CRED_URL} ${PRIVATE_KEY_LEAK}`);
+    const sanitized = sanitizeForLog(synthetic) as Error;
+    expect(sanitized.message).not.toContain(RPC_USER);
+    expect(sanitized.message).not.toContain(RPC_PASS);
+    expect(sanitized.message).not.toContain('ab'.repeat(32));
+  });
+});
+
+describe('sanitizeString — URL credential redaction', () => {
+  it('redacts user:password@ in an https URL', () => {
+    const result = sanitizeString(RPC_CRED_URL);
+    expect(result).not.toContain(RPC_USER);
+    expect(result).not.toContain(RPC_PASS);
+    expect(result).toContain('[REDACTED_CREDENTIALS]');
+    expect(result).toContain('mainnet.infura.io');
+  });
+
+  it('preserves the protocol and host for diagnosability', () => {
+    const result = sanitizeString('https://user:pass@rpc.example.com:8545');
+    expect(result).toContain('https://');
+    expect(result).toContain('rpc.example.com:8545');
+    expect(result).toContain('[REDACTED_CREDENTIALS]');
+  });
+
+  it('does not redact URLs without credentials', () => {
+    const url = 'https://mainnet.infura.io/v3/abc123';
+    expect(sanitizeString(url)).toBe(url);
+  });
+
+  it('still redacts long hex secrets in the same string', () => {
+    const result = sanitizeString(`preimage=${PREIMAGE_LEAK}`);
+    expect(result).not.toContain('cd'.repeat(32));
+    expect(result).toContain('[REDACTED_SECRET]');
+  });
+});

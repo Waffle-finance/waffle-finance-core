@@ -5,8 +5,8 @@
  */
 
 import { IRecoveryHandler, RecoveryResult, RecoveryValidation, ChainType } from '../IRecoveryService.js';
-import type { OrderRow } from '../../orders-repo.js';
-import { getLogger } from '../../logger.js';
+import type { RecoveryOrder as OrderRow } from '../IRecoveryService.js';
+import { getLogger } from '../../../logger.js';
 
 const log = getLogger().child({ handler: 'stellar' });
 

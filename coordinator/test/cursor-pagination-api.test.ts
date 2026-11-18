@@ -65,6 +65,41 @@ describe("Cursor Pagination API", () => {
   });
 
   describe("GET /orders/history", () => {
+    it.each(["12junk", "1.5", "NaN"])("rejects malformed cursor page size %s deterministically", async limit => {
+      const cursor = Buffer.from(JSON.stringify({ createdAt: Date.now() + 86400000, id: 999999 })).toString("base64url");
+      const query = { address: VALID_ETH_ADDR, cursor, limit };
+      const first = await request(app).get("/api/orders/history").query(query).expect(400);
+      const repeated = await request(app).get("/api/orders/history").query(query).expect(400);
+      expect(first.body.error).toBe("validation_error");
+      expect(repeated.body).toEqual(first.body);
+      expect(first.body).not.toHaveProperty("pagination");
+    });
+
+    it.each([
+      ["zero", "0", 1],
+      ["negative", "-5", 1],
+      ["default", undefined, 50],
+      ["maximum", "200", 200],
+      ["over maximum", "201", 200],
+    ])("keeps cursor continuation stable for %s page size", async (_name, requested, effective) => {
+      await createTestOrders(service, 205, VALID_ETH_ADDR);
+      const cursor = Buffer.from(JSON.stringify({ createdAt: Date.now() + 86400000, id: 999999 })).toString("base64url");
+      const query = { address: VALID_ETH_ADDR, cursor };
+      const baseline = await request(app).get("/api/orders/history").query({ ...query, limit: effective }).expect(200);
+      const response = await request(app).get("/api/orders/history")
+        .query(requested === undefined ? query : { ...query, limit: requested }).expect(200);
+      expect(response.body).toEqual(baseline.body);
+      expect(response.body.orders).toHaveLength(effective);
+      expect(response.body.pagination.limit).toBe(effective);
+      expect(response.body.pagination.nextCursor).toEqual(expect.any(String));
+      const next = await request(app).get("/api/orders/history")
+        .query({ address: VALID_ETH_ADDR, cursor: response.body.pagination.nextCursor, limit: effective }).expect(200);
+      const expected = await service.historyWithCursor(VALID_ETH_ADDR, effective, response.body.pagination.nextCursor);
+      expect(next.body.orders.map((order: { id: string }) => order.id)).toEqual(expected.orders.map(order => order.publicId));
+      const ids = response.body.orders.map((order: { id: string }) => order.id);
+      expect(next.body.orders.every((order: { id: string }) => !ids.includes(order.id))).toBe(true);
+    });
+
     it("returns empty history for address with no orders", async () => {
       const response = await request(app)
         .get("/api/orders/history")

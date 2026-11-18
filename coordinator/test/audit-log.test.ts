@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "vitest";
 import { resolve } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Writable } from "node:stream";
 import { openDatabase } from "../src/persistence/db.js";
@@ -782,6 +782,54 @@ describe("AuditRepository.query — limit boundary validation", () => {
 // ── (d): malformed JSON payload in AuditRepository.append ────────────────────
 
 describe("AuditRepository.append — payload JSON validation", () => {
+  it("redacts sensitive fields throughout persisted and exported audit payloads", async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "wf-audit-redaction-"));
+    const db = await openDatabase(`file:${dir}/test.db`);
+    try {
+      const auditRepo = new AuditRepository(db);
+      const exporter = new AuditExporter(auditRepo);
+      const payload = {
+        actor: "operator-test", action: "restore.verify", hashlock: HASHLOCK,
+        preimage: "fake-top-preimage", privateKey: "fake-top-private-key",
+        authorization: "Bearer fake-top-token",
+        request: {
+          headers: { Authorization: "Bearer fake-nested-token", "x-request-id": "request-safe" },
+          body: { private_key: "fake-nested-key", items: [
+            { preimage: "fake-array-preimage", asset: "native" },
+            { nested: { deeper: { "PRIVATE-KEY": "fake-deep-key", count: 2 } } },
+          ] },
+        },
+      };
+      await auditRepo.append({ eventType: "system.db_migration", orderId: "order-safe",
+        requestId: "request-safe", payloadJson: JSON.stringify(payload) });
+      const { entries } = await auditRepo.query({});
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ eventType: "system.db_migration",
+        orderId: "order-safe", requestId: "request-safe" });
+      const stored = JSON.parse(entries[0]!.payloadJson);
+      expect(stored).toMatchObject({ actor: payload.actor, action: payload.action, hashlock: HASHLOCK,
+        preimage: "[REDACTED_SECRET]", privateKey: "[REDACTED_SECRET]",
+        authorization: "[REDACTED_SECRET]", request: {
+          headers: { Authorization: "[REDACTED_SECRET]", "x-request-id": "request-safe" },
+          body: { private_key: "[REDACTED_SECRET]", items: [
+            { preimage: "[REDACTED_SECRET]", asset: "native" },
+            { nested: { deeper: { "PRIVATE-KEY": "[REDACTED_SECRET]", count: 2 } } },
+          ] },
+        } });
+      const { stream, getOutput } = collectWritable();
+      await exporter.exportNdjson(stream, {});
+      for (const secret of ["fake-top-preimage", "fake-top-private-key", "fake-top-token",
+        "fake-nested-token", "fake-nested-key", "fake-array-preimage", "fake-deep-key"]) {
+        expect(entries[0]!.payloadJson).not.toContain(secret);
+        expect(getOutput()).not.toContain(secret);
+      }
+      expect(payload.preimage).toBe("fake-top-preimage");
+    } finally {
+      if ("close" in db) db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("throws SyntaxError for malformed JSON and does not insert a row", async () => {
     const { auditRepo } = await freshSetup();
 

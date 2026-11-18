@@ -9,24 +9,30 @@ import {
   RecoveryRequest, 
   RecoveryResult, 
   RecoveryType, 
-  RecoveryStatus, 
   RecoveryStats,
   RecoverySafetyCheck 
 } from './IRecoveryService.js';
 import { RecoveryOrchestrator } from './RecoveryOrchestrator.js';
-import type { OrderRow } from '../orders-repo.js';
-import { getLogger } from '../logger.js';
+import type { RecoveryOrder as OrderRow, IRecoveryOrchestrator } from './IRecoveryService.js';
+import { getLogger } from '../../logger.js';
+
+import { calculateBackoff } from '../../utils/retry-engine.js';
 
 const log = getLogger().child({ service: 'recovery' });
+
+const MAX_RECOVERY_ATTEMPTS = 5;
+const RETRY_BASE_DELAY_MS = 1_000;
+const RETRY_MAX_DELAY_MS = 30_000;
 
 // In-memory store for recovery requests
 interface RecoveryRequestRecord extends RecoveryRequest {
   attempts: number;
   lastAttemptAt: number | null;
+  order: OrderRow;
 }
 
 export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
-  private orchestrator: RecoveryOrchestrator;
+  private orchestrator: IRecoveryOrchestrator;
   private recoveryRequests: Map<string, RecoveryRequestRecord> = new Map();
   private monitoringInterval: NodeJS.Timeout | null = null;
   private stats: RecoveryStats = {
@@ -39,7 +45,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     lastRecoveryAt: 0,
   };
   
-  constructor(orchestrator?: RecoveryOrchestrator) {
+  constructor(orchestrator?: IRecoveryOrchestrator) {
     this.orchestrator = orchestrator || new RecoveryOrchestrator();
   }
   
@@ -56,7 +62,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
       this.processPendingRecoveries();
     }, 60_000);
     
-    log.info('[recovery] service started');
+    log.info({ action: 'monitor', status: 'started' }, '[recovery] service started');
   }
   
   /**
@@ -68,7 +74,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
       this.monitoringInterval = null;
     }
     
-    log.info('[recovery] service stopped');
+    log.info({ action: 'monitor', status: 'stopped' }, '[recovery] service stopped');
   }
   
   /**
@@ -84,7 +90,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
   getRecoveryRequests(orderHash: string): RecoveryRequest[] {
     return Array.from(this.recoveryRequests.values())
       .filter(r => r.orderHash === orderHash)
-      .map(r => ({ ...r }));
+      .map(r => this.publicRequest(r));
   }
   
   /**
@@ -92,7 +98,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    */
   getRecoveryRequest(requestId: string): RecoveryRequest | undefined {
     const record = this.recoveryRequests.get(requestId);
-    return record ? { ...record } : undefined;
+    return record ? this.publicRequest(record) : undefined;
   }
   
   /**
@@ -104,14 +110,14 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     reason?: string
   ): Promise<RecoveryResult> {
     log.info(
-      { orderId: order.publicId, type, reason },
+      { orderId: order.publicId, action: type, status: order.status },
       '[recovery] executing recovery'
     );
     
     // Check if already in a terminal state
     if (this.isOrderTerminal(order)) {
       log.warn(
-        { orderId: order.publicId, status: order.status },
+        { orderId: order.publicId, action: type, status: order.status },
         '[recovery] order is in terminal state - cannot recover'
       );
       
@@ -128,8 +134,8 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     const existingRequest = this.findActiveRecovery(order);
     if (existingRequest) {
       log.warn(
-        { orderId: order.publicId, existingRequest: existingRequest.id },
-        '[recovery] recovery already in progress'
+        { orderId: order.publicId, requestId: existingRequest.id, action: type, status: existingRequest.status, attempts: existingRequest.attempts },
+        '[recovery] existing recovery request prevents duplicate submission'
       );
       
       return {
@@ -148,7 +154,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
       orderId: order.publicId,
       orderHash: order.orderHash || order.publicId,
       type,
-      status: RecoveryStatus.Pending,
+      status: 'pending',
       chain: 'unknown', // Will be set after routing
       initiator: 'system',
       reason: reason || 'Auto-recovery initiated',
@@ -164,41 +170,68 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
       updatedAt: Date.now(),
       attempts: 0,
       lastAttemptAt: null,
+      nextAttemptAt: Date.now(),
+      order,
     };
     
     this.recoveryRequests.set(requestId, request);
     this.stats.pendingRecoveries++;
     
-    // Execute the recovery
-    const result = await this.orchestrator.executeRecovery(order, type);
-    
-    // Update request status
-    const updatedRequest = this.recoveryRequests.get(requestId);
-    if (updatedRequest) {
-      updatedRequest.status = result.success ? RecoveryStatus.Completed : RecoveryStatus.Failed;
-      updatedRequest.updatedAt = Date.now();
-      updatedRequest.attempts++;
-      updatedRequest.lastAttemptAt = Date.now();
-      updatedRequest.chain = result.chain;
-      
-      // Update stats
-      if (result.success) {
-        this.stats.successfulRecoveries++;
-        this.stats.totalValueRecovered = this.calculateTotalRecovered(
-          this.stats.totalValueRecovered,
-          result.amount
-        );
-      } else {
-        this.stats.failedRecoveries++;
-      }
-      
-      this.stats.lastRecoveryAt = Date.now();
-      this.stats.pendingRecoveries = Math.max(0, this.stats.pendingRecoveries - 1);
+    this.stats.totalRecoveries++;
+    return this.attemptRecovery(request);
+  }
+
+  private publicRequest(record: RecoveryRequestRecord): RecoveryRequest {
+    const { order: _order, ...request } = record;
+    return { ...request, metadata: { ...request.metadata } };
+  }
+
+  /** One submission per tick. Retry timestamps use epoch milliseconds. */
+  private async attemptRecovery(request: RecoveryRequestRecord): Promise<RecoveryResult> {
+    request.status = 'in_progress';
+    request.attempts++;
+    request.lastAttemptAt = Date.now();
+    request.nextAttemptAt = null;
+    this.logRequest(request, 'attempt_started');
+    let result: RecoveryResult;
+    try {
+      result = await this.orchestrator.executeRecovery(request.order, request.type);
+    } catch {
+      // Submission may have succeeded before throwing. Inspect chain state
+      // rather than automatically submitting a second refund.
+      result = { success: false, errorType: 'ambiguous', chain: request.chain,
+        timestamp: Date.now(), error: 'Recovery threw; inspect chain state before resubmission' };
     }
-    
+    request.updatedAt = Date.now();
+    request.chain = result.chain;
+    if (result.success) {
+      request.status = 'completed';
+      this.stats.successfulRecoveries++;
+      this.stats.totalValueRecovered = this.calculateTotalRecovered(this.stats.totalValueRecovered, result.amount);
+    } else if (result.errorType === 'transient' && request.attempts < MAX_RECOVERY_ATTEMPTS) {
+      request.status = 'pending';
+      request.nextAttemptAt = Date.now() + calculateBackoff(
+        request.attempts, RETRY_BASE_DELAY_MS, RETRY_MAX_DELAY_MS,
+      );
+    } else {
+      request.status = result.errorType === 'terminal' || result.errorType === 'transient'
+        ? 'failed' : 'requires_review';
+      this.stats.failedRecoveries++;
+    }
+    this.stats.lastRecoveryAt = Date.now();
+    this.stats.pendingRecoveries = Array.from(this.recoveryRequests.values())
+      .filter(r => r.status === 'pending' || r.status === 'in_progress').length;
+    this.logRequest(request, result.success ? 'completed' : request.nextAttemptAt !== null ? 'retry_scheduled' : 'stopped');
     return result;
   }
-  
+
+  private logRequest(request: RecoveryRequestRecord, event: string): void {
+    log.info({ orderId: request.orderId, orderHash: request.orderHash,
+      requestId: request.id, action: request.type, status: request.status,
+      attempts: request.attempts, nextAttemptAt: request.nextAttemptAt, event },
+    '[recovery] request status');
+  }
+
   /**
    * Check if an order is eligible for automatic recovery
    */
@@ -231,21 +264,22 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    * Process pending recovery requests
    */
   async processPendingRecoveries(): Promise<void> {
-    log.debug('[recovery] processing pending recoveries');
-    
-    const currentTime = Math.floor(Date.now() / 1000);
-    const pendingRequests = Array.from(this.recoveryRequests.values())
-      .filter(r => r.status === RecoveryStatus.Pending || r.status === RecoveryStatus.Failed);
-    
-    for (const request of pendingRequests) {
-      // TODO: Implement retry logic with backoff
-      log.debug(
-        { orderId: request.orderId, requestId: request.id, attempts: request.attempts },
-        '[recovery] processing pending recovery'
-      );
+    for (const request of this.recoveryRequests.values()) {
+      if ((request.status !== 'pending' && request.status !== 'failed') ||
+          request.nextAttemptAt == null || request.nextAttemptAt > Date.now() ||
+          request.attempts >= MAX_RECOVERY_ATTEMPTS) continue;
+      if (this.isOrderTerminal(request.order)) {
+        request.status = 'cancelled';
+        request.nextAttemptAt = null;
+        request.updatedAt = Date.now();
+        this.stats.pendingRecoveries = Math.max(0, this.stats.pendingRecoveries - 1);
+        this.logRequest(request, 'order_terminal');
+        continue;
+      }
+      await this.attemptRecovery(request);
     }
   }
-  
+
   // ---------------------------------------------------------------------------
   // Safety Check Implementations
   // ---------------------------------------------------------------------------
@@ -255,18 +289,20 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    */
   async checkDuplicateRefund(order: OrderRow, chain: string): Promise<boolean> {
     // Check in-memory requests
-    const existing = this.recoveryRequests.get(order.publicId);
-    if (existing && existing.status === RecoveryStatus.Completed) {
+    const existing = this.findActiveRecovery(order);
+    if (existing && existing.status === 'completed') {
       log.info(
-        { orderId: order.publicId, chain },
+        { orderId: order.publicId, chain, requestId: existing.id,
+          action: existing.type, status: existing.status, attempts: existing.attempts },
         '[safety] refund already completed'
       );
       return true;
     }
     
-    if (existing && (existing.status === RecoveryStatus.Pending || existing.status === RecoveryStatus.InProgress)) {
+    if (existing && (existing.status === 'pending' || existing.status === 'in_progress')) {
       log.warn(
-        { orderId: order.publicId, chain },
+        { orderId: order.publicId, chain, requestId: existing.id,
+          action: existing.type, status: existing.status, attempts: existing.attempts },
         '[safety] refund already in progress'
       );
       return true;
@@ -275,7 +311,8 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     // Check order status
     if (order.status === 'refunded') {
       log.info(
-        { orderId: order.publicId, chain, txHash: order.refundTxHash },
+        { orderId: order.publicId, chain, action: 'check_duplicate_refund',
+          status: order.status, txHash: order.refundTxHash },
         '[safety] refund already recorded in order'
       );
       return true;
@@ -297,8 +334,8 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    * Check if the order has already been recovered
    */
   async checkAlreadyRecovered(order: OrderRow, chain: string): Promise<boolean> {
-    const existing = this.recoveryRequests.get(order.publicId);
-    if (existing && existing.status === RecoveryStatus.Completed) {
+    const existing = this.findActiveRecovery(order);
+    if (existing && existing.status === 'completed') {
       return true;
     }
     
@@ -310,7 +347,8 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    */
   async getPendingRecoveries(order: OrderRow): Promise<RecoveryRequest[]> {
     return Array.from(this.recoveryRequests.values())
-      .filter(r => r.orderId === order.publicId && r.status === RecoveryStatus.Pending);
+      .filter(r => r.orderId === order.publicId && (r.status === 'pending' || r.status === 'in_progress'))
+      .map(r => this.publicRequest(r));
   }
   
   /**
@@ -318,7 +356,8 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    */
   async getCompletedRecoveries(order: OrderRow): Promise<RecoveryRequest[]> {
     return Array.from(this.recoveryRequests.values())
-      .filter(r => r.orderId === order.publicId && r.status === RecoveryStatus.Completed);
+      .filter(r => r.orderId === order.publicId && r.status === 'completed')
+      .map(r => this.publicRequest(r));
   }
   
   // ---------------------------------------------------------------------------
@@ -351,7 +390,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
    * Find active recovery for an order
    */
   private findActiveRecovery(order: OrderRow): RecoveryRequestRecord | undefined {
-    return this.recoveryRequests.get(order.publicId);
+    return Array.from(this.recoveryRequests.values()).find(r => r.orderId === order.publicId);
   }
   
   /**

@@ -353,35 +353,50 @@ Log aggregation tools (Loki, CloudWatch, Datadog) cannot parse relayer output. C
 ### TD-052 · Hardcoded ETH/USD = $3500 fallback inside calculateDynamicSafetyDeposit 🟡
 
 **Discovered:** 2026-06-30  
-**Location:** `relayer/src/index.ts` — `calculateDynamicSafetyDeposit`, `const ETH_USD_PRICE = 3500`
+**Location:** `relayer/src/services/pricing-service.ts`
 
 **Context:**  
-The function has a comment `// $3500 per ETH` and a real-time CoinGecko price cache (`getPriceSnapshot`) is available elsewhere in the same file. However, `calculateDynamicSafetyDeposit` uses the hardcoded constant directly and never calls `getPriceSnapshot`. If ETH price moves significantly, safety deposits will be mis-sized — too small at high ETH prices, over-charging at low prices.
+The async deposit calculator reads the shared price snapshot through
+`getRealTimePrices`. The upstream helper falls back to $3,500/ETH on unavailable
+or malformed input; the calculator also retains a defensive $3,500 default.
+The cache serves stale prices for 15–60 seconds and replaces expired snapshots
+with the fallback if refresh fails. This preserves availability but may mis-size
+market-relative deposits during a feed outage.
 
-**Impact:**  
-Incorrectly priced safety deposits. Over-charging discourages resolver participation; under-charging means refund incentives are insufficient.
+**Coverage:**  
+[Pricing behavior](../relayer/SAFETY_DEPOSIT_PRICING.md) records the exact tiers
+and fallback. `relayer/test/pricing-safety-deposit.test.ts` adds mocked-feed
+regressions for fresh/stale/expired/unavailable input, synthetic price scaling,
+and the testnet minimum. These tests were added without execution for #929.
 
 **Next steps:**
-1. Refactor `calculateDynamicSafetyDeposit` to be async and call `getPriceSnapshot()` internally.
-2. Keep the `3500` fallback only inside `fetchPricesFromCoinGecko`'s `fallback` object, not in the deposit calculation.
-3. Add a unit test that mocks `getPriceSnapshot` and verifies the deposit scales with price.
+1. Centralize the duplicated fallback and define a policy for prolonged outages.
+2. Monitor fallback usage and evaluate a second price source.
 
 ---
 
 ### TD-053 · Two divergent EscrowFactory ABIs for testnet vs mainnet 🟡
 
 **Discovered:** 2026-06-30  
-**Location:** `relayer/src/index.ts` — `MAINNET_ESCROW_FACTORY_ABI` (1inch pattern) vs `TESTNET_ESCROW_FACTORY_ABI` (custom pattern)
+**Location:** `relayer/src/config/networks.ts`
 
 **Context:**  
-The testnet uses a custom `EscrowFactory` with a `createEscrow(config)` signature. The mainnet targets the 1inch `EscrowFactory` with a `createDstEscrow(dstImmutables, srcCancellationTimestamp)` signature. The two interfaces are fundamentally different: different function names, different parameter shapes, different event signatures. The relayer switches between them with a runtime `getEscrowFactoryABI(isMainnet)` call.
+Testnet uses the custom `createEscrow(config)` interface; mainnet uses the 1inch
+`createDstEscrow(dstImmutables, srcCancellationTimestamp)` interface. Runtime
+`getEscrowFactoryABI(isMainnet)` selects different methods, tuples, and events.
+The [network-to-ABI table](../relayer/NETWORK_ABI_REFERENCE.md) records selection
+and coverage limitations without duplicating deployment addresses.
 
-**Impact:**  
-Any code path that handles contract interactions must branch on network mode. Tests only cover the testnet ABI. The mainnet path is untested.
+**Impact and coverage:**  
+Offline branching assertions and optional mainnet-fork factory read tests exist
+in `contracts/test/mainnet-fork/escrow-factory.test.ts`. Fork blocks skip without
+configured RPC access. Its WaffleFinance HTLCEscrow settlement tests do not prove
+end-to-end relayer compatibility with the deployed 1inch factory. Testnet
+success cannot establish mainnet ABI compatibility.
 
 **Next steps:**
-1. Write integration tests for the `MAINNET_ESCROW_FACTORY_ABI` path against a forked mainnet (Hardhat mainnet fork).
-2. Consider abstracting the two ABIs behind a common adapter interface so the rest of the relayer is ABI-agnostic.
+1. Record actual fork execution and skipped checks for each release.
+2. Add end-to-end mainnet factory creation, event decoding, and settlement coverage.
 
 ---
 

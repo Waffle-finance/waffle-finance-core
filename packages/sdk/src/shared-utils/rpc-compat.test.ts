@@ -5,7 +5,79 @@ import {
   normalizeChainId,
   parseBalanceHex,
   rpcCallWithFallback,
+  redactSensitiveText,
 } from "./rpc-compat.js";
+
+// A recognisable fake credential used across the redaction tests below.
+// Not a real secret — only used to assert it never survives normalization.
+const FAKE_TOKEN = "sk_live_FAKE_TOKEN_1234567890abcdef";
+
+describe("classifyRpcError: credential redaction", () => {
+  it("redacts a userinfo-embedded credential on a timeout error", () => {
+    const err = new Error(
+      `request to https://user:${FAKE_TOKEN}@rpc.example.com/v2 timed out`
+    );
+    const result = classifyRpcError(err);
+    expect(result.category).toBe("timeout");
+    expect(result.message).not.toContain(FAKE_TOKEN);
+  });
+
+  it("redacts a query-string API key on a generic rejection path", () => {
+    const err = new Error(
+      `fetch failed: https://rpc.example.com/v2?apiKey=${FAKE_TOKEN} returned 500`
+    );
+    const result = classifyRpcError(err);
+    expect(result.category).toBe("network");
+    expect(result.message).not.toContain(FAKE_TOKEN);
+  });
+
+  it("redacts a provider path-embedded API key on an unclassified error", () => {
+    const err = new Error(
+      `request to https://mainnet.infura.io/v3/${FAKE_TOKEN} failed with unexpected shape`
+    );
+    const result = classifyRpcError(err);
+    expect(result.category).toBe("unknown");
+    expect(result.message).not.toContain(FAKE_TOKEN);
+  });
+
+  it("redacts a Bearer token in a generic error message", () => {
+    const err = new Error(`Unauthorized: Authorization: Bearer ${FAKE_TOKEN} was rejected`);
+    const result = classifyRpcError(err);
+    expect(result.message).not.toContain(FAKE_TOKEN);
+  });
+
+  it("still preserves useful host and operation context after redaction", () => {
+    const err = new Error(
+      `request to https://user:${FAKE_TOKEN}@rpc.example.com/v2 timed out`
+    );
+    const result = classifyRpcError(err);
+    expect(result.message).toContain("rpc.example.com");
+    expect(result.message).toContain("timed out");
+  });
+});
+
+describe("redactSensitiveText", () => {
+  it("strips userinfo credentials from a URL", () => {
+    expect(redactSensitiveText(`https://user:${FAKE_TOKEN}@host.example.com/path`)).toBe(
+      "https://host.example.com/path"
+    );
+  });
+
+  it("redacts api-key style query params", () => {
+    expect(redactSensitiveText(`https://host.example.com?apiKey=${FAKE_TOKEN}`)).not.toContain(
+      FAKE_TOKEN
+    );
+    expect(redactSensitiveText(`https://host.example.com?token=${FAKE_TOKEN}`)).not.toContain(
+      FAKE_TOKEN
+    );
+  });
+
+  it("leaves ordinary text untouched", () => {
+    expect(redactSensitiveText("plain timeout error with no secrets")).toBe(
+      "plain timeout error with no secrets"
+    );
+  });
+});
 
 describe("classifyRpcError", () => {
   it("classifies user rejection", () => {

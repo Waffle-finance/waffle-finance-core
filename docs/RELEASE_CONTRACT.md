@@ -166,3 +166,30 @@ found in the current local verification script. Extending
 `scripts/verify-release-locally.sh` (and the `.github/RELEASE_PROCESS.md`
 workflow it describes) to actually enforce items 1–3 above is out of scope for
 this documentation pass and is the natural next implementation step.
+
+## Release-artifact export verification
+
+`pnpm validate:release-artifacts` (script: `scripts/verify-release-artifacts.mjs`)
+is a dependency-free Node script that checks every path declared in the
+`exports` map of the publishable packages (`@wafflefinance/sdk`,
+`@wafflefinance/config`) resolves to a built file on disk.  It reports the
+exact declared path and resolved absolute path for each missing artifact.
+
+**Prerequisite:** build the packages first:
+
+```bash
+pnpm --filter @wafflefinance/sdk build && pnpm --filter @wafflefinance/config build
+pnpm validate:release-artifacts
+```
+
+The check runs without publishing or contacting a registry.  A missing
+declared export artifact fails with a path-specific message identifying the
+field and resolved location, so the exact file to investigate is immediately
+clear.
+
+Add this to the pre-release checklist after the build step:
+
+1. `pnpm build` — build all workspace packages.
+2. `pnpm validate:release-artifacts` — verify export targets are present.
+3. `pnpm validate:manifests` — verify manifest names, versions, and paths.
+4. `pnpm test` — run the full test suite.

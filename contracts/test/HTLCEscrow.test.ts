@@ -1,42 +1,3 @@
-import { expect } from "chai";
-import { ethers } from "hardhat";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
-import type { HTLCEscrow, TestERC20 } from "../typechain-types";
-
-const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-const TIMELOCK = 600; // 10 minutes
-const SAFETY_DEPOSIT = ethers.parseEther("0.001");
-const AMOUNT = ethers.parseEther("0.5");
-
-async function deployEscrow() {
-  const HTLCEscrow = await ethers.getContractFactory("HTLCEscrow");
-  // resolverRegistry = address(0) → permissionless createOrder
-  return (await HTLCEscrow.deploy(ZERO_ADDR, 0)) as unknown as HTLCEscrow;
-}
-
-async function deployToken() {
-  const Token = await ethers.getContractFactory("TestERC20");
-  return (await Token.deploy("MockToken", "MOCK", ethers.parseEther("1000000"))) as unknown as TestERC20;
-}
-
-// Receiver-mock modes (mirrors HTLCReceiverMock.Mode).
-const MODE_ACCEPT = 0;
-const MODE_REJECT = 1;
-const MODE_GUZZLE = 2;
-
-async function deployReceiver() {
-  const F = await ethers.getContractFactory("HTLCReceiverMock");
-  return await F.deploy();
-}
-
-async function deployNoFallbackReceiver() {
-  const F = await ethers.getContractFactory("NoFallbackReceiver");
-  return await F.deploy();
-}
-
-function randomBytes32() {
-  return ethers.hexlify(ethers.randomBytes(32));
-}
 
 describe("HTLCEscrow v2", () => {
   describe("createOrder", () => {
@@ -64,6 +25,14 @@ describe("HTLCEscrow v2", () => {
       expect(orderCreated).to.not.be.undefined;
       const orderId = orderCreated.args.orderId;
       expect(orderId).to.equal(1n);
+      // Consumer-facing OrderCreated fields used by the coordinator/relayer listener.
+      expect(orderCreated.args.hashlock).to.equal(hashlock);
+      expect(orderCreated.args.sender).to.equal(sender.address);
+      expect(orderCreated.args.beneficiary).to.equal(beneficiary.address);
+      expect(orderCreated.args.token).to.equal(ZERO_ADDR);
+      expect(orderCreated.args.amount).to.equal(AMOUNT);
+      expect(orderCreated.args.safetyDeposit).to.equal(SAFETY_DEPOSIT);
+      expect(orderCreated.args.timelock).to.equal(TIMELOCK);
 
       const order = await escrow.getOrder(orderId);
       expect(order.amount).to.equal(AMOUNT);
@@ -451,6 +420,150 @@ describe("HTLCEscrow v2", () => {
       // No partial state: no order stored, no ETH trapped.
       expect(await escrow.nextOrderId()).to.equal(1n);
       expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #862 — zero safety-deposit order creation
+  // ---------------------------------------------------------------------------
+  describe("createOrder — zero safety deposit (#862)", () => {
+    it("accepts a zero safety deposit when minSafetyDeposit is zero (native ETH)", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow(); // deployed with minSafetyDeposit = 0
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      // With zero safety deposit, msg.value must equal amount exactly.
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          ZERO_ADDR,
+          AMOUNT,
+          0, // zero safety deposit
+          hashlock,
+          TIMELOCK,
+          { value: AMOUNT }
+        )
+      ).to.not.be.reverted;
+
+      const order = await escrow.getOrder(1);
+      expect(order.amount).to.equal(AMOUNT);
+      expect(order.safetyDeposit).to.equal(0n);
+      expect(await ethers.provider.getBalance(await escrow.getAddress())).to.equal(AMOUNT);
+    });
+
+    it("accepts a zero safety deposit for an ERC20 order (msg.value = 0)", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployToken();
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          0, // zero safety deposit
+          hashlock,
+          TIMELOCK,
+          { value: 0 } // no ETH needed: amount in token, deposit is zero
+        )
+      ).to.not.be.reverted;
+
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(AMOUNT);
+      expect(await ethers.provider.getBalance(await escrow.getAddress())).to.equal(0n);
+    });
+
+    it("rejects a zero safety deposit when minSafetyDeposit > 0", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const HTLCEscrowFactory = await ethers.getContractFactory("HTLCEscrow");
+      const escrow = (await HTLCEscrowFactory.deploy(
+        ZERO_ADDR,
+        ethers.parseEther("0.001") // non-zero minimum
+      )) as unknown as HTLCEscrow;
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          ZERO_ADDR,
+          AMOUNT,
+          0, // zero — below the non-zero minimum
+          randomBytes32(),
+          TIMELOCK,
+          { value: AMOUNT }
+        )
+      ).to.be.revertedWithCustomError(escrow, "SafetyDepositTooSmall");
+
+      // No order was created.
+      expect(await escrow.nextOrderId()).to.equal(1n);
+    });
+
+    it("pays no safety-deposit incentive on claim when deposit is zero", async () => {
+      const [sender, beneficiary, relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        0, // zero safety deposit
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT }
+      );
+
+      const beneficiaryBefore = await ethers.provider.getBalance(beneficiary.address);
+      const relayerBefore = await ethers.provider.getBalance(relayer.address);
+
+      await escrow.connect(relayer).claimOrder(1, preimage);
+
+      // Beneficiary receives the full amount; relayer gets no deposit.
+      expect(await ethers.provider.getBalance(beneficiary.address)).to.equal(
+        beneficiaryBefore + AMOUNT
+      );
+      // Relayer only paid gas — no safety deposit credited.
+      expect(await escrow.pendingWithdrawals(relayer.address)).to.equal(0n);
+      expect(await ethers.provider.getBalance(await escrow.getAddress())).to.equal(0n);
+    });
+
+    it("pays no safety-deposit incentive on refund when deposit is zero", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        refundAddr,
+        ZERO_ADDR,
+        AMOUNT,
+        0, // zero safety deposit
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT }
+      );
+
+      await time.increase(TIMELOCK + 1);
+
+      const refundBefore = await ethers.provider.getBalance(refundAddr);
+
+      await escrow.connect(caller).refundOrder(1);
+
+      // Refund address receives principal; caller gets no deposit.
+      expect(await ethers.provider.getBalance(refundAddr)).to.equal(
+        refundBefore + AMOUNT
+      );
+      expect(await escrow.pendingWithdrawals(caller.address)).to.equal(0n);
+      expect(await ethers.provider.getBalance(await escrow.getAddress())).to.equal(0n);
     });
   });
 
@@ -1326,6 +1439,1209 @@ describe("HTLCEscrow v2", () => {
       const order = await escrow.getOrder(1);
       expect(order.status).to.equal(2); // Refunded
       expect(order.finalisedAt).to.be.greaterThan(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #867 — zero-address constructor tests for escrow dependencies
+  // ---------------------------------------------------------------------------
+  describe("constructor — zero-address dependency guards (#867)", () => {
+    // HTLCEscrow constructor:
+    //   constructor(IResolverRegistry _resolverRegistry, uint256 _minSafetyDeposit)
+    //
+    // _resolverRegistry is intentionally optional (address(0) disables the sybil
+    // gate and makes createOrder permissionless), so passing zero is accepted.
+    // _minSafetyDeposit = 0 is also accepted (advisory only).
+    //
+    // ResolverRegistry constructor:
+    //   constructor(IERC20 _stakeAsset, uint256 _minStake, address _slashBeneficiary, address _owner)
+    //
+    // All three address parameters are required to be non-zero; minStake must be > 0.
+
+    it("HTLCEscrow: accepts address(0) as resolverRegistry — permissionless mode is intentional", async () => {
+      const HTLCEscrowFactory = await ethers.getContractFactory("HTLCEscrow");
+      // Should deploy without reverting; zero registry is the documented way to
+      // make createOrder permissionless.
+      const escrow = await HTLCEscrowFactory.deploy(ZERO_ADDR, 0);
+      expect(await escrow.resolverRegistry()).to.equal(ZERO_ADDR);
+    });
+
+    it("ResolverRegistry: reverts with InvalidAddress when stakeAsset is zero", async () => {
+      const [owner] = await ethers.getSigners();
+      const RegistryFactory = await ethers.getContractFactory("ResolverRegistry");
+      await expect(
+        RegistryFactory.deploy(
+          ZERO_ADDR,           // _stakeAsset — required non-zero
+          ethers.parseEther("1"),
+          owner.address,
+          owner.address
+        )
+      ).to.be.revertedWithCustomError(
+        await RegistryFactory.deploy(
+          await deployToken().then((t) => t.getAddress()),
+          ethers.parseEther("1"),
+          owner.address,
+          owner.address
+        ),
+        "InvalidAddress"
+      );
+    });
+
+    it("ResolverRegistry: reverts with InvalidAddress when slashBeneficiary is zero", async () => {
+      const [owner] = await ethers.getSigners();
+      const token = await deployToken();
+      const RegistryFactory = await ethers.getContractFactory("ResolverRegistry");
+      const stub = await RegistryFactory.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      await expect(
+        RegistryFactory.deploy(
+          await token.getAddress(),
+          ethers.parseEther("1"),
+          ZERO_ADDR,           // _slashBeneficiary — required non-zero
+          owner.address
+        )
+      ).to.be.revertedWithCustomError(stub, "InvalidAddress");
+    });
+
+    it("ResolverRegistry: reverts when owner is zero — OpenZeppelin Ownable guard fires first", async () => {
+      // OpenZeppelin's Ownable constructor checks for address(0) before
+      // our InvalidAddress guard, so the revert reason is OwnableInvalidOwner.
+      // Both guards protect against the same misconfiguration; the OZ check
+      // simply fires first in the constructor execution order.
+      const [owner] = await ethers.getSigners();
+      const token = await deployToken();
+      const RegistryFactory = await ethers.getContractFactory("ResolverRegistry");
+      const stub = await RegistryFactory.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      await expect(
+        RegistryFactory.deploy(
+          await token.getAddress(),
+          ethers.parseEther("1"),
+          owner.address,
+          ZERO_ADDR            // _owner — protected by OZ Ownable before InvalidAddress
+        )
+      ).to.be.revertedWithCustomError(stub, "OwnableInvalidOwner");
+    });
+
+    it("ResolverRegistry: reverts with InvalidAmount when minStake is zero", async () => {
+      const [owner] = await ethers.getSigners();
+      const token = await deployToken();
+      const RegistryFactory = await ethers.getContractFactory("ResolverRegistry");
+      const stub = await RegistryFactory.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      await expect(
+        RegistryFactory.deploy(
+          await token.getAddress(),
+          0,                   // _minStake — must be > 0
+          owner.address,
+          owner.address
+        )
+      ).to.be.revertedWithCustomError(stub, "InvalidAmount");
+    });
+
+    it("ResolverRegistry: deploys successfully when all required addresses are valid and minStake > 0", async () => {
+      const [owner] = await ethers.getSigners();
+      const token = await deployToken();
+      const RegistryFactory = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await RegistryFactory.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      expect(await registry.stakeAsset()).to.equal(await token.getAddress());
+      expect(await registry.slashBeneficiary()).to.equal(owner.address);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #869 — duplicate claim/refund attempt tests
+  // ---------------------------------------------------------------------------
+  describe("duplicate finalization attempts (#869)", () => {
+    // Helper: create a funded native-ETH order and return its id along with
+    // the escrow instance, preimage, and signers.
+    async function setupFundedOrder() {
+      const [sender, beneficiary, relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      return { escrow, preimage, sender, beneficiary, relayer, orderId: 1n };
+    }
+
+    it("second claimOrder on the same order reverts with OrderNotClaimable, no funds move", async () => {
+      const { escrow, preimage, beneficiary, orderId } = await setupFundedOrder();
+      const escrowAddr = await escrow.getAddress();
+
+      // First claim succeeds.
+      await escrow.connect(beneficiary).claimOrder(orderId, preimage);
+      expect((await escrow.getOrder(orderId)).status).to.equal(1); // Claimed
+
+      const balanceBefore = await ethers.provider.getBalance(escrowAddr);
+
+      // Second claim must revert.
+      await expect(
+        escrow.connect(beneficiary).claimOrder(orderId, preimage)
+      ).to.be.revertedWithCustomError(escrow, "OrderNotClaimable");
+
+      // No funds left the contract on the duplicate attempt (balance unchanged).
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(balanceBefore);
+
+      // Only one OrderClaimed event was ever emitted for this order id.
+      const filter = escrow.filters.OrderClaimed(orderId);
+      const events = await escrow.queryFilter(filter);
+      expect(events.length).to.equal(1);
+    });
+
+    it("refundOrder after a successful claim reverts with OrderNotRefundable, no funds move", async () => {
+      const { escrow, preimage, beneficiary, sender, orderId } = await setupFundedOrder();
+      const escrowAddr = await escrow.getAddress();
+
+      // Claim the order first.
+      await escrow.connect(beneficiary).claimOrder(orderId, preimage);
+      expect((await escrow.getOrder(orderId)).status).to.equal(1); // Claimed
+
+      // Advance time past the timelock so a refund would otherwise be valid.
+      await time.increase(TIMELOCK + 1);
+
+      const balanceBefore = await ethers.provider.getBalance(escrowAddr);
+
+      // Refund after claim must revert.
+      await expect(
+        escrow.connect(sender).refundOrder(orderId)
+      ).to.be.revertedWithCustomError(escrow, "OrderNotRefundable");
+
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(balanceBefore);
+
+      // No OrderRefunded event was emitted.
+      const filter = escrow.filters.OrderRefunded(orderId);
+      const events = await escrow.queryFilter(filter);
+      expect(events.length).to.equal(0);
+    });
+
+    it("second refundOrder on the same order reverts with OrderNotRefundable, no funds move", async () => {
+      const { escrow, sender, orderId } = await setupFundedOrder();
+      const escrowAddr = await escrow.getAddress();
+
+      // Advance past expiry and execute the first refund.
+      await time.increase(TIMELOCK + 1);
+      await escrow.connect(sender).refundOrder(orderId);
+      expect((await escrow.getOrder(orderId)).status).to.equal(2); // Refunded
+
+      const balanceBefore = await ethers.provider.getBalance(escrowAddr);
+
+      // Second refund attempt must revert.
+      await expect(
+        escrow.connect(sender).refundOrder(orderId)
+      ).to.be.revertedWithCustomError(escrow, "OrderNotRefundable");
+
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(balanceBefore);
+
+      // Exactly one OrderRefunded event for this order.
+      const filter = escrow.filters.OrderRefunded(orderId);
+      const events = await escrow.queryFilter(filter);
+      expect(events.length).to.equal(1);
+    });
+
+    it("claimOrder after a successful refund reverts with OrderNotClaimable, no funds move", async () => {
+      const { escrow, preimage, sender, beneficiary, orderId } = await setupFundedOrder();
+      const escrowAddr = await escrow.getAddress();
+
+      // Refund the order first.
+      await time.increase(TIMELOCK + 1);
+      await escrow.connect(sender).refundOrder(orderId);
+      expect((await escrow.getOrder(orderId)).status).to.equal(2); // Refunded
+
+      const balanceBefore = await ethers.provider.getBalance(escrowAddr);
+
+      // Claim after refund must revert — even with a valid preimage.
+      await expect(
+        escrow.connect(beneficiary).claimOrder(orderId, preimage)
+      ).to.be.revertedWithCustomError(escrow, "OrderNotClaimable");
+
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(balanceBefore);
+
+      // No OrderClaimed event was emitted.
+      const filter = escrow.filters.OrderClaimed(orderId);
+      const events = await escrow.queryFilter(filter);
+      expect(events.length).to.equal(0);
+    });
+
+    it("finalisedAt is set exactly once and is not overwritten by a duplicate attempt", async () => {
+      const { escrow, preimage, beneficiary, sender, orderId } = await setupFundedOrder();
+
+      // Claim the order.
+      await escrow.connect(beneficiary).claimOrder(orderId, preimage);
+      const finalisedAt = (await escrow.getOrder(orderId)).finalisedAt;
+      expect(finalisedAt).to.be.greaterThan(0n);
+
+      // Advance past expiry so a refund would conceptually be eligible.
+      await time.increase(TIMELOCK + 1);
+
+      // Duplicate refund attempt should revert.
+      await expect(
+        escrow.connect(sender).refundOrder(orderId)
+      ).to.be.revertedWithCustomError(escrow, "OrderNotRefundable");
+
+      // finalisedAt is unchanged.
+      expect((await escrow.getOrder(orderId)).finalisedAt).to.equal(finalisedAt);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #870 — ERC20 transfer return variant regression cases
+  // ---------------------------------------------------------------------------
+  describe("ERC20 transfer return variants (#870)", () => {
+    // SafeERC20 handles three ERC20 return patterns:
+    //   - Returns true   → accepted (standard ERC20)
+    //   - Returns nothing → accepted (USDT-style void transfer)
+    //   - Returns false  → rejected (SafeERC20 treats false as revert)
+    //
+    // These tests verify that the escrow's safeTransferFrom / safeTransfer
+    // path behaves correctly for each variant.
+
+    const TOKEN_SUPPLY = ethers.parseEther("1000000");
+
+    async function deployReturnsTrueToken() {
+      const F = await ethers.getContractFactory("ReturnsTrueERC20");
+      return F.deploy(TOKEN_SUPPLY) as Promise<ReturnsTrueERC20>;
+    }
+
+    async function deployNoReturnToken() {
+      const F = await ethers.getContractFactory("NoReturnERC20");
+      return F.deploy(TOKEN_SUPPLY) as Promise<NoReturnERC20>;
+    }
+
+    async function deployReturnsFalseToken() {
+      const F = await ethers.getContractFactory("ReturnsFalseERC20");
+      return F.deploy(TOKEN_SUPPLY) as Promise<ReturnsFalseERC20>;
+    }
+
+    // ── createOrder (safeTransferFrom) ───────────────────────────────────────
+
+    it("standard (returns true): createOrder locks tokens successfully", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployReturnsTrueToken();
+      const escrowAddr = await escrow.getAddress();
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: SAFETY_DEPOSIT }
+        )
+      ).to.not.be.reverted;
+
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT);
+    });
+
+    it("no-return (void transfer): createOrder locks tokens successfully", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployNoReturnToken();
+      const escrowAddr = await escrow.getAddress();
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: SAFETY_DEPOSIT }
+        )
+      ).to.not.be.reverted;
+
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT);
+    });
+
+    it("false-return: createOrder reverts — SafeERC20 rejects a false transferFrom", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployReturnsFalseToken();
+      const escrowAddr = await escrow.getAddress();
+
+      // Even with a generous approval, ReturnsFalseERC20.transferFrom always
+      // returns false; SafeERC20 must surface this as a revert so the order
+      // is never created.
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: SAFETY_DEPOSIT }
+        )
+      ).to.be.reverted; // SafeERC20 reverts on false return
+
+      // No order was stored.
+      expect(await escrow.nextOrderId()).to.equal(1n);
+    });
+
+    // ── claimOrder (safeTransfer) ────────────────────────────────────────────
+
+    it("standard (returns true): claimOrder transfers tokens to beneficiary", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployReturnsTrueToken();
+      const escrowAddr = await escrow.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      const beneficiaryBefore = await token.balanceOf(beneficiary.address);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        beneficiaryBefore + AMOUNT
+      );
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+
+    it("no-return (void transfer): claimOrder transfers tokens to beneficiary", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployNoReturnToken();
+      const escrowAddr = await escrow.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      const beneficiaryBefore = await token.balanceOf(beneficiary.address);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        beneficiaryBefore + AMOUNT
+      );
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Hostile receiver — gas-stipend exhaustion on claim and refund paths
+  //
+  // These tests exercise the two payout paths (_payoutNative via claimOrder and
+  // refundOrder) against a receiver that exhausts the PAYOUT_GAS_STIPEND (30 000
+  // gas) before the call returns.  The acceptance criteria are:
+  //   1. A stipend-exhausting push finalises the order (status transitions) and
+  //      credits the correct pull-payment account.
+  //   2. A normal EOA receiver still gets a direct push (no credit created).
+  //   3. Contract balance and pending-credit accounting reconcile after both paths.
+  // ---------------------------------------------------------------------------
+  describe("hostile receiver — stipend exhaustion (PAYOUT_GAS_STIPEND = 30 000)", () => {
+    // Re-use the existing Guzzle-mode HTLCReceiverMock: its receive() hook
+    // writes storage 64 times, consuming far more than 30 000 gas, forcing
+    // _payoutNative to fall through to the pull-payment path.
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    async function deployGuzzler() {
+      const F = await ethers.getContractFactory("HTLCReceiverMock");
+      const r = await F.deploy();
+      // MODE_GUZZLE = 2
+      await r.setMode(2);
+      return r;
+    }
+
+    async function createNativeOrder(
+      escrow: HTLCEscrow,
+      sender: any,
+      beneficiary: string,
+      refundAddress: string
+    ) {
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      await escrow.connect(sender).createOrder(
+        beneficiary,
+        refundAddress,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      const orderId = await escrow.nextOrderId() - 1n;
+      return { preimage, hashlock, orderId };
+    }
+
+    // ── claim path ───────────────────────────────────────────────────────────
+
+    it("claim: guzzler beneficiary triggers deferral — order finalised, credit created, balance reconciles", async () => {
+      const [sender, , relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, sender.address
+      );
+
+      const escrowBalanceBefore = await ethers.provider.getBalance(escrowAddr);
+      expect(escrowBalanceBefore).to.equal(AMOUNT + SAFETY_DEPOSIT);
+
+      // claimOrder must succeed (not revert) even though the push fails.
+      const tx = await escrow.connect(relayer).claimOrder(orderId, preimage);
+      await expect(tx)
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(orderId, guzzlerAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderClaimed");
+
+      // Order is irrevocably finalised.
+      const order = await escrow.getOrder(orderId);
+      expect(order.status).to.equal(1); // Claimed
+      expect(order.finalisedAt).to.be.greaterThan(0n);
+
+      // Correct account credited, not the relayer.
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(relayer.address)).to.equal(0n);
+
+      // Safety deposit reached the relayer directly (EOA — no stipend issue).
+      // Contract balance equals only the deferred amount.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
+
+      // ── reconciliation ──────────────────────────────────────────────────
+      // total_funded_before  = AMOUNT + SAFETY_DEPOSIT
+      // safety_deposit_out   = SAFETY_DEPOSIT  (pushed to relayer EOA)
+      // deferred_credit      = AMOUNT          (pendingWithdrawals[guzzler])
+      // contract_balance     = deferred_credit  ✓
+      const contractBal = await ethers.provider.getBalance(escrowAddr);
+      const pendingBal  = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(contractBal).to.equal(pendingBal); // every wei accounted for
+    });
+
+    it("claim: normal EOA beneficiary gets a direct push — no credit created", async () => {
+      const [sender, beneficiary, relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, sender.address
+      );
+
+      const benBefore = await ethers.provider.getBalance(beneficiary.address);
+
+      const tx = await escrow.connect(relayer).claimOrder(orderId, preimage);
+      await expect(tx).to.not.emit(escrow, "PayoutDeferred");
+
+      // Beneficiary received the full amount directly.
+      expect(await ethers.provider.getBalance(beneficiary.address)).to.equal(
+        benBefore + AMOUNT
+      );
+      // No pull-payment credit.
+      expect(await escrow.pendingWithdrawals(beneficiary.address)).to.equal(0n);
+      // Nothing left in escrow.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+    });
+
+    it("claim: guzzler pulls deferred funds via withdraw() (full gas forwarded) — balance zeroed", async () => {
+      const [sender, , relayer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      const { preimage, orderId } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, sender.address
+      );
+
+      await escrow.connect(relayer).claimOrder(orderId, preimage);
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+
+      // withdraw() forwards all remaining gas — guzzler's receive completes.
+      await expect(guzzler.pull(escrowAddr))
+        .to.emit(escrow, "Withdrawn")
+        .withArgs(guzzlerAddr, AMOUNT);
+
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(0n);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+      // Guzzler now holds the AMOUNT in its own balance.
+      expect(await ethers.provider.getBalance(guzzlerAddr)).to.equal(AMOUNT);
+    });
+
+    // ── refund path ──────────────────────────────────────────────────────────
+
+    it("refund: guzzler refundAddress triggers deferral — order finalised, credit created, balance reconciles", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+
+      // The guzzler is the designated refund recipient.
+      const { orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, guzzlerAddr
+      );
+
+      await time.increase(TIMELOCK + 1);
+
+      const tx = await escrow.connect(caller).refundOrder(orderId);
+      await expect(tx)
+        .to.emit(escrow, "PayoutDeferred")
+        .withArgs(orderId, guzzlerAddr, AMOUNT)
+        .and.to.emit(escrow, "OrderRefunded");
+
+      // Order is irrevocably finalised.
+      const order = await escrow.getOrder(orderId);
+      expect(order.status).to.equal(2); // Refunded
+      expect(order.finalisedAt).to.be.greaterThan(0n);
+
+      // Correct account credited.
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(AMOUNT);
+      expect(await escrow.pendingWithdrawals(caller.address)).to.equal(0n);
+
+      // Safety deposit reached the EOA caller directly.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(AMOUNT);
+
+      // ── reconciliation ──────────────────────────────────────────────────
+      const contractBal = await ethers.provider.getBalance(escrowAddr);
+      const pendingBal  = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(contractBal).to.equal(pendingBal);
+    });
+
+    it("refund: normal EOA refundAddress gets a direct push — no credit, balance zeroed", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      const { orderId } = await createNativeOrder(
+        escrow, sender, beneficiary.address, refundAddr
+      );
+
+      await time.increase(TIMELOCK + 1);
+
+      const refundBefore = await ethers.provider.getBalance(refundAddr);
+      const tx = await escrow.connect(caller).refundOrder(orderId);
+      await expect(tx).to.not.emit(escrow, "PayoutDeferred");
+
+      expect(await ethers.provider.getBalance(refundAddr)).to.equal(
+        refundBefore + AMOUNT
+      );
+      expect(await escrow.pendingWithdrawals(refundAddr)).to.equal(0n);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+    });
+
+    it("balance + pending-credit sum = zero after both payout paths complete", async () => {
+      // Create two orders: one claimed against a guzzler, one refunded to an EOA.
+      // After both settle the contract must hold zero ETH.
+      const [sender, eoaBeneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const escrowAddr = await escrow.getAddress();
+      const guzzler = await deployGuzzler();
+      const guzzlerAddr = await guzzler.getAddress();
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      // Order 1 — claim path, guzzler beneficiary.
+      const { preimage: p1, orderId: id1 } = await createNativeOrder(
+        escrow, sender, guzzlerAddr, refundAddr
+      );
+      // Order 2 — refund path, EOA refund address.
+      const { orderId: id2 } = await createNativeOrder(
+        escrow, sender, eoaBeneficiary.address, refundAddr
+      );
+
+      // Settle order 1 via claim (guzzler defers).
+      await escrow.connect(caller).claimOrder(id1, p1);
+
+      // Settle order 2 via refund (EOA refundAddr gets direct push).
+      await time.increase(TIMELOCK + 1);
+      await escrow.connect(caller).refundOrder(id2);
+
+      // Guzzler's deferred credit.
+      const pendingGuzzler = await escrow.pendingWithdrawals(guzzlerAddr);
+      expect(pendingGuzzler).to.equal(AMOUNT); // still pending
+
+      // Contract balance = only the deferred credit.
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(pendingGuzzler);
+
+      // Pull the deferred payout — now everything zeros out.
+      await guzzler.pull(escrowAddr);
+      expect(await ethers.provider.getBalance(escrowAddr)).to.equal(0n);
+      expect(await escrow.pendingWithdrawals(guzzlerAddr)).to.equal(0n);
+    });
+  });
+});
+import { expect } from 'chai';
+import { ethers } from 'hardhat';
+import { time } from '@nomicfoundation/hardhat-network-helpers';
+import type { HTLCEscrow, ResolverRegistry, TestERC20 } from '../typechain-types';
+
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+const TIMELOCK = 600; // 10 minutes
+const SAFETY_DEPOSIT = ethers.parseEther('0.001');
+const AMOUNT = ethers.parseEther('0.5');
+const MIN_STAKE = ethers.parseEther('10');
+
+// Gas thresholds for regression detection (wei of gas × 1)
+// These are designed to catch significant regressions while avoiding false positives
+const GAS_THRESHOLDS = {
+  // HTLCEscrow operations
+  createOrderNative: 200_000n, // Native ETH order creation
+  createOrderERC20: 300_000n, // ERC20 order creation
+  claimOrder: 200_000n, // Claim with preimage reveal
+  refundOrder: 150_000n, // Refund after timelock expiry
+  withdraw: 100_000n, // Withdraw credited balance
+
+  // ResolverRegistry operations
+  register: 200_000n, // Register as resolver with stake
+  increaseStake: 150_000n, // Increase existing stake
+  unregister: 150_000n, // Unregister and withdraw stake
+  slash: 150_000n, // Slash a resolver
+};
+
+async function deployEscrow(
+  resolverRegistry: string = ZERO_ADDR,
+  minSafetyDeposit: bigint = SAFETY_DEPOSIT
+) {
+  const HTLCEscrow = await ethers.getContractFactory('HTLCEscrow');
+  return (await HTLCEscrow.deploy(resolverRegistry, minSafetyDeposit)) as unknown as HTLCEscrow;
+}
+
+async function deployToken() {
+  const Token = await ethers.getContractFactory('TestERC20');
+  return (await Token.deploy(
+    'MockToken',
+    'MOCK',
+    ethers.parseEther('1000000')
+  )) as unknown as TestERC20;
+}
+
+async function deployResolverRegistry() {
+  const Token = await ethers.getContractFactory('TestERC20');
+  const stakeToken = (await Token.deploy(
+    'StakeToken',
+    'STAKE',
+    ethers.parseEther('1000000')
+  )) as unknown as TestERC20;
+
+  const [owner, resolver] = await ethers.getSigners();
+  
+  // Transfer some tokens to the resolver so they can test staking
+  await stakeToken.connect(owner).transfer(resolver.address, ethers.parseEther('10000'));
+
+  const ResolverRegistry = await ethers.getContractFactory('ResolverRegistry');
+  const registry = (await ResolverRegistry.deploy(
+    await stakeToken.getAddress(),
+    MIN_STAKE,
+    owner.address,
+    owner.address
+  )) as unknown as ResolverRegistry;
+
+  return { registry, stakeToken };
+}
+
+function randomBytes32() {
+  return ethers.hexlify(ethers.randomBytes(32));
+}
+
+/**
+ * Measure gas used by a transaction.
+ * Returns the gas used in decimal form for easy logging and comparison.
+ */
+async function measureGas(tx: any): Promise<bigint> {
+  if (!tx) throw new Error('Transaction is null');
+  const receipt = await tx.wait();
+  if (!receipt) throw new Error('Receipt is null');
+  return receipt.gasUsed;
+}
+
+/**
+ * Assert that gas usage is below threshold and log the result.
+ * Helps catch regressions early.
+ */
+function assertGasBelow(actual: bigint, threshold: bigint, operationName: string) {
+  const overhead = (threshold * 10n) / 100n; // Allow 10% variance for slight fluctuations
+  const limit = threshold + overhead;
+
+  console.log(`  ├─ ${operationName}: ${actual.toString()} gas (limit: ${limit.toString()})`);
+
+  if (actual > limit) {
+    console.error(
+      `  └─ ⚠️  GAS REGRESSION: ${operationName} used ${actual.toString()} gas, ` +
+        `exceeding limit of ${limit.toString()} (threshold: ${threshold.toString()})`
+    );
+  }
+
+  expect(actual).to.be.lte(
+    limit,
+    `${operationName} gas usage (${actual}) exceeds threshold (${threshold}) + 10% variance`
+  );
+}
+
+describe('Gas Regression Suite', () => {
+  describe('HTLCEscrow Gas Benchmarks', () => {
+    describe('createOrder', () => {
+      it('createOrder with native ETH should not regress', async () => {
+        const [sender, beneficiary] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        const tx = await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.createOrderNative, 'createOrder(native)');
+      });
+
+      it('createOrder with ERC20 should not regress', async () => {
+        const [sender, beneficiary] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+
+        // Grant approval and balance
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        const tx = await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            TIMELOCK,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.createOrderERC20, 'createOrder(ERC20)');
+      });
+    });
+
+    describe('claimOrder', () => {
+      it('claimOrder should not regress', async () => {
+        const [sender, beneficiary, claimer] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        // Create an order
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        const orderId = 1n;
+
+        // Claim the order
+        const tx = await escrow.connect(claimer).claimOrder(orderId, preimage);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.claimOrder, 'claimOrder');
+      });
+
+      it('claimOrder with ERC20 should not regress', async () => {
+        const [sender, beneficiary, claimer] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+
+        // Grant approval
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        // Create ERC20 order
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            TIMELOCK,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        const orderId = 1n;
+
+        // Claim the order
+        const tx = await escrow.connect(claimer).claimOrder(orderId, preimage);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.claimOrder, 'claimOrder(ERC20)');
+      });
+    });
+
+    describe('refundOrder', () => {
+      it('refundOrder should not regress', async () => {
+        const [sender, beneficiary, refunder] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        // Create an order with short timelock for testing
+        const shortTimelock = 300; // 5 minutes
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            shortTimelock,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        const orderId = 1n;
+
+        // Move time forward to expire the order
+        await time.increase(shortTimelock + 1);
+
+        // Refund the order
+        const tx = await escrow.connect(refunder).refundOrder(orderId);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.refundOrder, 'refundOrder');
+      });
+
+      it('refundOrder with ERC20 should not regress', async () => {
+        const [sender, beneficiary, refunder] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+
+        // Grant approval
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        const shortTimelock = 300;
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            shortTimelock,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        const orderId = 1n;
+
+        // Move time forward to expire
+        await time.increase(shortTimelock + 1);
+
+        // Refund the order
+        const tx = await escrow.connect(refunder).refundOrder(orderId);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.refundOrder, 'refundOrder(ERC20)');
+      });
+    });
+
+    describe('withdraw', () => {
+      it('withdraw should not regress', async () => {
+        const [sender, beneficiary, claimer] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        const preimage = randomBytes32();
+        const hashlock = ethers.sha256(preimage);
+
+        // Create order and claim
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            hashlock,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        await escrow.connect(claimer).claimOrder(1n, preimage);
+
+        // Attempt to withdraw (will go to pull-payment if needed)
+        const pendingBefore = await escrow.pendingWithdrawals(claimer.address);
+
+        if (pendingBefore > 0n) {
+          const tx = await escrow.connect(claimer).withdraw();
+          const gas = await measureGas(tx);
+          assertGasBelow(gas, GAS_THRESHOLDS.withdraw, 'withdraw');
+        } else {
+          console.log('  ├─ withdraw: skipped (no pending balance in this case)');
+        }
+      });
+    });
+  });
+
+  describe('ResolverRegistry Gas Benchmarks', () => {
+    describe('register', () => {
+      it('register should not regress', async () => {
+        const [, resolver] = await ethers.getSigners();
+        const { registry, stakeToken } = await deployResolverRegistry();
+
+        // Approve stake amount
+        await stakeToken.connect(resolver).approve(await registry.getAddress(), MIN_STAKE);
+
+        const tx = await registry.connect(resolver).register(MIN_STAKE);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.register, 'register');
+      });
+    });
+
+    describe('increaseStake', () => {
+      it('increaseStake should not regress', async () => {
+        const [, resolver] = await ethers.getSigners();
+        const { registry, stakeToken } = await deployResolverRegistry();
+
+        // Register first
+        await stakeToken
+          .connect(resolver)
+          .approve(await registry.getAddress(), MIN_STAKE + ethers.parseEther('5'));
+        await registry.connect(resolver).register(MIN_STAKE);
+
+        // Now increase stake
+        const additionalStake = ethers.parseEther('5');
+        const tx = await registry.connect(resolver).increaseStake(additionalStake);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.increaseStake, 'increaseStake');
+      });
+    });
+
+    describe('unregister', () => {
+      it('unregister should not regress', async () => {
+        const [, resolver] = await ethers.getSigners();
+        const { registry, stakeToken } = await deployResolverRegistry();
+
+        // Register first
+        await stakeToken.connect(resolver).approve(await registry.getAddress(), MIN_STAKE);
+        await registry.connect(resolver).register(MIN_STAKE);
+
+        // Now unregister
+        const tx = await registry.connect(resolver).unregister();
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.unregister, 'unregister');
+      });
+    });
+
+    describe('slash', () => {
+      it('slash should not regress', async () => {
+        const [owner, resolver] = await ethers.getSigners();
+        const { registry, stakeToken } = await deployResolverRegistry();
+
+        // Register a resolver
+        await stakeToken.connect(resolver).approve(await registry.getAddress(), MIN_STAKE);
+        await registry.connect(resolver).register(MIN_STAKE);
+
+        // Slash the resolver
+        const slashAmount = ethers.parseEther('1');
+        const tx = await registry.connect(owner).slash(resolver.address, slashAmount, 0n);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.slash, 'slash');
+      });
+
+      it('slash full stake should not regress', async () => {
+        const [owner, resolver] = await ethers.getSigners();
+        const { registry, stakeToken } = await deployResolverRegistry();
+
+        // Register a resolver
+        await stakeToken.connect(resolver).approve(await registry.getAddress(), MIN_STAKE);
+        await registry.connect(resolver).register(MIN_STAKE);
+
+        // Slash the full stake (contract rejects amounts exceeding the stake)
+        const tx = await registry.connect(owner).slash(resolver.address, MIN_STAKE, 0n);
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.slash, 'slash(full-stake)');
+      });
+    });
+  });
+
+  describe('Gas Summary Report', () => {
+    it('should provide gas summary', async () => {
+      console.log('\n');
+      console.log('╔════════════════════════════════════════════════════════════╗');
+      console.log('║              Gas Regression Baseline Report                 ║');
+      console.log('╠════════════════════════════════════════════════════════════╣');
+      console.log('║ HTLCEscrow Operations                                       ║');
+      console.log('╟────────────────────────────────────────────────────────────╢');
+      console.log(
+        `║ • createOrder(native):        ${String(GAS_THRESHOLDS.createOrderNative).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • createOrder(ERC20):         ${String(GAS_THRESHOLDS.createOrderERC20).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • claimOrder:                 ${String(GAS_THRESHOLDS.claimOrder).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • refundOrder:                ${String(GAS_THRESHOLDS.refundOrder).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • withdraw:                   ${String(GAS_THRESHOLDS.withdraw).padEnd(7)} gas (base)  ║`
+      );
+      console.log('╟────────────────────────────────────────────────────────────╢');
+      console.log('║ ResolverRegistry Operations                                 ║');
+      console.log('╟────────────────────────────────────────────────────────────╢');
+      console.log(
+        `║ • register:                   ${String(GAS_THRESHOLDS.register).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • increaseStake:              ${String(GAS_THRESHOLDS.increaseStake).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • unregister:                 ${String(GAS_THRESHOLDS.unregister).padEnd(7)} gas (base)  ║`
+      );
+      console.log(
+        `║ • slash:                      ${String(GAS_THRESHOLDS.slash).padEnd(7)} gas (base)  ║`
+      );
+      console.log('╠════════════════════════════════════════════════════════════╣');
+      console.log('║ Note: All values allow +10% variance for minor fluctuations ║');
+      console.log("║ Run with: npx hardhat test --grep 'Gas Regression'         ║");
+      console.log('╚════════════════════════════════════════════════════════════╝\n');
+    });
+  });
+
+  describe('Integration: Full Cross-Chain Swap Sequence', () => {
+    it('should measure end-to-end gas for a full swap sequence', async () => {
+      const [creator, beneficiary, claimer] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+      const shortTimelock = 300;
+
+      console.log('\n  ╔═══════════════════════════════════════════════════════╗');
+      console.log('  ║         Full Swap Sequence Gas Analysis              ║');
+      console.log('  ╠═══════════════════════════════════════════════════════╣');
+
+      // Step 1: User creates order
+      const createTx = await escrow
+        .connect(creator)
+        .createOrder(
+          beneficiary.address,
+          creator.address,
+          ZERO_ADDR,
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          shortTimelock,
+          { value: AMOUNT + SAFETY_DEPOSIT }
+        );
+      const createGas = await measureGas(createTx);
+      console.log(`  ├─ Step 1 - Create Order:       ${createGas.toString().padEnd(8)} gas`);
+
+      const orderId = 1n;
+
+      // Step 2: Beneficiary claims with preimage
+      const claimTx = await escrow.connect(claimer).claimOrder(orderId, preimage);
+      const claimGas = await measureGas(claimTx);
+      console.log(`  ├─ Step 2 - Claim Order:        ${claimGas.toString().padEnd(8)} gas`);
+
+      // Step 3: Total cost
+      const totalGas = createGas + claimGas;
+      console.log(`  ├─ Total Gas (Create + Claim): ${totalGas.toString().padEnd(8)} gas`);
+      console.log('  ╠═══════════════════════════════════════════════════════╣');
+      console.log(
+        `  ║ Average per operation: ${(totalGas / 2n).toString().padEnd(7)} gas             ║`
+      );
+      console.log('  ╚═══════════════════════════════════════════════════════╝\n');
     });
   });
 });

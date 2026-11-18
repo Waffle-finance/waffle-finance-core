@@ -16,7 +16,8 @@
     "seed-demo": "tsx scripts/seed-demo.ts",
     "db:backup": "tsx scripts/db-backup.ts",
     "db:restore": "tsx scripts/db-restore.ts",
-    "db:validate-migrations": "tsx scripts/validate-migrations.ts"
+    "db:validate-migrations": "tsx scripts/validate-migrations.ts",
+    "generate-key": "node scripts/generate-key.mjs"
   },
   "dependencies": {
     "@wafflefinance/config": "workspace:*",

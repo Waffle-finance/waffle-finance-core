@@ -1,3 +1,11 @@
+/** Field-based audit redaction preserves public hashes and identifiers at every depth. */
+export function sanitizeAuditPayload(payloadJson: string): string {
+  const payload: unknown = JSON.parse(payloadJson);
+  return JSON.stringify(payload, (key, value: unknown) =>
+    /^(preimage|secret|privatekey|authorization|proxyauthorization|password|accesstoken|refreshtoken|apikey|secretstoragekey)$/i
+      .test(key.replace(/[-_]/g, '')) ? '[REDACTED_SECRET]' : value);
+}
+
 export function sanitizeForLog<T>(obj: T, depth = 0): T {
   if (obj === null || obj === undefined) return obj;
 

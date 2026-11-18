@@ -55,6 +55,11 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
  * Re-exported from the route registry (`routes/index.ts`), which is the single
  * source of truth for route identity. Kept as a named export here for the
  * consumers that already import it from `@wafflefinance/sdk`.
+ *
+ * @deprecated Compatibility export. Prefer importing `LIVE_DIRECTION_CHAINS`
+ * from `@wafflefinance/sdk/routes` directly — this symbol is kept here only
+ * for existing consumers and is not removed by this notice. See
+ * `packages/sdk/MIGRATION_NOTES.md`.
  */
 export const DIRECTION_CHAINS: Record<CoordinatorDirection, { src: Chain; dst: Chain }> =
   LIVE_DIRECTION_CHAINS;
@@ -62,6 +67,12 @@ export const DIRECTION_CHAINS: Record<CoordinatorDirection, { src: Chain; dst: C
 /**
  * All four directions the coordinator currently supports.
  * Re-exported from the route registry — see {@link DIRECTION_CHAINS}.
+ *
+ * @deprecated Compatibility export. Prefer `listRoutesForNetwork` /
+ * `isSupportedRoute` from `@wafflefinance/sdk/routes`, which account for
+ * token group and bridge mode rather than direction alone. This symbol is
+ * kept here only for existing consumers and is not removed by this notice.
+ * See `packages/sdk/MIGRATION_NOTES.md`.
  */
 export const SUPPORTED_DIRECTIONS: ReadonlyArray<CoordinatorDirection> = LIVE_ROUTE_DIRECTIONS;
 

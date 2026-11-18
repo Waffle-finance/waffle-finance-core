@@ -97,6 +97,7 @@ If you add a new document, add a row here in the same PR.
 |----------|--------|-------|---------|
 | `contracts/README.md` | current | Engineering | EVM contracts: build, test, deploy |
 | `contracts/docs/mainnet-deployment-checklist.md` | current | Engineering | Pre-mainnet deployment checklist for EVM contracts |
+| `contracts/docs/mainnet-fork-testing.md` | current | Engineering | Mainnet-fork test setup, environment variables, focused command, and troubleshooting |
 | `coordinator/docs/` | current | Engineering | Coordinator internals: event reconciliation, migrations, API |
 | `coordinator/ops/` | current | Operations | Ops runbook, Prometheus config, alert rules — **note: port 3001, not 3000** (see `docs/QUALITY_GATE.md` Finding #3) |
 | `coordinator/TODO.md` | current | Engineering | Coordinator-specific open items |

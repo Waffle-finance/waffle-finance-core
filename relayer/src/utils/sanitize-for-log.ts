@@ -1,23 +1,42 @@
+/**
+ * Redact secrets from a single string.
+ *
+ * Handles two categories of sensitive material:
+ *  1. Long hex strings (0x + 16+ hex chars) — private keys, preimages, hashlocks, tx hashes.
+ *  2. Credentials embedded in URLs (protocol://user:password@host) — RPC endpoint credentials.
+ *
+ * Non-sensitive context (host, port, path, error category) is preserved so operators
+ * can still diagnose the failure.
+ */
+export function sanitizeString(str: string): string {
+  return str
+    // Redact long hex secrets: 0x followed by 16+ hex characters
+    .replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]')
+    // Redact credentials in URLs: protocol://username:password@host
+    // Preserves the protocol and host so the endpoint remains diagnosable
+    .replace(/(\w+:\/\/)[^:/\s]+:[^@/\s]+@/gi, '$1[REDACTED_CREDENTIALS]@');
+}
+
 export function sanitizeForLog<T>(obj: T, depth = 0): T {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === 'string') {
-    return obj.replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]') as unknown as T;
+    return sanitizeString(obj) as unknown as T;
   }
 
   if (typeof obj === 'object') {
     if (depth >= 3) return '[MAX_DEPTH_REACHED]' as unknown as T;
 
     if (obj instanceof Error) {
-      const sanitizedMessage = typeof obj.message === 'string' 
-        ? obj.message.replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]') 
+      const sanitizedMessage = typeof obj.message === 'string'
+        ? sanitizeString(obj.message)
         : obj.message;
-        
+
       const sanitizedError = new Error(sanitizedMessage);
       sanitizedError.name = obj.name;
-      
+
       if (typeof obj.stack === 'string') {
-        sanitizedError.stack = obj.stack.replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED_SECRET]');
+        sanitizedError.stack = sanitizeString(obj.stack);
       } else {
         sanitizedError.stack = obj.stack;
       }

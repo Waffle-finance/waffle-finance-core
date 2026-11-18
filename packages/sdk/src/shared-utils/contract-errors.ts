@@ -24,6 +24,9 @@ export type ContractErrorCategory =
   | "network_error"
   | "unknown";
 
+import { redactSensitiveText } from "./rpc-compat.js";
+export { redactSensitiveText } from "./rpc-compat.js";
+
 export interface NormalizedContractError {
   /** Stable error category for programmatic handling */
   category: ContractErrorCategory;
@@ -173,7 +176,7 @@ export function normalizeEthereumError(err: unknown): NormalizedContractError {
 
   return {
     category: "unknown",
-    message: msg,
+    message: redactSensitiveText(msg),
     retryable: false,
     chain: "ethereum",
     cause: err,
@@ -259,7 +262,7 @@ export function normalizeSolanaError(err: unknown): NormalizedContractError {
 
   return {
     category: "unknown",
-    message: msg,
+    message: redactSensitiveText(msg),
     retryable: false,
     chain: "solana",
     cause: err,
@@ -396,7 +399,7 @@ export function normalizeSorobanError(err: unknown): NormalizedContractError {
 
   return {
     category: "unknown",
-    message: msg,
+    message: redactSensitiveText(msg),
     retryable: false,
     chain: "stellar",
     cause: err,

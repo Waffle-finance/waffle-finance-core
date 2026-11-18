@@ -60,6 +60,8 @@ sha256(preimage) == hashlock   ||   keccak256(preimage) == hashlock
 
 This lets a single hashlock span both Soroban (sha256-only) and EVM (both) without requiring bridged orders to pick a dialect. Cross-chain swaps **must** use `sha256` end-to-end because the Soroban and Solana HTLCs do not accept `keccak256`.
 
+For the full per-chain compatibility matrix, encoding rules, common mistakes, and a published test vector, see [docs/HASHLOCK_COMPATIBILITY.md](docs/HASHLOCK_COMPATIBILITY.md).
+
 ### Timelock Bounds
 
 | Constant | Value | Reason |

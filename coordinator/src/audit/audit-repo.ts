@@ -1,3 +1,4 @@
+import { sanitizeAuditPayload } from '../utils/sanitize-for-log.js';
 /**
  * @file audit-repo.ts
  *
@@ -133,9 +134,9 @@ export class AuditRepository {
     // Malformed JSON stored in the audit table would cause downstream export
     // and replay code to fail far from the original write.
     try {
-      JSON.parse(input.payloadJson);
+      sanitizeAuditPayload(input.payloadJson);
     } catch {
-      throw new SyntaxError(`AuditRepository.append: payloadJson is not valid JSON: ${input.payloadJson}`);
+      throw new SyntaxError(`AuditRepository.append: payloadJson is not valid JSON`);
     }
 
     const result = await stmtRun(this.insertStmt, {
@@ -143,7 +144,7 @@ export class AuditRepository {
       eventType: input.eventType,
       orderId: input.orderId ?? null,
       requestId: input.requestId ?? null,
-      payloadJson: input.payloadJson,
+      payloadJson: sanitizeAuditPayload(input.payloadJson),
     });
     return Number(result.lastInsertRowid);
   }

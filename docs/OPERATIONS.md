@@ -61,6 +61,80 @@ Before deploying contracts or services, complete the following checklist:
    - Stellar / Soroban: see [docs/SOROBAN_OPERATOR_GUIDE.md](SOROBAN_OPERATOR_GUIDE.md)
    - Solana: see [docs/SOLANA_OPERATOR_GUIDE.md](SOLANA_OPERATOR_GUIDE.md) (devnet vs production gap audit, Anchor lifecycle, readiness gating, settlement checklist)
 
+5. **Generate and store `SECRET_STORAGE_KEY`** — see the full guide below.
+
+---
+
+## Secret storage key generation and rotation
+
+The coordinator encrypts HTLC preimages at rest using AES-256-GCM keyed by
+`SECRET_STORAGE_KEY`.  If the variable is unset, preimages are stored
+**unencrypted** — acceptable for local development only.  Always set it for
+any environment that processes real swap orders.
+
+### Key format
+
+`SECRET_STORAGE_KEY` must be a **64-character lowercase hex string** encoding
+exactly 32 bytes.  The coordinator's `deriveKey()` function also accepts a
+44-character base64 string; the hex form is recommended because it is easier
+to audit visually and is the format produced by the generation command below.
+
+### Generating a key
+
+Run the following command on your local machine or a trusted bastion host.
+The output is written only to stdout — nothing is persisted to disk, logs, or
+application state.
+
+```bash
+pnpm --filter @wafflefinance/coordinator generate-key
+# example output (do not use this value):
+# a3f1c2e9b4d07856f193a8d2c50be4671f82390e5a6c7b1d9e2f4a0c8d3b5e71
+```
+
+Alternatively, use `openssl` if pnpm is not available in the target
+environment:
+
+```bash
+openssl rand -hex 32
+```
+
+Both commands produce an equivalent 64-character hex string.
+
+**⚠️ Never commit the generated key to source control, paste it into a
+PR description, or include it in CI logs.**
+
+### Storing the key securely
+
+Inject `SECRET_STORAGE_KEY` at process startup from a secrets manager:
+
+| Platform | Example |
+|---|---|
+| AWS Secrets Manager | `aws secretsmanager get-secret-value --secret-id prod/coordinator/secret-storage-key --query SecretString --output text` |
+| HashiCorp Vault | `vault kv get -field=value secret/coordinator/secret-storage-key` |
+| DigitalOcean App Platform | Set as an encrypted environment variable in the app spec |
+| Docker / Kubernetes | Mount as a secret and reference with `secretKeyRef` |
+
+Do **not** write the key to a `.env` file that is committed or shared.
+The `.env` on the server must be outside the repository checkout directory or
+protected by strict filesystem permissions (`chmod 600`).
+
+### Key rotation
+
+Rotating the key requires a coordinated migration because existing rows were
+encrypted with the old key:
+
+1. Deploy the coordinator with **both** the old and new key available (using
+   a temporary `SECRET_STORAGE_KEY_PREV` variable, plus application-level
+   re-encryption logic, if you have implemented it — see TD-041).
+2. Run the re-encryption migration job against the database backup.
+3. Switch `SECRET_STORAGE_KEY` to the new value and restart the coordinator.
+4. Verify the coordinator starts cleanly and can decrypt all stored preimages.
+5. Revoke the old key from the secrets manager.
+
+**Back up the database before rotation.**  Without the key that encrypted a
+row, that preimage is unrecoverable.  Keep the old key available in the
+secrets manager for at least 24 hours after a successful rotation.
+
 ---
 
 ## Pre-deployment Validation

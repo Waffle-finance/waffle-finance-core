@@ -91,3 +91,16 @@ with a non-zero code. This prevents partial-migration states from serving traffi
 - [ ] Do not remove or rename columns in-place; add a new column and migrate data.
 - [ ] Do not depend on migration order other than the numeric prefix.
 - [ ] Always update `CURRENT_SCHEMA_VERSION`.
+
+## Fresh SQLite migration coverage
+
+[Fresh database tests](../test/fresh-database-migrations.test.ts) execute the
+canonical SQLite registry against an empty temporary database and independently
+check the normal `openDatabase` startup path. They derive the expected final
+version from the current registry and `CURRENT_SCHEMA_VERSION`, check required
+tables/indexes, and close and remove temporary databases even on failure.
+
+`SQLITE_MIGRATION_OVERRIDES` selects SQLite SQL for the legacy PostgreSQL-only
+initial-schema and secret-encryption files. Logical migration history names stay
+unchanged; PostgreSQL continues using the original files. Registry validation
+also checks that these SQLite files exist and accounts for them on disk.

@@ -35,7 +35,7 @@ The harness includes:
 ### Prerequisites
 
 - Node.js 22.5+
-- npm or pnpm 9+
+- pnpm 8+ (the workspace uses pnpm@8.15.0)
 - Hardhat dependencies
 
 ### Installation Steps

@@ -98,12 +98,14 @@ export class SseBroker {
     const cleanup = () => {
       const handles = this.registry.get(orderId);
       if (handles) {
-        handles.delete(handle);
+        if (!handles.delete(handle)) return;
         if (handles.size === 0) {
           this.registry.delete(orderId);
           // Evict replay buffer when no subscribers remain and order may be terminal
           // (buffer is always evicted on terminal; here we clean up on last disconnect)
         }
+      } else {
+        return;
       }
       this._subscriberCount = Math.max(0, this._subscriberCount - 1);
     };
@@ -188,21 +190,18 @@ export class SseBroker {
 
     for (const handle of Array.from(handles)) {
       if (handle.writableEnded) {
-        handles.delete(handle);
-        this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+        if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
         continue;
       }
       try {
         handle.write(frame);
         if (isTerminal) {
           handle.end();
-          handles.delete(handle);
-          this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+          if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
         }
       } catch {
         // Write failed — connection already gone
-        handles.delete(handle);
-        this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+        if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
       }
     }
 

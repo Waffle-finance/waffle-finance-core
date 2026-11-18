@@ -262,3 +262,20 @@ Some migrations have Postgres-specific variants in `coordinator/migrations/`:
 
 The migration runner falls back to the SQLite variant if a Postgres-specific
 file is not found, so adding a Postgres variant is always safe.
+
+## Order retention
+
+See [order retention and archival](docs/order-retention.md) for cleanup eligibility,
+scheduled maintenance, retained terminal records, recovery, and read-only verification.
+
+## Rate-limit response headers
+
+Allowed and throttled requests carry decimal `X-RateLimit-Limit` and
+`X-RateLimit-Remaining` counts, and `X-RateLimit-Reset` as seconds remaining in
+the current window (rounded up, not a Unix timestamp). A throttled response is
+HTTP 429 with a decimal `Retry-After` delay in seconds, also returned as
+`retryAfterSeconds` in its JSON body. Allowed responses omit `Retry-After`.
+`X-Request-ID` is included for tracing on both paths. A configured API key sent
+as `Authorization: Bearer <key>` bypasses the limiter and its rate-limit headers;
+unrecognized credentials and untrusted forwarded IP headers do not grant bypass.
+See [header contract tests](test/ratelimit-headers.test.ts).

@@ -54,6 +54,48 @@ export type RpcErrorCategory =
   /** Anything else — we still classify but mark non-retryable. */
   | 'unknown';
 
+/**
+ * Redact credentials and provider tokens from a message before it is
+ * surfaced in an {@link RpcError} (or a {@link NormalizedContractError}
+ * elsewhere in this package).
+ *
+ * RPC URLs frequently embed secrets — either as userinfo
+ * (`https://user:secret@host`) or as a path/query-embedded API key
+ * (`https://rpc.example.com/v3/<token>`, `?apiKey=<token>`,
+ * `?api-key=<token>`, `?token=<token>`, `Authorization: Bearer <token>`).
+ * `classifyRpcError` is the funnel every provider error (timeout, generic
+ * rejection, HTTP failure, JSON-RPC error object) passes through before
+ * reaching a caller, a log line, or a serialized error, so this is applied
+ * to every message it returns rather than only the unmatched/"unknown"
+ * fallback.
+ */
+export function redactSensitiveText(input: string): string {
+  let out = input;
+
+  // userinfo in a URL: scheme://user:pass@host -> scheme://host
+  out = out.replace(/(\w+:\/\/)[^/@\s]+:[^/@\s]+@/g, "$1");
+
+  // query-string credential-like params: ?key=value or &key=value
+  out = out.replace(
+    /([?&](?:api[-_]?key|apikey|token|secret|access[-_]?key|auth)=)[^&\s"'`]+/gi,
+    "$1[REDACTED]"
+  );
+
+  // bearer/authorization-style tokens embedded in free text
+  out = out.replace(/\b(bearer\s+)[A-Za-z0-9._-]{8,}/gi, "$1[REDACTED]");
+
+  // provider-style path-embedded API keys, e.g. infura.io/v3/<key>,
+  // alchemy.com/v2/<key> — redact the final path segment only when it
+  // looks like an opaque token (long alnum run) rather than a normal
+  // route segment.
+  out = out.replace(
+    /((?:infura|alchemy|quicknode|ankr)\.[a-z]+\/[a-z0-9]+\/)[A-Za-z0-9_-]{16,}/gi,
+    "$1[REDACTED]"
+  );
+
+  return out;
+}
+
 export interface RpcError {
   category: RpcErrorCategory;
   retryable: boolean;
@@ -128,7 +170,7 @@ export function classifyRpcError(err: unknown): RpcError {
     return { category: 'unknown', retryable: false, message: 'Unknown RPC error' };
   }
 
-  const message =
+  const rawMessage =
     typeof err === 'string'
       ? err
       : err instanceof Error
@@ -136,6 +178,12 @@ export function classifyRpcError(err: unknown): RpcError {
       : (typeof err === 'object' && err !== null && 'message' in err && typeof (err as { message: unknown }).message === 'string')
         ? (err as { message: string }).message
         : safeStringify(err);
+
+  // Redact before the message is used for pattern matching or echoed back —
+  // the regexes above match on category keywords (timeout, network, etc.),
+  // not on credential shapes, so redacting first cannot change which
+  // category a message is classified into.
+  const message = redactSensitiveText(rawMessage);
 
   // ── Pass 1: pattern match on the message (most reliable across providers)
   for (const { test, category, retryable } of PATTERN_TABLE) {

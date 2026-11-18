@@ -1256,3 +1256,355 @@ describe('refundXlmToUser: maxRetries = 0 — one attempt is always made', () =>
     vi.doUnmock('@stellar/stellar-sdk');
   });
 });
+
+
+// ===========================================================================
+// Transient failure then success — Horizon recovers on the next attempt.
+//
+// A temporary Horizon failure (5xx or network error) must NOT cause the
+// order to be marked refunded or permanently abandoned. The retry path
+// should retain the correct order context and record exactly one successful
+// refund transaction once the subsequent attempt succeeds.
+// ===========================================================================
+
+describe('refundXlmToUser: transient 503 then success on second attempt', () => {
+  it('fails on first Horizon call, succeeds on retry, records exactly one refund', async () => {
+    const transientError = Object.assign(new Error('service unavailable'), {
+      response: { status: 503, data: {} },
+    });
+
+    let submitCalls = 0;
+    const server = {
+      loadAccount: vi.fn().mockResolvedValue({ id: 'RELAYER_PK' }),
+      submitTransaction: vi.fn().mockImplementation(() => {
+        submitCalls++;
+        if (submitCalls === 1) {
+          return Promise.reject(transientError);
+        }
+        return Promise.resolve({ hash: '0xsuccess-on-retry', ledger: 30 });
+      }),
+      operations: vi.fn().mockReturnValue({
+        forTransaction: vi.fn().mockReturnValue({
+          call: vi.fn().mockResolvedValue({
+            records: [{
+              type: 'payment', to: 'RELAYER_PK',
+              asset_type: 'native', amount: '7.0000000',
+            }],
+          }),
+        }),
+      }),
+    };
+
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server as any));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const result = await fn({
+      orderId: 'order-transient-then-ok',
+      stellarAddress: 'GDEST',
+      stellarTxHash: '0xoriginal',
+      networkMode: 'testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 3,
+    });
+
+    // Exactly one successful refund transaction is recorded.
+    expect(result.hash).toBe('0xsuccess-on-retry');
+    expect(result.ledger).toBe(30);
+    expect(result.stroops).toBeGreaterThan(0n);
+
+    // Two submit calls: first failed transiently, second succeeded.
+    expect(submitCalls).toBe(2);
+    expect(server.submitTransaction).toHaveBeenCalledTimes(2);
+
+    // Account was reloaded before each attempt.
+    expect(server.loadAccount.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+
+  it('does not mark the order as refunded during the transient failure', async () => {
+    // The watchdog-style integration: a transient failure should not cause
+    // the order to be marked refunded until the success is confirmed.
+    const m = makeTestMetrics();
+    const ledger = new RefundLedger({ storageDir: null });
+    const transientError = Object.assign(new Error('503'), {
+      response: { status: 503, data: {} },
+    });
+
+    let refundCalls = 0;
+    const refundFn = vi.fn().mockImplementation(async () => {
+      refundCalls++;
+      if (refundCalls === 1) throw transientError;
+      return { hash: '0xwatchdog-retry', amount: '5.0000000', stroops: 50_000_000n };
+    });
+
+    // Wrap the raw error so the watchdog can classify it.
+    const originalImpl = refundFn.getMockImplementation();
+    refundFn.mockImplementation(async (args: unknown) => {
+      try {
+        return await originalImpl!(args);
+      } catch (err: unknown) {
+        // Mimic classifyHorizonError for 503 → HorizonTransientError.
+        if ((err as any)?.response?.status === 503) {
+          throw new HorizonTransientError('Horizon 503 — transient');
+        }
+        throw err;
+      }
+    });
+
+    const order: Record<string, unknown> = {
+      direction: 'xlm_to_eth',
+      stellarTxHash: '0xstellar',
+      stellarAddress: 'GABC',
+      xlmReceivedAt: Date.now() - 10 * 60_000,
+    };
+
+    // Tick 1: transient failure — not refunded.
+    await runTick({
+      activeOrders: new Map([['order-transient-watch', order]]),
+      staleAfterMs: 5 * 60_000,
+      networkMode: 'testnet',
+      refundFn,
+      m,
+      ledger,
+    });
+
+    // Order must NOT be marked refunded after the transient failure.
+    expect(order['status']).not.toBe('refunded');
+    expect(order['refundTxHash']).toBeUndefined();
+    // Watchdog should have recorded a refund_error failure (transient).
+    expect(await counterValue(m.failureTotal, { reason: 'refund_error', network_mode: 'testnet' })).toBe(1);
+
+    // Release the lock so the next tick can re-claim (the watchdog releases
+    // the ledger lock on transient errors by design).
+    ledger.release('order-transient-watch');
+    // Reset the order's failedAt backoff so the next tick runs immediately.
+    delete order['watchdogFailedAt'];
+
+    // Tick 2: retry succeeds — exactly one refund transaction recorded.
+    await runTick({
+      activeOrders: new Map([['order-transient-watch', order]]),
+      staleAfterMs: 5 * 60_000,
+      networkMode: 'testnet',
+      refundFn,
+      m,
+      ledger,
+    });
+
+    expect(order['status']).toBe('refunded');
+    expect(order['refundTxHash']).toBe('0xwatchdog-retry');
+    expect(ledger.isCommitted('order-transient-watch')).toBe(true);
+
+    // Only one successful refund call recorded (first was transient error,
+    // second was the success). refundFn was called twice total.
+    expect(refundFn).toHaveBeenCalledTimes(2);
+    expect(await counterValue(m.successTotal, { network_mode: 'testnet' })).toBe(1);
+  });
+});
+
+describe('refundXlmToUser: transient 500 then success on retry', () => {
+  it('handles a 500 internal server error then succeeds on the second attempt', async () => {
+    const transientError = Object.assign(new Error('internal server error'), {
+      response: { status: 500, data: {} },
+    });
+
+    let submitCalls = 0;
+    const server = {
+      loadAccount: vi.fn().mockResolvedValue({ id: 'RELAYER_PK' }),
+      submitTransaction: vi.fn().mockImplementation(() => {
+        submitCalls++;
+        if (submitCalls === 1) return Promise.reject(transientError);
+        return Promise.resolve({ hash: '0xretry-500', ledger: 40 });
+      }),
+      operations: vi.fn().mockReturnValue({
+        forTransaction: vi.fn().mockReturnValue({
+          call: vi.fn().mockResolvedValue({
+            records: [{
+              type: 'payment', to: 'RELAYER_PK',
+              asset_type: 'native', amount: '3.0000000',
+            }],
+          }),
+        }),
+      }),
+    };
+
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server as any));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const result = await fn({
+      orderId: 'order-500-then-ok',
+      stellarAddress: 'GDEST',
+      stellarTxHash: '0xoriginal',
+      networkMode: 'testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 2,
+    });
+
+    expect(result.hash).toBe('0xretry-500');
+    expect(submitCalls).toBe(2);
+
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+});
+
+describe('refundXlmToUser: transient network error then success', () => {
+  it('handles a network-level connection reset then succeeds on the second attempt', async () => {
+    // ECONNRESET maps to HorizonTimeoutError (ambiguous — tx may have landed).
+    // Use a plain connection refused error instead, which is treated as transient.
+    const networkError = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8080'), {
+      code: 'ECONNREFUSED',
+    });
+
+    let submitCalls = 0;
+    const server = {
+      loadAccount: vi.fn().mockResolvedValue({ id: 'RELAYER_PK' }),
+      submitTransaction: vi.fn().mockImplementation(() => {
+        submitCalls++;
+        if (submitCalls === 1) return Promise.reject(networkError);
+        return Promise.resolve({ hash: '0xeconnreset-retry', ledger: 50 });
+      }),
+      operations: vi.fn().mockReturnValue({
+        forTransaction: vi.fn().mockReturnValue({
+          call: vi.fn().mockResolvedValue({
+            records: [{
+              type: 'payment', to: 'RELAYER_PK',
+              asset_type: 'native', amount: '2.0000000',
+            }],
+          }),
+        }),
+      }),
+    };
+
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server as any));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const result = await fn({
+      orderId: 'order-connreset-then-ok',
+      stellarAddress: 'GDEST',
+      stellarTxHash: '0xoriginal',
+      networkMode: 'testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 3,
+    });
+
+    expect(result.hash).toBe('0xeconnreset-retry');
+    expect(submitCalls).toBe(2);
+
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+});
+
+describe('refundXlmToUser: permanent errors are not retried', () => {
+  it('a terminal error does not trigger a retry even with retries remaining', async () => {
+    const terminalError = Object.assign(new Error('tx rejected'), {
+      response: {
+        status: 400,
+        data: { extras: { result_codes: { transaction: 'tx_bad_auth', operations: [] } } },
+      },
+    });
+
+    let submitCalls = 0;
+    const server = {
+      loadAccount: vi.fn().mockResolvedValue({ id: 'RELAYER_PK' }),
+      submitTransaction: vi.fn().mockImplementation(() => {
+        submitCalls++;
+        return Promise.reject(terminalError);
+      }),
+      operations: vi.fn().mockReturnValue({
+        forTransaction: vi.fn().mockReturnValue({
+          call: vi.fn().mockResolvedValue({
+            records: [{
+              type: 'payment', to: 'RELAYER_PK',
+              asset_type: 'native', amount: '5.0000000',
+            }],
+          }),
+        }),
+      }),
+    };
+
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server as any));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const err = await fn({
+      orderId: 'order-terminal-no-retry',
+      stellarAddress: 'GDEST',
+      stellarTxHash: '0xoriginal',
+      networkMode: 'testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 3,
+    }).catch(e => e);
+
+    // Check by property rather than instanceof to avoid cross-module class identity issues.
+    expect(err).toHaveProperty('isTerminal', true);
+    expect(err).toHaveProperty('resultCode', 'tx_bad_auth');
+    expect(err.name).toBe('HorizonTerminalError');
+    // Only one submit call — terminal errors are not retried.
+    expect(submitCalls).toBe(1);
+
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+});
+
+describe('refundXlmToUser: transient failure retains order context', () => {
+  it('the retry path uses the same orderId, amount, and stellarAddress as the original', async () => {
+    const transientError = Object.assign(new Error('503'), {
+      response: { status: 503, data: {} },
+    });
+
+    let submitCalls = 0;
+    const server = {
+      loadAccount: vi.fn().mockResolvedValue({ id: 'RELAYER_PK' }),
+      submitTransaction: vi.fn().mockImplementation(() => {
+        submitCalls++;
+        if (submitCalls === 1) return Promise.reject(transientError);
+        return Promise.resolve({ hash: '0xcontext-preserved', ledger: 60 });
+      }),
+      operations: vi.fn().mockReturnValue({
+        forTransaction: vi.fn().mockReturnValue({
+          call: vi.fn().mockResolvedValue({
+            records: [{
+              type: 'payment', to: 'RELAYER_PK',
+              asset_type: 'native', amount: '9.0000000',
+            }],
+          }),
+        }),
+      }),
+    };
+
+    vi.resetModules();
+    vi.doMock('@stellar/stellar-sdk', () => makeSDKStub(server as any));
+    const { refundXlmToUser: fn } = await import('../src/services/xlm-refund.js');
+
+    const result = await fn({
+      orderId: 'order-context-retain',
+      stellarAddress: 'GCONTEXT',
+      stellarTxHash: '0xoriginal-payment',
+      networkMode: 'mainnet',
+      horizonUrl: 'https://horizon.stellar.org',
+      refundSecret: 'SRELAYER',
+      maxRetries: 2,
+    });
+
+    // The refund succeeded on the second attempt.
+    expect(result.hash).toBe('0xcontext-preserved');
+    expect(submitCalls).toBe(2);
+
+    // The amount must match the original payment (9 XLM from the lookup,
+    // minus the 100 stroop fee), not a fresh or reset amount.
+    expect(result.stroops).toBeGreaterThan(0n);
+    // The mock TransactionBuilder stub always builds a tx with operations[0].amount = '10.0000000'
+    // (from makeSDKStub). getAmountFromTx reads that stub value, so stroops = 10 XLM = 100_000_000n.
+    // The retry path uses the same resolved amount — no reset between attempts.
+    expect(result.stroops).toBe(100_000_000n);
+
+    vi.doUnmock('@stellar/stellar-sdk');
+  });
+});

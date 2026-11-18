@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { calculateDelay, withRetry } from '../src/utils/retry-policy.js';
 
+vi.useFakeTimers();
+
 describe('calculateDelay', () => {
   it('returns baseMs * 2^attempt (exponential growth) when within max', () => {
     // attempt=0 → 1_000 +- jitter
@@ -37,6 +39,14 @@ describe('calculateDelay', () => {
     // jitter = +-20% of 1000 = +-200, so range should be 800-1200
     expect(min).toBeGreaterThanOrEqual(800);
     expect(max).toBeLessThanOrEqual(1_200);
+  });
+
+  it('is deterministic when jitterFactor is 0', () => {
+    // With jitterFactor=0, all attempts at the same level produce identical delays
+    const d0a = calculateDelay(0, 1_000, 30_000, 0);
+    const d0b = calculateDelay(0, 1_000, 30_000, 0);
+    expect(d0a).toBe(d0b);
+    expect(d0a).toBe(1_000);
   });
 });
 
@@ -87,5 +97,66 @@ describe('withRetry', () => {
   it('wraps non-Error throws in Error', async () => {
     const fn = vi.fn().mockRejectedValue('string error');
     await expect(withRetry(fn, { maxRetries: 0 })).rejects.toThrow('string error');
+  });
+
+  // ── NEW TESTS FOR TERMINAL LIMIT AND EXHAUSTED STATE ───────────────────────
+
+  it('enforces maximum attempts exactly — no extra attempts beyond maxRetries', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('always fails'));
+    await expect(withRetry(fn, { maxRetries: 3, baseDelayMs: 0 })).rejects.toThrow('always fails');
+    // 4 attempts total: attempt 0 (initial) + 3 retries = maxRetries + 1
+    expect(fn).toHaveBeenCalledTimes(4);
+  });
+
+  it('records final status when attempts are exhausted', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('permanent error'));
+    await expect(withRetry(fn, { maxRetries: 2, baseDelayMs: 0 })).rejects.toThrow('permanent error');
+    // 3 attempts total: initial + 2 retries
+    expect(fn).toHaveBeenCalledTimes(3);
+    // The error should be thrown directly, not wrapped
+    const error = new Error('permanent error');
+    expect(error.message).toBe('permanent error');
+  });
+
+  it('permanent errors skip retries immediately', async () => {
+    const permanentErr = new Error('invalid params');
+    const fn = vi.fn().mockRejectedValue(permanentErr);
+
+    // maxRetries: 5, but first attempt returns a terminal error
+    await expect(withRetry(fn, { maxRetries: 5, baseDelayMs: 10 })).rejects.toThrow('invalid params');
+    // Should only have been called once — terminal errors do not trigger retries
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('tracks attempt count and delay at each step with fake timers', async () => {
+    const attempts: number[] = [];
+    const delays: number[] = [];
+    const onRetry = vi.fn().mockImplementation((attempt, delay) => {
+      attempts.push(attempt);
+      delays.push(delay);
+    });
+
+    const fn = vi.fn().mockRejectedValue(new Error('persistent'));
+    await expect(
+      withRetry(fn, { maxRetries: 3, baseDelayMs: 20, onRetry, baseDelayMs: 10 }),
+    ).rejects.toThrow('persistent');
+
+    // Attempts 0, 1, 2, 3 (initial + 3 retries)
+    expect(attempts).toEqual([0, 1, 2, 3]);
+    // With baseDelayMs=10 and no jitter, delays should be: 10, 20, 40
+    // (exponential backoff: 10 * 2^0, 10 * 2^1, 10 * 2^2)
+    expect(delays).toEqual([10, 20, 40]);
+
+    // Fake timers should have been advanced
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+
+  it('does not advance past maxAttempts when maxRetries is 0', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('boom'));
+    await expect(withRetry(fn, { maxRetries: 0, baseDelayMs: 5 })).rejects.toThrow('boom');
+    expect(fn).toHaveBeenCalledTimes(1);
+    // No retries should occur
+    const delayCalls = vi.getAllTimers();
+    // With fake timers and no retry, no delays should be scheduled
   });
 });

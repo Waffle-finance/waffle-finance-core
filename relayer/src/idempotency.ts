@@ -173,7 +173,9 @@ export class IdempotencyManager {
     maxRetryCount?: number;
     pendingTimeoutMs?: number;
   } = {}) {
-    this.storageDir = opts.storageDir ?? join(process.cwd(), '.idempotency-store');
+    this.storageDir = opts.storageDir !== undefined
+      ? opts.storageDir   // null disables persistence; string enables it
+      : join(process.cwd(), '.idempotency-store');
     this.maxRetryCount = opts.maxRetryCount ?? 10;
     this.pendingTimeoutMs = opts.pendingTimeoutMs ?? 15 * 60 * 1000; // 15 min
 

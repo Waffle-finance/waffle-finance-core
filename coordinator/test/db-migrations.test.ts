@@ -8,26 +8,12 @@ import {
   getCurrentSchemaVersion,
   validateSchemaVersion,
   MigrationValidationError,
+  SQLITE_MIGRATIONS,
+  CURRENT_SCHEMA_VERSION,
 } from "../src/persistence/db.js";
 import { FatalStartupError } from "../src/retry.js";
 
-// The logical migrations that schema.sql covers (in name-sort order).
-// Must stay in sync with SQLITE_MIGRATIONS in coordinator/src/persistence/db.ts.
-const EXPECTED_MIGRATIONS = [
-  "001_initial.sql",
-  "002_solana_support.sql",
-  "003_secret_encryption.sql",
-  "004_query_optimizations.sql",
-  "005_cursor_pagination.sql",
-  "005_schema_migrations.sql",
-  "006_stale_cleanup.sql",
-  "007_audit_log.sql",
-  "008_query_optimizations_advanced.sql",
-  "009_chain_cursors.sql",
-  "010_soroban_checkpoints.sql",
-  "011_order_ledger_cursors.sql",
-  "012_order_cancellation.sql",
-];
+const EXPECTED_MIGRATIONS = SQLITE_MIGRATIONS;
 
 async function freshDb() {
   const dir = mkdtempSync(resolve(tmpdir(), "wafflefinance-migtest-"));
@@ -108,7 +94,7 @@ describe("Schema migration logging — SQLite", () => {
   it("getCurrentSchemaVersion returns the last migration name", async () => {
     const db = await freshDb();
     const version = await getCurrentSchemaVersion(db);
-    expect(version).toBe("012_order_cancellation.sql");
+    expect(version).toBe(CURRENT_SCHEMA_VERSION);
   });
 
   it("getCurrentSchemaVersion returns null for an empty migrations table", async () => {

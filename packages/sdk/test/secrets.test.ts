@@ -71,4 +71,37 @@ describe("secrets", () => {
     expect(() => verifyPreimage(s.preimage, `0x${"00".repeat(31)}`)).toThrow(/expected digest/);
     expect(() => verifyPreimage(s.preimage, `0x${"zz".repeat(32)}` as `0x${string}`)).toThrow(/expected digest/);
   });
+
+  // ---------------------------------------------------------------------------
+  // Published cross-chain hashlock test vector (closes #866)
+  //
+  // This vector is reproduced in contracts/docs/HASHLOCK_COMPATIBILITY.md.
+  // If either the SDK implementation or the documented digests drift, this
+  // test fails before the mismatch reaches production.
+  //
+  // NEVER use this preimage for a real order — it is publicly known.
+  // ---------------------------------------------------------------------------
+  it("published cross-chain hashlock test vector matches documented digests", () => {
+    // Fixed 32-byte preimage: bytes 0x01..0x20.
+    const preimage =
+      "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" as `0x${string}`;
+
+    const s = hashSecret(preimage);
+
+    // The sha256 digest is the authoritative hashlock for cross-chain orders
+    // (Ethereum + Stellar + Solana all accept it).
+    expect(s.sha256).toBe(
+      "0xae216c2ef5247a3782c135efa279a3e4cdc61094270f5d2be58c6204b7a612c9"
+    );
+
+    // The keccak256 digest is accepted by Ethereum only and must NOT be used
+    // as the hashlock for cross-chain orders.
+    expect(s.keccak256).toBe(
+      "0x52b3f53ff196a28e7d2d01283ef9427070bda64128fb5630b97b6ab17a8ff0a8"
+    );
+
+    // verifyPreimage correctly identifies the digest type for the known vector.
+    expect(verifyPreimage(preimage, s.sha256)).toBe("sha256");
+    expect(verifyPreimage(preimage, s.keccak256)).toBe("keccak256");
+  });
 });

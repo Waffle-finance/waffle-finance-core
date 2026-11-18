@@ -115,6 +115,8 @@ the tables below pin down exactly which packages participate in each.
 | `pnpm validate:commands` | Enforces this command contract | All workspace manifests |
 | `pnpm validate:manifests` | Validates names, versions, and export paths | All workspace manifests |
 | `pnpm validate:deployments` | Validates `deployments.testnet.json` | Deployment records |
+| `pnpm validate:release-artifacts` | Verifies built artifacts exist for every declared export path in publishable packages (`@wafflefinance/sdk`, `@wafflefinance/config`); requires `pnpm build` first | Shared package release readiness |
+| `pnpm validate:versions` | Checks Node and pnpm version consistency across `.nvmrc`, `engines`, `packageManager`, CI workflows, and dev container | Platform tooling alignment |
 | `pnpm health:check` | Smoke-tests a locally running coordinator (`GET /health`) | Coordinator runtime |
 
 `pnpm -r build` ordering is dependency-aware; `@wafflefinance/sdk` and

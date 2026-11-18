@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { CoordinatorConfig } from "../src/config.js";
 import { openDatabase } from "../src/persistence/db.js";
 import { createReadinessChecks } from "../src/readiness.js";
+import { CURRENT_SCHEMA_VERSION, isPostgresDatabase, queryMigrations } from "../src/persistence/db.js";
+import { deriveStartupPhase } from "../src/readiness.js";
+import { healthRoutes } from "../src/server/routes/health.js";
 
 const baseConfig: CoordinatorConfig = {
   network: "testnet",
@@ -40,6 +43,57 @@ async function freshDb() {
 }
 
 describe("createReadinessChecks", () => {
+  it("rejects outdated migration history while liveness stays healthy, then recovers", async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "waffle-migration-readiness-"));
+    const db = await openDatabase(`file:${dir}/test.db`);
+    if (isPostgresDatabase(db)) throw new Error("Expected disposable SQLite database");
+    try {
+      const latest = (await queryMigrations(db)).find(row => row.migration === CURRENT_SCHEMA_VERSION)!;
+      db.prepare("DELETE FROM schema_migrations WHERE migration = ?").run(latest.migration);
+      const run = createReadinessChecks({
+        cfg: { ...baseConfig, databaseUrl: "postgresql://fake-user:fake-password@invalid/test" },
+        db,
+        getReconciliationStatus: () => ({ lastRunAt: 1, lastRunOk: true, eventsReplayed: 0 }),
+        fetcher: async () => ({ ok: true, status: 200, json: async () => ({ result: "ok" }) }),
+      });
+      const checks = await run();
+      expect(deriveStartupPhase(checks)).toBe("degraded");
+      expect(checks).toContainEqual(expect.objectContaining({
+        name: "database", ok: false, detail: "missing_migrations",
+      }));
+
+      // Invoke the real health handlers directly without opening a socket.
+      const router = healthRoutes({ getReadinessChecks: run });
+      const invoke = async (path: string) => {
+        const layer = router.stack.find(layer => layer.route?.path === path)!;
+        const response = {
+          statusCode: 200,
+          body: undefined as unknown,
+          status(code: number) { this.statusCode = code; return this; },
+          json(body: unknown) { this.body = body; return this; },
+        };
+        await layer.route.stack[0].handle({}, response, () => {});
+        return response;
+      };
+      expect((await invoke("/healthz")).statusCode).toBe(200);
+      const unready = await invoke("/readyz");
+      expect(unready.statusCode).toBe(503);
+      expect(unready.body).toMatchObject({ status: "degraded", degradedServices: ["database"] });
+      const serialized = JSON.stringify(unready.body);
+      for (const unsafe of ["SELECT", "schema_migrations", "postgresql://", "fake-user", "fake-password"]) {
+        expect(serialized).not.toContain(unsafe);
+      }
+
+      db.prepare("INSERT INTO schema_migrations (migration, applied_at, duration_ms) VALUES (?, ?, ?)")
+        .run(latest.migration, latest.appliedAt, latest.durationMs);
+      expect(deriveStartupPhase(await run())).toBe("ready");
+      expect((await invoke("/readyz")).statusCode).toBe(200);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("checks the database and each chain RPC", async () => {
     const db = await freshDb();
     const methods: string[] = [];

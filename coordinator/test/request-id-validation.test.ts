@@ -14,18 +14,20 @@
  * The unsafe values must not reach response headers, logs, or tracing labels.
  */
 
-import { describe, it, expect } from "vitest";
-import request from "supertest";
+import { afterEach, describe, it, expect } from "vitest";
+import request, { type Response } from "supertest";
 import pino from "pino";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { Writable } from "node:stream";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { openDatabase } from "../src/persistence/db.js";
+import { isPostgresDatabase, openDatabase } from "../src/persistence/db.js";
 import { OrdersRepository } from "../src/persistence/orders-repo.js";
 import { OrderService } from "../src/services/order-service.js";
 import { SecretService } from "../src/services/secret-service.js";
 import { QuoteService } from "../src/services/quote-service.js";
-import { createApp } from "../src/server/app.js";
+import { createApp, type AppDeps } from "../src/server/app.js";
+import { getRequestContext } from "../src/request-context.js";
 import { isSafeId } from "../src/server/middleware/request-id.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -35,14 +37,28 @@ const UUID_RE =
 
 const log = pino({ level: "silent" });
 
-async function freshApp() {
+const malformedIds = {
+  oversized: "x".repeat(129),
+  spaces: "id with spaces",
+  tab: "id\tvalue",
+  encodedNewline: "id%0ainjected",
+};
+
+const cleanup: Array<() => void> = [];
+afterEach(() => {
+  while (cleanup.length > 0) cleanup.pop()!();
+});
+
+async function freshApp(overrides: Partial<Pick<AppDeps, "log" | "getReadinessChecks">> = {}) {
   const dir = mkdtempSync(resolve(tmpdir(), "wf-reqid-val-"));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const db = await openDatabase(`file:${dir}/test.db`);
+  cleanup.push(() => { if (!isPostgresDatabase(db)) db.close(); });
   const repo = new OrdersRepository(db);
   const orders = new OrderService(repo, log);
   const secrets = new SecretService(orders, log);
   const quotes = new QuoteService(log);
-  return createApp({ log, corsOrigin: "*", orders, secrets, quotes });
+  return createApp({ log, corsOrigin: "*", orders, secrets, quotes, ...overrides });
 }
 
 // ── isSafeId unit tests ───────────────────────────────────────────────────────
@@ -81,7 +97,7 @@ describe("isSafeId — character-set validator", () => {
   });
 
   it("rejects a string containing a tab character", () => {
-    expect(isSafeId("id\tvalue")).toBe(false);
+    expect(isSafeId(malformedIds.tab)).toBe(false);
   });
 
   it("rejects a string containing a NUL byte", () => {
@@ -101,7 +117,7 @@ describe("isSafeId — character-set validator", () => {
   });
 
   it("rejects a string with percent-encoding characters", () => {
-    expect(isSafeId("id%0ainjected")).toBe(false);
+    expect(isSafeId(malformedIds.encodedNewline)).toBe(false);
   });
 });
 
@@ -110,7 +126,7 @@ describe("isSafeId — character-set validator", () => {
 describe("requestIdMiddleware — X-Request-ID header sanitisation", () => {
   it("rejects an oversized header and returns a generated UUID instead", async () => {
     const app = await freshApp();
-    const oversized = "x".repeat(129);
+    const oversized = malformedIds.oversized;
 
     const res = await request(app)
       .get("/healthz")
@@ -170,7 +186,7 @@ describe("requestIdMiddleware — X-Request-ID header sanitisation", () => {
   it("rejects a header with a space (header smuggling vector)", async () => {
     const app = await freshApp();
     // Spaces in header values can be used in HTTP request smuggling
-    const malformed = "id with spaces";
+    const malformed = malformedIds.spaces;
 
     const res = await request(app)
       .get("/healthz")
@@ -194,6 +210,108 @@ describe("requestIdMiddleware — X-Request-ID header sanitisation", () => {
 });
 
 // ── Integration: X-Correlation-ID header sanitisation ────────────────────────
+
+describe("request IDs through the readiness route and logging chain", () => {
+  async function capturedApp() {
+    const chunks: string[] = [];
+    const capturedLog = pino({
+      level: "info",
+      // Read the actual AsyncLocalStorage context, as the production logger
+      // does, rather than deriving trusted fields from request headers.
+      mixin() {
+        const context = getRequestContext();
+        return context ? {
+          requestId: context.requestId,
+          correlationId: context.correlationId,
+          operationClass: context.operationClass,
+        } : {};
+      },
+    }, new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    }));
+    const app = await freshApp({
+      log: capturedLog,
+      getReadinessChecks: async () => {
+        // Verify that context survives an asynchronous route dependency.
+        await Promise.resolve();
+        capturedLog.info("readiness context probe");
+        return [{ name: "test-dependency", ok: true }];
+      },
+    });
+    return {
+      app,
+      logs: () => chunks.join("").trim().split("\n").map((line) => JSON.parse(line)),
+    };
+  }
+
+  function expectCompatibleResponse(res: Response) {
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body).toMatchObject({
+      status: "ok", mode: "healthy", service: "wafflefinance-coordinator",
+      degradedServices: [], checks: [{ name: "test-dependency", ok: true }],
+    });
+    expect(typeof res.body.version).toBe("string");
+    expect(typeof res.body.uptimeSeconds).toBe("number");
+    expect(Number.isNaN(Date.parse(res.body.timestamp))).toBe(false);
+  }
+
+  it.each(Object.entries(malformedIds))(
+    "normalizes %s IDs before response headers and log context",
+    async (_name, malformed) => {
+      const { app, logs } = await capturedApp();
+      // TAB is legal in HTTP field values, so it reaches the real middleware.
+      // CR/LF and NUL remain covered by the validator tests above because
+      // Node's HTTP client rejects them before sending a request.
+      const res = await request(app).get("/readyz")
+        .set("x-request-id", malformed)
+        .set("x-correlation-id", malformed);
+
+      expectCompatibleResponse(res);
+      const returned = res.headers["x-request-id"];
+      expect(returned).toMatch(UUID_RE);
+      expect(isSafeId(returned)).toBe(true);
+      expect(returned).not.toBe(malformed);
+      expect(res.headers["x-injected"]).toBeUndefined();
+
+      // Parse every physical log line: an injected extra line must not be
+      // silently ignored by the capture helper.
+      const records = logs();
+      expect(records.some((line) => line.msg === "readiness context probe")).toBe(true);
+      expect(records.some((line) => line.msg === "request completed")).toBe(true);
+      for (const line of records) {
+        expect(line.requestId).toBe(returned);
+        expect(line.correlationId).toBe(returned);
+        expect(line.requestId).not.toMatch(/[\x00-\x1f\x7f]/);
+        expect(line.correlationId).not.toMatch(/[\x00-\x1f\x7f]/);
+      }
+    }
+  );
+
+  it.each([undefined, "upstream-correlation_v2.3"])(
+    "preserves a valid request ID and correlation behavior with %s",
+    async (correlationId) => {
+      const { app, logs } = await capturedApp();
+      const safeId = "my-load-balancer-trace-99";
+      const req = request(app).get("/readyz").set("x-request-id", safeId);
+      if (correlationId) req.set("x-correlation-id", correlationId);
+      const res = await req;
+
+      expectCompatibleResponse(res);
+      expect(res.headers["x-request-id"]).toBe(safeId);
+      const records = logs();
+      expect(records.some((line) => line.msg === "readiness context probe")).toBe(true);
+      expect(records.some((line) => line.msg === "request completed")).toBe(true);
+      for (const line of records) {
+        expect(line.requestId).toBe(safeId);
+        expect(line.correlationId).toBe(correlationId ?? safeId);
+      }
+    }
+  );
+});
 
 describe("requestIdMiddleware — X-Correlation-ID header sanitisation", () => {
   it("rejects an oversized correlation ID and falls back to the request ID", async () => {

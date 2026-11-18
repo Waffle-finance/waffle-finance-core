@@ -505,6 +505,91 @@ describe("PostgreSQL Database Compatibility", () => {
     expect(allIds.sort()).toEqual(expectedIds.sort());
   });
 
+  // ── #910: focused query matrix for find/list/update/terminal lookups ────
+
+  testBoth("should find orders by status (findByStatus)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "a1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    const announced = await repo.findByStatus("announced", 10);
+    expect(announced.some((o) => o.publicId === order.publicId)).toBe(true);
+
+    const completed = await repo.findByStatus("completed", 10);
+    expect(completed.some((o) => o.publicId === order.publicId)).toBe(false);
+  });
+
+  testBoth("should list orders by address with cursor pagination (findByAddressWithCursor)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const addr = "0x4444444444444444444444444444444444444444";
+    const orders = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        repo.announce({
+          direction: "eth_to_xlm",
+          hashlock: "0x" + (200 + i).toString(16).padStart(64, "0"),
+          srcChain: "ethereum", srcAddress: addr,
+          srcAsset: "native", srcAmount: String(i + 1),
+          srcSafetyDeposit: "1",
+          dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+          dstAsset: "native", dstAmount: "1"
+        })
+      )
+    );
+
+    const page1 = await repo.findByAddressWithCursor(addr, 2);
+    expect(page1.orders).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+
+    const page2 = await repo.findByAddressWithCursor(addr, 2, page1.nextCursor!);
+    expect(page2.orders.length).toBeGreaterThan(0);
+    expect(page2.orders.length).toBeLessThanOrEqual(1);
+
+    const allIds = [...page1.orders, ...page2.orders].map((o) => o.publicId);
+    expect(new Set(allIds)).toEqual(new Set(orders.map((o) => o.publicId)));
+  });
+
+  testBoth("should conditionally update status only when expectedStatus matches (setStatus)", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "b1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    // Mismatched expectedStatus should throw and leave status unchanged.
+    await expect(
+      repo.setStatus(order.publicId, "completed", "system", "src_locked")
+    ).rejects.toThrow();
+    expect((await repo.findByPublicId(order.publicId))!.status).toBe("announced");
+
+    // Matching expectedStatus applies the transition.
+    await repo.setStatus(order.publicId, "completed", "system", "announced");
+    expect((await repo.findByPublicId(order.publicId))!.status).toBe("completed");
+  });
+
+  testBoth("should reach a terminal status and keep it retrievable by public id", async (db) => {
+    const repo = new OrdersRepository(db);
+    const order = await repo.announce({
+      direction: "eth_to_xlm", hashlock: "0x" + "c1".repeat(32),
+      srcChain: "ethereum", srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native", srcAmount: "1", srcSafetyDeposit: "1",
+      dstChain: "stellar", dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native", dstAmount: "1"
+    });
+
+    await repo.setStatus(order.publicId, "failed");
+    const terminal = await repo.findByPublicId(order.publicId);
+    expect(terminal!.status).toBe("failed");
+    expect(await repo.findByPublicId("wf_" + "0".repeat(64))).toBeNull();
+  });
+
   testBoth("should return empty results for non-existent queries", async (db) => {
     const repo = new OrdersRepository(db);
 
@@ -1245,6 +1330,97 @@ describe("PostgresStatement SQL Translation", () => {
       expect.stringContaining("public_id = $1"),
       ["test-id", "extra-param", 42]
     );
+  });
+
+  // ── #909: quoted-text edge cases for the SQLite→Postgres translator ────
+  //
+  // These lock in current, documented behavior of the regex-based
+  // convertSqliteToPostgres translator around quoted text and comments,
+  // alongside real named parameters in the same statement.
+
+  it("KNOWN LIMITATION: colon-like text inside a single-quoted string is still rewritten as a parameter", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders WHERE cancellation_reason = 'stale:no_src_lock' AND public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-1" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // The real named parameter still converts correctly...
+    expect(sql).toContain("public_id = $2");
+    // ...but the colon inside the quoted literal is also rewritten, and its
+    // "parameter name" (no_src_lock) has no matching key, so it resolves
+    // to undefined rather than failing fast.
+    expect(sql).toContain("'stale$1");
+    expect(sqlParams).toEqual([undefined, "order-1"]);
+  });
+
+  it("KNOWN LIMITATION: an escaped single quote inside a string does not protect the following colon", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders WHERE src_address = 'O''Brien:note' AND public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-2" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    expect(sql).toContain("'O''Brien$1");
+    expect(sqlParams).toEqual([undefined, "order-2"]);
+  });
+
+  it("KNOWN LIMITATION: a colon immediately followed by word characters inside a SQL comment is also rewritten as a parameter", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      -- note: this comment mentions a ratio of 2:1
+      SELECT * FROM orders WHERE public_id = :publicId
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-3" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // "note:" is followed by a space, so the translator's regex (`:(\w+)`)
+    // does not treat it as a parameter — but "2:1" has no separating space,
+    // so "1" is rewritten as a parameter placeholder.
+    expect(sql).toContain("-- note: this comment mentions a ratio of 2$1");
+    expect(sql).toContain("public_id = $2");
+    // "1" is not a key on the params object, so it resolves to undefined;
+    // the real :publicId parameter still comes through correctly.
+    expect(sqlParams).toEqual([undefined, "order-3"]);
+  });
+
+  it("real named parameters still convert correctly alongside mixed quote styles", async () => {
+    const stmt = new PostgresStatement(mockPool, `
+      SELECT * FROM orders
+      WHERE direction = "eth_to_xlm"
+        AND src_address = 'addr:placeholder'
+        AND public_id = :publicId
+        AND status = :status
+    `);
+
+    mockPool.query.mockResolvedValueOnce({ rows: [] });
+
+    await stmt.allAsync({ publicId: "order-4", status: "announced" });
+
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    const sqlParams = mockPool.query.mock.calls[0][1] as unknown[];
+
+    // Real bind parameters: converted in order, values intact.
+    expect(sql).toMatch(/public_id = \$2\s+AND status = \$3/);
+    expect(sqlParams[1]).toBe("order-4");
+    expect(sqlParams[2]).toBe("announced");
+    // The quoted "placeholder" text is still rewritten (documented limitation).
+    expect(sql).toContain("'addr$1");
+    expect(sqlParams[0]).toBeUndefined();
   });
 
   it("should preserve param types through the conversion layer", async () => {

@@ -41,7 +41,9 @@
     "validate:deployments": "node scripts/validate-deployments.mjs",
     "validate:deps": "node scripts/check-dep-versions.mjs",
     "validate:docs": "node scripts/check-docs-drift.mjs",
-    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs"
+    "validate:release-artifacts": "node scripts/verify-release-artifacts.mjs",
+    "validate:versions": "node scripts/check-versions.mjs",
+    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
