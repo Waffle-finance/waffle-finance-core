@@ -98,7 +98,7 @@ const NPM_BUILTINS = new Set([
 // ---------------------------------------------------------------------------
 
 /** Recursively collect all *.md files under `dir`, skipping excluded dirs. */
-function collectMarkdownFiles(dir, root) {
+export function collectMarkdownFiles(dir, root) {
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     // Check both the entry name and the path relative to root
@@ -197,7 +197,7 @@ function loadPkg(pkgDir) {
 }
 
 /** Build map of package name → absolute directory from workspace config. */
-function buildPkgNameMap(root) {
+export function buildPkgNameMap(root) {
   const rootPkg = loadPkg(root);
   if (!rootPkg) return new Map();
   const map = new Map();
@@ -228,7 +228,7 @@ function buildPkgNameMap(root) {
 // Check 3 — Broken relative links
 // ---------------------------------------------------------------------------
 
-function checkBrokenLinks(mdFiles, root) {
+export function checkBrokenLinks(mdFiles, root) {
   const errors = [];
 
   for (const mdFile of mdFiles) {
@@ -272,8 +272,10 @@ function checkBrokenLinks(mdFiles, root) {
  * Also check `pnpm <rootScript>` / `pnpm run <rootScript>` for scripts that
  * are explicitly defined in the root package.json scripts block, ignoring
  * npm builtins, version strings, and prose fragments.
+ *
+ * Exported for unit testing.
  */
-function checkScriptReferences(mdFiles, pkgNameMap, root) {
+export function checkScriptReferences(mdFiles, pkgNameMap, root) {
   const errors = [];
   const rootPkg = loadPkg(root);
   const rootScripts = rootPkg?.scripts ?? {};
@@ -291,6 +293,11 @@ function checkScriptReferences(mdFiles, pkgNameMap, root) {
 
       // Skip pnpm built-in verbs used after --filter (exec, publish, etc.)
       if (NPM_BUILTINS.has(scriptName)) continue;
+
+      // Skip shell flag arguments (--reporter, --coverage, -r, etc.) — these
+      // are CLI options passed to pnpm itself or the underlying command, not
+      // script names defined in package.json.
+      if (scriptName.startsWith('-')) continue;
 
       // Skip placeholder syntax in docs (e.g. `pnpm --filter <pkg> <script>`)
       if (scriptName.startsWith('<') || scriptName.startsWith('{')) continue;
@@ -443,4 +450,7 @@ function main() {
   console.log('\n✅  All doc-drift checks passed.');
 }
 
-main();
+// Only run when executed directly — not when imported by the test suite.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  main();
+}
