@@ -116,6 +116,49 @@ export interface RelayEventRoutingMeta {
   claimer?: string | null;
   /** Refunder address for order auditability. */
   refunder?: string | null;
+  /** Preimage (bytes32 hex) revealed by a secret-revealed event. */
+  preimage?: string | null;
+}
+
+/**
+ * Lifecycle fields that every consumer (SDK, coordinator, relayer) must agree
+ * on when decoding the same on-chain event.  The event-schema compatibility
+ * tests assert that these fields survive decoding identically in all
+ * consumers; keep this list in sync with `LIFECYCLE_FIELDS` in the SDK and
+ * coordinator decoders.
+ */
+export const RELAY_LIFECYCLE_FIELDS = [
+  'orderId',
+  'sender',
+  'beneficiary',
+  'refundAddress',
+  'safetyDeposit',
+  'claimer',
+  'refunder',
+] as const;
+
+export type RelayLifecycleField = (typeof RELAY_LIFECYCLE_FIELDS)[number];
+
+/**
+ * Extract the normalized lifecycle view of a relay event.
+ *
+ * `orderId` lives on the envelope; the remaining lifecycle fields live in
+ * `routingMeta`.  Missing values are normalized to `null` (never `undefined`)
+ * so the result is directly comparable across consumers and JSON-safe.
+ */
+export function extractRelayLifecycleFields(
+  event: NormalizedRelayEvent
+): Record<RelayLifecycleField, string | null> {
+  const meta = event.routingMeta ?? {};
+  return {
+    orderId: event.orderId,
+    sender: meta.sender ?? null,
+    beneficiary: meta.beneficiary ?? null,
+    refundAddress: meta.refundAddress ?? null,
+    safetyDeposit: meta.safetyDeposit ?? null,
+    claimer: meta.claimer ?? null,
+    refunder: meta.refunder ?? null,
+  };
 }
 
 // ── Normalized event ──────────────────────────────────────────────────────────
@@ -323,6 +366,61 @@ export function createSolanaOrderEvent(opts: {
       ...(opts.safetyDeposit ? { safetyDeposit: opts.safetyDeposit } : {}),
       ...(opts.claimer ? { claimer: opts.claimer } : {}),
       ...(opts.refunder ? { refunder: opts.refunder } : {}),
+    },
+  });
+}
+
+/**
+ * Convenience factory for Ethereum HTLC events decoded from canonical logs.
+ *
+ * Unlike the narrower factories above, this accepts the full lifecycle field
+ * set so the relayer can round-trip every field asserted by the event-schema
+ * compatibility tests.  Fields absent from the raw log are normalized to
+ * `null` rather than omitted, keeping the envelope shape stable.
+ */
+export function createEthHtlcEvent(opts: {
+  eventKind: RelayEventKind;
+  orderId: string;
+  txHash: string;
+  blockNumber: number;
+  logIndex?: number;
+  hashlock?: string | null;
+  timelock?: number | null;
+  amount?: string | null;
+  tokenAddress?: string | null;
+  feeRateBps?: number | null;
+  partialFillEnabled?: boolean | null;
+  resolverAddress?: string | null;
+  sender?: string | null;
+  beneficiary?: string | null;
+  refundAddress?: string | null;
+  safetyDeposit?: string | null;
+  claimer?: string | null;
+  refunder?: string | null;
+  preimage?: string | null;
+}): NormalizedRelayEvent {
+  return createRelayEvent({
+    sourceChain: 'ethereum',
+    eventKind: opts.eventKind,
+    orderId: opts.orderId,
+    txHash: opts.txHash,
+    routingMeta: {
+      blockNumber: opts.blockNumber,
+      logIndex: opts.logIndex,
+      hashlock: opts.hashlock ?? null,
+      timelock: opts.timelock ?? null,
+      amount: opts.amount ?? null,
+      tokenAddress: opts.tokenAddress ?? null,
+      feeRateBps: opts.feeRateBps ?? null,
+      partialFillEnabled: opts.partialFillEnabled ?? null,
+      resolverAddress: opts.resolverAddress ?? null,
+      sender: opts.sender ?? null,
+      beneficiary: opts.beneficiary ?? null,
+      refundAddress: opts.refundAddress ?? null,
+      safetyDeposit: opts.safetyDeposit ?? null,
+      claimer: opts.claimer ?? null,
+      refunder: opts.refunder ?? null,
+      preimage: opts.preimage ?? null,
     },
   });
 }

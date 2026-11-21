@@ -25,6 +25,7 @@ const NETWORKS = {
     ethereumName: 'Ethereum Mainnet',
     stellarPassphrase: 'Public Global Stellar Network ; September 2015',
     stellarHorizon: 'https://horizon.stellar.org',
+    production: true,
   },
 };
 
@@ -153,6 +154,24 @@ function validateCombinedManifest(errors, filePath, artifact, expected) {
     expectPositiveIntegerString(errors, filePath, 'stellar.resolverRegistryConfig.minStake', registryConfig.minStake);
     expectStellarAccount(errors, filePath, 'stellar.resolverRegistryConfig.slashBeneficiary', registryConfig.slashBeneficiary);
   }
+
+  if (expected.production) {
+    const approved = artifact.stellar.approvedAdminMultisig;
+    if (approved === undefined) {
+      fail(errors, filePath, 'stellar.approvedAdminMultisig', 'is required on production networks');
+    } else {
+      expectStellarAccount(errors, filePath, 'stellar.approvedAdminMultisig', approved);
+      if (registryConfig && typeof registryConfig.admin === 'string' && typeof approved === 'string'
+        && registryConfig.admin !== approved) {
+        fail(
+          errors,
+          filePath,
+          'stellar.resolverRegistryConfig.admin',
+          `must match approved multisig ${approved}, got ${registryConfig.admin}`,
+        );
+      }
+    }
+  }
 }
 
 function validateHardhatManifest(errors, filePath, artifact, expected) {
@@ -165,6 +184,98 @@ function validateHardhatManifest(errors, filePath, artifact, expected) {
 
   if (artifact.config?.minSafetyDeposit !== undefined && !/^[0-9]+$/.test(String(artifact.config.minSafetyDeposit))) {
     fail(errors, filePath, 'config.minSafetyDeposit', 'must be a non-negative integer string');
+  }
+
+  validateOwnerPolicy(errors, filePath, artifact, expected);
+  validateEscrowRegistryLinkage(errors, filePath, artifact);
+}
+
+// Production networks must record an approved multisig owner; testnets stay flexible.
+function validateOwnerPolicy(errors, filePath, artifact, expected) {
+  const owner = artifact.ethereum?.resolverRegistryOwner ?? artifact.config?.resolverRegistryOwner;
+  const approved = artifact.config?.approvedOwnerMultisig ?? artifact.ethereum?.approvedOwnerMultisig;
+
+  if (owner !== undefined) {
+    expectEthereumAddress(errors, filePath, 'config.resolverRegistryOwner', owner);
+  }
+
+  if (approved !== undefined) {
+    expectEthereumAddress(errors, filePath, 'config.approvedOwnerMultisig', approved);
+  }
+
+  if (!expected.production) {
+    return;
+  }
+
+  if (owner === undefined) {
+    fail(errors, filePath, 'config.resolverRegistryOwner', 'is required on production networks');
+    return;
+  }
+
+  if (approved === undefined) {
+    fail(errors, filePath, 'config.approvedOwnerMultisig', 'is required on production networks');
+    return;
+  }
+
+  if (typeof owner === 'string' && typeof approved === 'string' && owner.toLowerCase() !== approved.toLowerCase()) {
+    fail(
+      errors,
+      filePath,
+      'config.resolverRegistryOwner',
+      `must match approved multisig ${approved}, got ${owner}`,
+    );
+  }
+}
+
+// The escrow's registry reference is immutable, so a replacement escrow must
+// point at the current registry and the manifest must record the migration.
+function validateEscrowRegistryLinkage(errors, filePath, artifact) {
+  const escrow = artifact.ethereum?.htlcEscrow;
+  const registry = artifact.ethereum?.resolverRegistry;
+  const linked = artifact.ethereum?.htlcEscrowRegistry ?? artifact.config?.htlcEscrowRegistry;
+
+  if (linked !== undefined) {
+    expectEthereumAddress(errors, filePath, 'ethereum.htlcEscrowRegistry', linked);
+    if (typeof registry === 'string' && typeof linked === 'string' && linked.toLowerCase() !== registry.toLowerCase()) {
+      fail(
+        errors,
+        filePath,
+        'ethereum.htlcEscrowRegistry',
+        `escrow is linked to ${linked} but manifest registry is ${registry}; migration is incomplete`,
+      );
+    }
+  }
+
+  const migration = artifact.ethereum?.escrowMigration;
+  if (!migration) {
+    return;
+  }
+
+  expectEthereumAddress(errors, filePath, 'ethereum.escrowMigration.previousEscrow', migration.previousEscrow);
+  expectEthereumAddress(errors, filePath, 'ethereum.escrowMigration.newEscrow', migration.newEscrow);
+
+  if (typeof escrow === 'string' && typeof migration.newEscrow === 'string'
+    && escrow.toLowerCase() !== migration.newEscrow.toLowerCase()) {
+    fail(
+      errors,
+      filePath,
+      'ethereum.escrowMigration.newEscrow',
+      `must match ethereum.htlcEscrow ${escrow}; migration is incomplete`,
+    );
+  }
+
+  if (typeof migration.previousEscrow === 'string' && typeof migration.newEscrow === 'string'
+    && migration.previousEscrow.toLowerCase() === migration.newEscrow.toLowerCase()) {
+    fail(errors, filePath, 'ethereum.escrowMigration.newEscrow', 'must differ from previousEscrow');
+  }
+
+  if (migration.newOrderIntakeGated !== true) {
+    fail(
+      errors,
+      filePath,
+      'ethereum.escrowMigration.newOrderIntakeGated',
+      'must be true so new orders are not routed to the wrong registry during migration',
+    );
   }
 }
 

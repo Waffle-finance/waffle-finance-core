@@ -593,3 +593,44 @@ Check on-call runbook
 - [Coordinator README](./README.md) - Full observability guide
 - [Alert Rules](./coordinator-alerts.yml) - Prometheus alert definitions
 - [Metrics Handbook](../../README.md#metrics) - All coordinator metrics
+- [Escrow Migration Runbook](../../docs/OPERATIONS.md#escrow-deployment-migration) - Deployment sequencing for replacing the escrow contract
+
+---
+
+## Escrow Migration Cross-Reference
+
+The escrow's registry reference is immutable, so replacing the escrow requires a
+new deployment plus coordinated configuration changes. The full procedure lives
+in [docs/OPERATIONS.md](../../docs/OPERATIONS.md#escrow-deployment-migration);
+this section only covers the coordinator/relayer side.
+
+### Intake Gating
+
+Before the replacement escrow is announced to clients, new order intake must be
+gated so no new orders are routed to the wrong registry:
+
+1. Pause new order intake (coordinator `/announce` intake flag or equivalent
+   deployment config) and confirm `coordinator_active_orders` stops increasing.
+2. Keep the old escrow reachable: in-flight orders must remain claimable or
+   refundable through the old contract. Do **not** assume they can be migrated.
+3. Point coordinator and relayer config at the new escrow/registry only after
+   the dry-run validator (`scripts/escrow-migration-dry-run.*`) passes.
+4. Re-enable intake and watch `coordinator_orders_total{status="src_locked"}`
+   for orders landing on the new escrow.
+
+### Rollback Trigger
+
+Roll back the coordinator/relayer config change (restore the previous escrow and
+registry addresses and re-enable intake against the old contract) if any of the
+following occur during migration:
+
+- The dry-run validator reports a chain, bytecode, registry-linkage, or
+  deployment-manifest mismatch.
+- New orders appear on the new escrow while in-flight orders on the old escrow
+  cannot be claimed or refunded.
+- `coordinator_listener_lag_blocks` or `coordinator_reconciliation_errors_total`
+  spikes after the config switch, indicating the coordinator is watching the
+  wrong contract.
+
+The rollback point is the last known-good coordinator/relayer config revision;
+record its commit or config hash in the migration ticket before starting.

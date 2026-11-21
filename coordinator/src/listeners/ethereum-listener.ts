@@ -1,4 +1,4 @@
-import { createPublicClient, http, parseAbiItem, type PublicClient } from "viem";
+import { createPublicClient, http, type PublicClient } from "viem";
 import { sepolia, mainnet } from "viem/chains";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
@@ -10,20 +10,25 @@ import {
   workflowDispatchDecisions,
 } from "../metrics.js";
 import { decideDispatch } from "../services/workflow-priority-policy.js";
+import {
+  HTLC_ESCROW_EVENTS,
+  decodeHtlcEscrowLog,
+  type NormalizedHtlcEvent,
+} from "../abi/htlc-escrow-events.js";
 
 // ---------------------------------------------------------------------------
-// ABI event definitions (must remain unchanged)
+// ABI event definitions
 // ---------------------------------------------------------------------------
+//
+// The canonical event signatures and topics live in the shared fixture module
+// `../abi/htlc-escrow-events.js`.  That module is also consumed by the SDK and
+// the relayer so that all consumers decode the same schema.  Any change to an
+// event name or indexed-field layout must go through the compatibility update
+// procedure documented there (and enforced by the compatibility tests).
 
-const ORDER_CREATED = parseAbiItem(
-  "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed beneficiary, address token, uint256 amount, uint256 safetyDeposit, bytes32 hashlock, uint64 timelock)"
-);
-const ORDER_CLAIMED = parseAbiItem(
-  "event OrderClaimed(uint256 indexed orderId, address indexed claimer, bytes32 preimage, uint256 amount, uint256 safetyDeposit)"
-);
-const ORDER_REFUNDED = parseAbiItem(
-  "event OrderRefunded(uint256 indexed orderId, address indexed caller, uint256 amount, uint256 safetyDeposit)"
-);
+const ORDER_CREATED = HTLC_ESCROW_EVENTS.OrderCreated;
+const ORDER_CLAIMED = HTLC_ESCROW_EVENTS.OrderClaimed;
+const ORDER_REFUNDED = HTLC_ESCROW_EVENTS.OrderRefunded;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -208,6 +213,20 @@ export class EthereumListener {
       total += events.length;
     }
     return total;
+  }
+
+  // ─── Event decoding ──────────────────────────────────────────────────────
+
+  /**
+   * Decode a raw log using the canonical HTLC escrow event schema.
+   *
+   * Returns `null` when the log does not match any known event topic (e.g. a
+   * log emitted by an unrelated contract).  Throws when the topic matches a
+   * known event but the payload cannot be decoded — that indicates a schema
+   * incompatibility between the deployed contract and this listener.
+   */
+  decodeLog(rawLog: unknown): NormalizedHtlcEvent | null {
+    return decodeHtlcEscrowLog(rawLog);
   }
 
   // ─── Event deduplication helpers ─────────────────────────────────────────
