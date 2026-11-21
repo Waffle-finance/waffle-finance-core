@@ -5,7 +5,18 @@
  * once so operators see the complete list of problems rather than fixing one
  * error at a time and re-starting.  The validator never throws — callers
  * decide what to do with the returned errors.
+ *
+ * Cross-field constraints (network mode vs chain ID, required contract
+ * addresses, secret format) are delegated to the shared
+ * `packages/config` validator so that the coordinator, relayer and resolver
+ * all report the same problems in the same shape.
  */
+
+import {
+  validateSharedConfig,
+  redactSecrets,
+  type SharedConfigError,
+} from "../../packages/config/src/validator";
 
 export interface ConfigError {
   /** Environment variable or config field that failed validation. */
@@ -15,9 +26,19 @@ export interface ConfigError {
     | "missing"
     | "placeholder"
     | "invalid_format"
-    | "invalid_value";
+    | "invalid_value"
+    | "conflict";
   /** Human-readable description for the operator. */
   message: string;
+}
+
+/** Map a shared-validator error into the relayer's error shape. */
+function fromSharedError(err: SharedConfigError): ConfigError {
+  return {
+    field: err.field,
+    code: err.code,
+    message: redactSecrets(err.message),
+  };
 }
 
 const PLACEHOLDER_PATTERNS = [
@@ -308,6 +329,21 @@ export function validateRelayerStartup(
     }
   }
 
+  // ── Shared cross-field validation ────────────────────────────────────────
+  // Delegated to packages/config so coordinator, relayer and resolver all
+  // enforce the same network-mode/chain-ID/contract-address constraints.
+  // Errors are merged into the same single-pass list; secret values are
+  // redacted by the shared validator before they reach the message.
+
+  const sharedErrors = validateSharedConfig(env, {
+    service: "relayer",
+    network: networkMode === "mainnet" ? "mainnet" : "testnet",
+    requireContractAddresses: true,
+  });
+  for (const sharedErr of sharedErrors) {
+    errors.push(fromSharedError(sharedErr));
+  }
+
   return errors;
 }
 
@@ -317,6 +353,6 @@ export function validateRelayerStartup(
  */
 export function formatStartupErrors(errors: ConfigError[]): string {
   return errors
-    .map((e) => `  [${e.code}] ${e.field}: ${e.message}`)
+    .map((e) => `  [${e.code}] ${e.field}: ${redactSecrets(e.message)}`)
     .join("\n");
 }

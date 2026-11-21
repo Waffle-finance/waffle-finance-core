@@ -1,17 +1,24 @@
 name: Repository Validation
 
 # Runs the full pnpm validate suite on every push to main and every pull
-# request.  The suite covers three dependency-free quality gates:
+# request.  The suite covers the dependency-free quality gates:
 #
 #   validate:manifests — workspace package-manifest contracts
 #   validate:deps      — cross-package dependency version alignment
 #   validate:docs      — relative link resolution and pnpm script references
+#   validate:release   — release-check manifest consistency (required
+#                        commands exist, CI invokes required local gates,
+#                        conditional network checks are declared)
+#   validate:config    — generated configuration reference is up to date
+#                        (check mode fails on drift)
 #
-# Because all three validators are dependency-free Node scripts, no
-# pnpm install step is needed — this job stays fast and cannot be broken
-# by a registry outage.
+# Because all validators are dependency-free Node scripts, no pnpm install
+# step is needed — this job stays fast and cannot be broken by a registry
+# outage.  Network-dependent release checks are declared as conditional in
+# the release-check manifest and report when they are skipped.
 #
-# See docs/QUALITY_GATE.md for the full check inventory.
+# See docs/QUALITY_GATE.md for the full check inventory, and
+# scripts/release-checks.json for the release-check manifest.
 
 on:
   push:
@@ -33,7 +40,20 @@ jobs:
         with:
           version: 8
 
-      # validate:manifests, validate:deps, and validate:docs are all
-      # dependency-free Node scripts — no pnpm install is needed.
+      # validate:manifests, validate:deps, validate:docs, validate:release,
+      # and validate:config are all dependency-free Node scripts — no pnpm
+      # install is needed.
       - name: Validate repository contracts (manifests, deps, docs)
         run: pnpm validate
+
+      # Verifies the release-check manifest: every referenced command exists,
+      # every required local gate is invoked by CI, and conditional network
+      # checks are declared.  Detects a removed required command or a missing
+      # CI invocation before release.
+      - name: Validate release-check manifest
+        run: pnpm validate:release
+
+      # Regenerates the configuration reference in check mode; fails on drift
+      # between the typed configuration schemas and the committed reference.
+      - name: Check configuration reference is current
+        run: pnpm validate:config

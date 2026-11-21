@@ -1,4 +1,4 @@
-import { loadConfig, logSolanaStatus } from './config.js';
+import { loadConfig, logSolanaStatus, validateConfig } from './config.js';
 import { getLogger } from './logger.js';
 import { openDatabase } from './persistence/db.js';
 import { OrdersRepository } from './persistence/orders-repo.js';
@@ -107,6 +107,22 @@ async function main(): Promise<void> {
     console.error(
       '[coordinator] FATAL: configuration is invalid — cannot start.',
       err instanceof Error ? err.message : err
+    );
+    process.exit(1);
+  }
+
+  // ── 1b. Cross-field validation (FATAL on failure) ────────────────────────
+  //
+  // Shape validation above only checks individual values.  Cross-field
+  // constraints (network mode vs chain IDs, selected contract addresses,
+  // secret/URL combinations) are validated here, before any port is bound or
+  // any listener is created.  Failures are reported as a structured list of
+  // field names and actionable reasons with secret values redacted.
+  const validationErrors = validateConfig(cfg);
+  if (validationErrors.length > 0) {
+    console.error(
+      '[coordinator] FATAL: configuration is invalid — cannot start.',
+      JSON.stringify({ errors: validationErrors }, null, 2)
     );
     process.exit(1);
   }
@@ -515,8 +531,6 @@ async function main(): Promise<void> {
     maintenance.stop();
 
     clearInterval(reconcileInterval);
-    clearInterval(expiryInterval);
-    clearInterval(staleCleanupInterval);
     clearInterval(cacheVerifyInterval);
     // expiryInterval and staleCleanupInterval were removed in #744 —
     // those jobs are now exclusively owned by MaintenanceScheduler.

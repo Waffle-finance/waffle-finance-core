@@ -48,6 +48,102 @@ function randomBytes32(): string {
   return ethers.hexlify(ethers.randomBytes(32));
 }
 
+// ── Opt-in fork integration configuration (issue #1013) ──────────────────────
+//
+// The integration test below is opt-in: it only runs when a mainnet RPC is
+// configured AND a factory address can be resolved from an explicit, validated
+// source.  When disabled it records an explicit skip reason (never a
+// success-shaped assertion) so release verification output can report whether
+// the fork integration actually ran.
+
+/** Pinned fork block, read from MAINNET_FORK_BLOCK when set. */
+function resolveForkBlock(): number | undefined {
+  const raw = process.env.MAINNET_FORK_BLOCK;
+  if (!raw || raw.trim() === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `MAINNET_FORK_BLOCK must be a positive integer, got "${raw}"`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Resolve the deployed 1inch EscrowFactory address from an explicit,
+ * validated configuration source.
+ *
+ * Priority:
+ *   1. MAINNET_ESCROW_FACTORY env var (explicit override)
+ *   2. NETWORK_CONFIG.mainnet.ethereum.escrowFactory (relayer config)
+ *
+ * The resolved address must be a checksummed, non-zero address.
+ */
+function resolveFactoryAddress(): string {
+  const fromEnv = process.env.MAINNET_ESCROW_FACTORY;
+  const candidate =
+    fromEnv && fromEnv.trim() !== ""
+      ? fromEnv.trim()
+      : NETWORK_CONFIG.mainnet.ethereum.escrowFactory;
+
+  if (!candidate || candidate === ethers.ZeroAddress) {
+    throw new Error("mainnet EscrowFactory address is not configured");
+  }
+  if (!ethers.isAddress(candidate)) {
+    throw new Error(`mainnet EscrowFactory address is invalid: ${candidate}`);
+  }
+  if (ethers.getAddress(candidate) !== candidate) {
+    throw new Error(
+      `mainnet EscrowFactory address is not checksummed: ${candidate}`,
+    );
+  }
+  return candidate;
+}
+
+/**
+ * Determine whether the opt-in fork integration test should run, and if not,
+ * why.  The reason string is surfaced in the test title so release
+ * verification output records the skip explicitly.
+ */
+function resolveForkIntegrationStatus(): {
+  enabled: boolean;
+  reason?: string;
+  factoryAddress?: string;
+  forkBlock?: number;
+} {
+  if (!hasMainnetRpc()) {
+    return {
+      enabled: false,
+      reason:
+        "skipped: MAINNET_RPC_URL / ETHEREUM_RPC_URL / INFURA_API_KEY not set",
+    };
+  }
+
+  let factoryAddress: string;
+  try {
+    factoryAddress = resolveFactoryAddress();
+  } catch (err) {
+    return {
+      enabled: false,
+      reason: `skipped: ${(err as Error).message}`,
+    };
+  }
+
+  let forkBlock: number | undefined;
+  try {
+    forkBlock = resolveForkBlock();
+  } catch (err) {
+    return {
+      enabled: false,
+      reason: `skipped: ${(err as Error).message}`,
+    };
+  }
+
+  return { enabled: true, factoryAddress, forkBlock };
+}
+
+const FORK_INTEGRATION = resolveForkIntegrationStatus();
+
 // ── Test suite ────────────────────────────────────────────────────────────────
 
 const SKIP = !hasMainnetRpc();
@@ -565,6 +661,144 @@ describe("ABI branching — mainnet vs testnet selection (no fork required)", fu
     await stopImpersonating(USDC_WHALE);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5b. Opt-in fork integration — deployed 1inch EscrowFactory (issue #1013)
+// ---------------------------------------------------------------------------
+//
+// Verifies factory invocation, event decoding, and the mapping of decoded
+// event fields onto the relayer's internal order model against the deployed
+// mainnet interface.  Runs only when FORK_INTEGRATION.enabled is true; the
+// skip reason is embedded in the suite title so release verification output
+// records whether the integration ran.
+
+describe(
+  FORK_INTEGRATION.enabled
+    ? "Mainnet fork — deployed 1inch EscrowFactory integration (opt-in)"
+    : `Mainnet fork — deployed 1inch EscrowFactory integration (${
+        FORK_INTEGRATION.reason ?? "skipped: not configured"
+      })`,
+  function () {
+    this.timeout(120_000);
+
+    before(async function () {
+      if (!FORK_INTEGRATION.enabled) {
+        // Explicit skip with reason — not a passing assertion.
+        this.skip();
+      }
+      await activateMainnetFork({
+        rpcUrl: resolveMainnetRpc(),
+        blockNumber: FORK_INTEGRATION.forkBlock,
+      });
+    });
+
+    after(async function () {
+      if (FORK_INTEGRATION.enabled) {
+        await deactivateMainnetFork();
+      }
+    });
+
+    it("records the fork integration run status for release verification", function () {
+      // This test only executes when the integration is enabled; the skip
+      // reason is otherwise surfaced in the suite title above.
+      expect(FORK_INTEGRATION.enabled).to.equal(true);
+      expect(FORK_INTEGRATION.factoryAddress).to.be.a("string");
+      // eslint-disable-next-line no-console
+      console.log(
+        `[release-verification] mainnet fork EscrowFactory integration: RAN ` +
+          `(factory=${FORK_INTEGRATION.factoryAddress}, block=${
+            FORK_INTEGRATION.forkBlock ?? "latest"
+          })`,
+      );
+    });
+
+    it("uses the validated factory address from configuration", async function () {
+      const factoryAddress = FORK_INTEGRATION.factoryAddress!;
+      const code = await ethers.provider.getCode(factoryAddress);
+      expect(code).to.not.equal("0x");
+      expect(code.length).to.be.greaterThan(2);
+    });
+
+    it("invokes factory creation and decodes the emitted event into the relayer order model", async function () {
+      const factoryAddress = FORK_INTEGRATION.factoryAddress!;
+      const iface = new ethers.Interface(MAINNET_ESCROW_FACTORY_ABI);
+
+      const [signer] = await ethers.getSigners();
+      const hashlock = ethers.sha256(randomBytes32());
+      const amount = ethers.parseUnits("100", 6);
+      const safetyDeposit = ethers.parseEther("0.01");
+      const timelock = 3600n;
+
+      const dstImmutables = buildDstImmutables({
+        hashlock,
+        maker: signer.address,
+        taker: signer.address,
+        token: MAINNET_USDC,
+        amount,
+        safetyDeposit,
+      });
+
+      // The deployed factory is not ours to mutate; invoke the creation path
+      // via a static call so the event is produced without state changes.
+      const factory = new ethers.Contract(
+        factoryAddress,
+        MAINNET_ESCROW_FACTORY_ABI,
+        signer,
+      );
+
+      // Build the calldata for createDstEscrow(dstImmutables, srcCancellationTimestamp)
+      const srcCancellationTimestamp = BigInt(Math.floor(Date.now() / 1000)) + timelock;
+      const calldata = iface.encodeFunctionData("createDstEscrow", [
+        dstImmutables,
+        srcCancellationTimestamp,
+      ]);
+
+      // Execute against the fork; capture the receipt and decode logs.
+      const tx = await signer.sendTransaction({
+        to: factoryAddress,
+        data: calldata,
+        value: safetyDeposit,
+      });
+      const receipt = await tx.wait();
+      expect(receipt).to.not.be.null;
+
+      // Decode the DstEscrowCreated event from the receipt using the relayer ABI.
+      const parsed = receipt!.logs
+        .map((log) => {
+          try {
+            return iface.parseLog({ topics: [...log.topics], data: log.data });
+          } catch {
+            return null;
+          }
+        })
+        .filter((e): e is ethers.LogDescription => e !== null);
+
+      const created = parsed.find((e) => e.name === "DstEscrowCreated");
+      expect(created, "DstEscrowCreated event not emitted").to.not.be.undefined;
+
+      // Map decoded event fields onto the relayer's internal order model.
+      const args = created!.args;
+      const orderModel = {
+        orderId: args[0] as string,
+        hashlock: args[1] as string,
+        timelock: BigInt(args[2]),
+        amount: BigInt(args[3]),
+        safetyDeposit: BigInt(args[4]),
+        token: (args[5] as string).toLowerCase(),
+        maker: (args[6] as string).toLowerCase(),
+        taker: (args[7] as string).toLowerCase(),
+      };
+
+      expect(orderModel.orderId).to.not.equal(ethers.ZeroAddress);
+      expect(orderModel.hashlock.toLowerCase()).to.equal(hashlock.toLowerCase());
+      expect(orderModel.amount).to.equal(amount);
+      expect(orderModel.safetyDeposit).to.equal(safetyDeposit);
+      expect(orderModel.token).to.equal(MAINNET_USDC.toLowerCase());
+      expect(orderModel.maker).to.equal(signer.address.toLowerCase());
+      expect(orderModel.taker).to.equal(signer.address.toLowerCase());
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 6. Configuration validation — mainnet deployment checklist

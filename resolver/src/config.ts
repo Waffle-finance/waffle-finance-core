@@ -1,5 +1,10 @@
 import { loadResolverConfig } from "@wafflefinance/config/node";
-import { ZodError, type ResolverConfig, type NetworkMode } from "@wafflefinance/config";
+import {
+  ZodError,
+  validateResolverConfig,
+  type ResolverConfig,
+  type NetworkMode,
+} from "@wafflefinance/config";
 import { ConfigValidationError } from "./validation.js";
 
 export type { ResolverConfig };
@@ -23,20 +28,39 @@ export interface SorobanConfig {
 }
 
 export function loadConfig(): ResolverConfig {
+  let config: ResolverConfig;
   try {
-    return loadResolverConfig();
+    config = loadResolverConfig();
   } catch (err) {
     if (err instanceof ZodError) {
       const issue = err.issues[0];
       const path = issue?.path.join(".");
-      
+
       if (path === "network") {
-        throw new ConfigValidationError(`NETWORK_MODE must be 'testnet' or 'mainnet', got: ${process.env.NETWORK_MODE}`);
+        throw new ConfigValidationError(
+          `NETWORK_MODE must be 'testnet' or 'mainnet', got: ${process.env.NETWORK_MODE}`,
+        );
       }
-      
+
       const fieldMsg = path ? `Field '${path}' ` : "";
       throw new ConfigValidationError(`${fieldMsg}${issue?.message}`);
     }
     throw err;
   }
+
+  // Cross-field validation runs before any listener binds a port. Failures are
+  // reported as a structured list of field names with actionable, redacted
+  // reasons so secret values never leak into logs or error surfaces.
+  const result = validateResolverConfig(config);
+  if (!result.ok) {
+    const details = result.errors
+      .map((e) => `${e.field}: ${e.reason}`)
+      .join("; ");
+    throw new ConfigValidationError(
+      `Invalid resolver configuration: ${details}`,
+      result.errors,
+    );
+  }
+
+  return config;
 }
