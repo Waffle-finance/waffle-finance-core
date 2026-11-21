@@ -136,36 +136,52 @@ contract ReturnsFalseERC20 {
     }
 }
 
-/// @title FeeOnTransferERC20
-/// @notice Non-standard ERC20 that deducts a fee on every transfer: the
-///         recipient receives `amount - fee` while the sender is debited the
-///         full `amount`. The fee is burned (totalSupply shrinks).
-/// @dev Escrow semantics: SUPPORTED via actual-received-balance accounting.
-///      The escrow must measure its balance delta around `safeTransferFrom`
-///      and record liabilities against the amount actually received, never
-///      against the nominal `amount` requested. Otherwise an order could be
-///      recorded with liabilities greater than the escrow's token balance.
-contract FeeOnTransferERC20 {
-    string  public name     = "FeeOnTransferToken";
-    string  public symbol   = "FOT";
+/// @title ReenteringERC20
+/// @notice Adversarial ERC20 used to exercise reentrancy guards on the escrow.
+///         Tokens move normally, but `transfer` and `transferFrom` invoke a
+///         configurable callback target (typically the `ReentrantActor`) while
+///         the escrow is mid-settlement. The callback is expected to attempt
+///         nested lifecycle calls (create/claim/refund/withdraw) that must be
+///         rejected by the escrow's guards. Nested call outcomes are recorded
+///         by the actor itself; this token only drives the callback.
+contract ReenteringERC20 {
+    string  public name     = "ReenteringToken";
+    string  public symbol   = "RET";
     uint8   public decimals = 18;
     uint256 public totalSupply;
-
-    /// @notice Fee taken on every transfer, in basis points (1/10_000).
-    uint256 public immutable feeBps;
 
     mapping(address => uint256)                     public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
+    /// @notice Address invoked on every transfer/transferFrom (may be zero).
+    address public callbackTarget;
+    /// @notice Raw calldata forwarded to `callbackTarget` on each transfer.
+    bytes   public callbackData;
+    /// @notice When true, the callback is invoked on transfer/transferFrom.
+    bool    public callbackEnabled;
+
+    /// @notice Number of times the callback has been invoked.
+    uint256 public callbackCount;
+    /// @notice Whether the most recent callback succeeded.
+    bool    public lastCallbackSuccess;
+    /// @notice Return data of the most recent callback (if any).
+    bytes   public lastCallbackReturnData;
+
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+    event CallbackInvoked(address indexed target, bool success, bytes returnData);
 
-    constructor(uint256 initialSupply, uint256 feeBps_) {
-        require(feeBps_ <= 10_000, "FOT: fee");
-        feeBps                = feeBps_;
+    constructor(uint256 initialSupply) {
         totalSupply           = initialSupply;
         balanceOf[msg.sender] = initialSupply;
         emit Transfer(address(0), msg.sender, initialSupply);
+    }
+
+    /// @notice Configure the callback fired during transfers.
+    function setCallback(address target, bytes calldata data, bool enabled) external {
+        callbackTarget  = target;
+        callbackData    = data;
+        callbackEnabled = enabled;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
@@ -175,58 +191,54 @@ contract FeeOnTransferERC20 {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
+        require(balanceOf[msg.sender] >= amount, "RET: balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to]         += amount;
+        emit Transfer(msg.sender, to, amount);
+        _fireCallback();
         return true;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        require(allowance[from][msg.sender] >= amount, "FOT: allowance");
+        require(balanceOf[from] >= amount, "RET: balance");
+        require(allowance[from][msg.sender] >= amount, "RET: allowance");
         allowance[from][msg.sender] -= amount;
-        _transfer(from, to, amount);
+        balanceOf[from]             -= amount;
+        balanceOf[to]               += amount;
+        emit Transfer(from, to, amount);
+        _fireCallback();
         return true;
     }
 
-    function _transfer(address from, address to, uint256 amount) internal {
-        require(balanceOf[from] >= amount, "FOT: balance");
-        uint256 fee      = (amount * feeBps) / 10_000;
-        uint256 received = amount - fee;
-
-        balanceOf[from] -= amount;
-        balanceOf[to]   += received;
-        totalSupply     -= fee;
-
-        emit Transfer(from, to, received);
-        if (fee > 0) {
-            emit Transfer(from, address(0), fee);
-        }
+    /// @dev Invokes the configured callback, recording the outcome. The
+    ///      callback is intentionally allowed to revert without bubbling the
+    ///      revert: the escrow's guard should reject the nested call, and the
+    ///      outer transfer must still complete so accounting can be asserted.
+    function _fireCallback() internal {
+        if (!callbackEnabled || callbackTarget == address(0)) return;
+        callbackCount += 1;
+        (bool ok, bytes memory ret) = callbackTarget.call(callbackData);
+        lastCallbackSuccess    = ok;
+        lastCallbackReturnData = ret;
+        emit CallbackInvoked(callbackTarget, ok, ret);
     }
 }
 
-/// @title RebasingERC20
-/// @notice Non-standard ERC20 whose balances change without transfers: a
-///         privileged `rebase` call scales every holder's balance by a
-///         multiplier. `balanceOf` is therefore not stable across blocks.
-/// @dev Escrow semantics: REJECTED. The escrow cannot guarantee that recorded
-///      liabilities remain covered by its actual token balance when balances
-///      can shrink out-of-band, so rebasing tokens are explicitly unsupported.
-///      Integrators must not use this token with the escrow; the escrow's
-///      balance-delta accounting would observe a negative delta on rebase and
-///      must revert rather than record an under-collateralised order.
-contract RebasingERC20 {
-    string  public name     = "RebasingToken";
-    string  public symbol   = "RBT";
+/// @title RevertingERC20
+/// @notice Adversarial ERC20 that always reverts on `transfer`/`transferFrom`.
+///         Used to confirm the escrow's ERC-20 settlement path reverts
+///         atomically and leaves order state (status, balances) untouched.
+contract RevertingERC20 {
+    string  public name     = "RevertingToken";
+    string  public symbol   = "RVT";
     uint8   public decimals = 18;
     uint256 public totalSupply;
-
-    /// @notice Current rebase multiplier, scaled by 1e18 (1e18 == 1.0x).
-    uint256 public multiplier = 1e18;
 
     mapping(address => uint256)                     public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
-    event Rebase(uint256 oldMultiplier, uint256 newMultiplier);
 
     constructor(uint256 initialSupply) {
         totalSupply           = initialSupply;
@@ -240,34 +252,13 @@ contract RebasingERC20 {
         return true;
     }
 
-    function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
+    /// @dev Always reverts — no tokens ever move.
+    function transfer(address, uint256) external pure returns (bool) {
+        revert("RVT: transfer disabled");
     }
 
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        require(allowance[from][msg.sender] >= amount, "RBT: allowance");
-        allowance[from][msg.sender] -= amount;
-        _transfer(from, to, amount);
-        return true;
-    }
-
-    /// @notice Scales all balances by `newMultiplier / oldMultiplier`.
-    /// @dev Test helper: applies the multiplier to the caller's own balance
-    ///      only, which is sufficient to model out-of-band balance changes.
-    function rebase(uint256 newMultiplier) external {
-        require(newMultiplier > 0, "RBT: multiplier");
-        uint256 old = multiplier;
-        uint256 bal = balanceOf[msg.sender];
-        balanceOf[msg.sender] = (bal * newMultiplier) / old;
-        multiplier            = newMultiplier;
-        emit Rebase(old, newMultiplier);
-    }
-
-    function _transfer(address from, address to, uint256 amount) internal {
-        require(balanceOf[from] >= amount, "RBT: balance");
-        balanceOf[from] -= amount;
-        balanceOf[to]   += amount;
-        emit Transfer(from, to, amount);
+    /// @dev Always reverts — no tokens ever move.
+    function transferFrom(address, address, uint256) external pure returns (bool) {
+        revert("RVT: transferFrom disabled");
     }
 }
