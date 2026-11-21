@@ -41,9 +41,11 @@
     "validate:deployments": "node scripts/validate-deployments.mjs",
     "validate:deps": "node scripts/check-dep-versions.mjs",
     "validate:docs": "node scripts/check-docs-drift.mjs",
-    "validate:release-artifacts": "node scripts/verify-release-artifacts.mjs",
+    "validate:env": "node scripts/validate-env.mjs",
+    "validate:metrics": "node scripts/validate-metrics.mjs",
+    "validate:release-artifacts": "pnpm validate:deployments && node scripts/verify-release-artifacts.mjs",
     "validate:versions": "node scripts/check-versions.mjs",
-    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions"
+    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions && pnpm validate:deployments && pnpm validate:env && pnpm validate:metrics"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

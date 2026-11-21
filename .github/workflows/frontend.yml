@@ -3,17 +3,28 @@ name: Frontend
 # Runs the frontend Vitest suite on every push to main and every PR that
 # touches the frontend, packages/sdk, or packages/config.
 #
-# Two matrix legs run in parallel (issue #470):
+# Two matrix legs run in parallel (issues #470, #1012):
 #
 #   1. testnet  (VITE_MAINNET_ENABLED absent / false)
-#      — default CI leg, covers all existing and new unit tests.
+#      — default CI leg, covers all existing and new unit tests and asserts
+#        that mainnet-only routes and the mainnet contract factory stay gated.
 #
 #   2. mainnet  (VITE_MAINNET_ENABLED=true)
 #      — validates that wagmi v2 network resolution, contract addresses,
-#        RPC URL helpers, and the MainnetVersionBanner / NetworkMismatchBanner
-#        behave correctly when mainnet is unlocked.
+#        RPC URL helpers, mainnet route selection, and the
+#        MainnetVersionBanner / NetworkMismatchBanner behave correctly when
+#        mainnet is unlocked. Uses explicit public mainnet fixture values
+#        (public RPC endpoints and public contract addresses only — no
+#        private credentials, keys, or secrets).
 #
 # Both legs must be green before a PR can be merged.
+#
+# IMPORTANT: this workflow validates code paths only. A green mainnet-enabled
+# leg is NOT authorization to deploy mainnet and does NOT lift or bypass the
+# independent security-audit gate. Production mainnet enablement remains
+# controlled by the deployment configuration, which this workflow never
+# modifies.
+=======
 
 on:
   push:
@@ -47,8 +58,18 @@ jobs:
         include:
           - label: "testnet-only"
             mainnet_enabled: "false"
+            # Mainnet fixtures are intentionally left empty on this leg so the
+            # disabled-mode gating tests exercise the real default config.
+            mainnet_rpc_url: ""
+            mainnet_factory_address: ""
           - label: "mainnet-enabled"
             mainnet_enabled: "true"
+            # Public, non-secret mainnet fixture values. These are well-known
+            # public endpoints/addresses used only to exercise the gated
+            # mainnet code paths in tests — never used for deployment.
+            mainnet_rpc_url: "https://ethereum-rpc.publicnode.com"
+            mainnet_factory_address: "0x0000000000000000000000000000000000000000"
+=======
 
     steps:
       - name: Checkout
@@ -86,15 +107,30 @@ jobs:
       - name: Build @wafflefinance/config
         run: pnpm --filter @wafflefinance/config build
 
+      - name: Build frontend (${{ matrix.label }})
+        working-directory: frontend
+        env:
+          # Build-time configuration: the mainnet branch is compiled out when
+          # the flag is false, so both legs must build to prove the gated
+          # mainnet code still compiles after config/SDK changes.
+          VITE_MAINNET_ENABLED: ${{ matrix.mainnet_enabled }}
+          VITE_MAINNET_RPC_URL: ${{ matrix.mainnet_rpc_url }}
+          VITE_MAINNET_FACTORY_ADDRESS: ${{ matrix.mainnet_factory_address }}
+          CI: "true"
+        run: pnpm build
+
       - name: Run Vitest (${{ matrix.label }})
         working-directory: frontend
         env:
           # Vitest reads import.meta.env via Vite — pass the flag through the
           # environment so both test files and the modules under test see it.
           VITE_MAINNET_ENABLED: ${{ matrix.mainnet_enabled }}
+          VITE_MAINNET_RPC_URL: ${{ matrix.mainnet_rpc_url }}
+          VITE_MAINNET_FACTORY_ADDRESS: ${{ matrix.mainnet_factory_address }}
           # Suppress noisy console output from the feature-flag registry loader.
           CI: "true"
         run: pnpm test
+=======
 
       # Upload a coverage artifact only on the testnet leg to avoid duplicate
       # uploads (both legs produce identical coverage for non-mainnet code paths).
