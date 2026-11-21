@@ -61,6 +61,7 @@ import {
   XLM_TX_CLAIM,
   XLM_TX_CREATE,
 } from './identities.js';
+import lifecycleVectors from './soroban-lifecycle-vectors.json' with { type: 'json' };
 
 // ── On-chain enums (soroban/contracts/htlc/src/lib.rs) ─────────────────────
 
@@ -329,3 +330,74 @@ export const SOROBAN_TX_ENVELOPE_FAILED = {
   envelope: 'AAAAAQAAAAAQAAAAB',
   result: { txHash: 'b64a7c9bcd7d4ef4708b6fd2e3de195239b23a6f111efe12c70f5de4de753b25' },
 } as const;
+
+// ── Cross-contract lifecycle vectors (#1029) ────────────────────────────────
+
+/**
+ * The shared lifecycle vectors, re-exported from
+ * `soroban-lifecycle-vectors.json`.
+ *
+ * The JSON file is the single source of truth: the Rust Soroban test adapter
+ * (`soroban/contracts/htlc/src/lifecycle_vectors.rs`) and this SDK's vitest
+ * suite both read it, so a divergence between the contract and the SDK's
+ * reference lifecycle model shows up as a failing assertion on one side.
+ *
+ * Each vector names its `scenario` (valid claim, invalid preimage, expired
+ * refund, duplicate settlement, unauthorized access), the `caller` role that
+ * invokes the entrypoint, the `preimage` presented (or `null`), the
+ * `timelockOffset` relative to the order's `timelock`, and the expected
+ * `outcome` — the resulting `status`, the balances of every party, and the
+ * persisted `preimage` / `finalisedAt` state.
+ */
+export interface SorobanLifecycleVector {
+  /** Stable identifier, unique across the file. */
+  id: string;
+  /** Which shared lifecycle scenario this vector exercises. */
+  scenario:
+    | 'valid_claim'
+    | 'invalid_preimage'
+    | 'expired_refund'
+    | 'duplicate_settlement'
+    | 'unauthorized_access';
+  /** Entrypoint the caller invokes. */
+  entrypoint: 'claim' | 'refund';
+  /** Role of the invoker, resolved to an address by the adapter. */
+  caller: 'beneficiary' | 'sender' | 'refund_address' | 'stranger';
+  /** Hex-encoded preimage presented to `claim`, or `null` for `refund`. */
+  preimage: string | null;
+  /** Seconds relative to the order's `timelock` at invocation time. */
+  timelockOffset: number;
+  /** Expected semantic outcome. */
+  outcome: {
+    /** Whether the invocation succeeds. */
+    ok: boolean;
+    /** Contract error name when `ok` is false, else `null`. */
+    error: string | null;
+    /** Resulting `OrderStatus` discriminant, or `null` if unchanged. */
+    status: number | null;
+    /** Balances after the invocation, keyed by role. */
+    balances: {
+      beneficiary: string;
+      sender: string;
+      refund_address: string;
+    };
+    /** Persisted order state after the invocation. */
+    state: {
+      /** Hex-encoded stored preimage, or `null` when empty. */
+      preimage: string | null;
+      /** `finalised_at` as a decimal string, or `null` when unset. */
+      finalisedAt: string | null;
+    };
+  };
+}
+
+/** The parsed lifecycle vector file. */
+export const SOROBAN_LIFECYCLE_VECTORS: readonly SorobanLifecycleVector[] =
+  lifecycleVectors as readonly SorobanLifecycleVector[];
+
+/** Look up a lifecycle vector by its stable `id`. */
+export function getSorobanLifecycleVector(id: string): SorobanLifecycleVector {
+  const vector = SOROBAN_LIFECYCLE_VECTORS.find((v) => v.id === id);
+  if (!vector) throw new Error(`unknown Soroban lifecycle vector: ${id}`);
+  return vector;
+}

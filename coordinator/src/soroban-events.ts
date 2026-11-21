@@ -47,6 +47,7 @@
 
 import { scValToNative } from "@stellar/stellar-sdk";
 import type { xdr } from "@stellar/stellar-sdk";
+import { Address, Contract, TransactionBuilder, Networks, rpc } from "@stellar/stellar-sdk";
 
 // ─── Schema version ───────────────────────────────────────────────────────────
 
@@ -348,4 +349,233 @@ export function isMalformedEvent(
   result: DecodedHtlcEvent | MalformedEventError | null,
 ): result is MalformedEventError {
   return result !== null && (result as MalformedEventError).isMalformed === true;
+}
+
+// ─── Soroban TTL diagnostics ──────────────────────────────────────────────────
+//
+// Soroban contract instances and persistent entries (e.g. per-order data) have
+// ledger-based TTLs.  Unlike permanent EVM storage, an entry that is not
+// extended before its TTL lapses is archived and must be restored before it can
+// be used again.  This section defines observable TTL thresholds and a
+// read-only diagnostic that reports which contract/order state needs renewal.
+//
+// The diagnostic NEVER mutates state: it only reads ledger entries via
+// `getLedgerEntries` and reports.  Renewal (the `extendFootprintTtl` /
+// `restoreFootprint` operations) is an explicit operator action documented
+// alongside this module.
+
+/**
+ * Minimum safe remaining TTL, in ledgers, for any monitored entry.
+ *
+ * At ~5s per ledger this is roughly 7 days of runway.  Operators should renew
+ * whenever an entry drops below this threshold; the diagnostic classifies such
+ * entries as `"below_threshold"`.
+ */
+export const SOROBAN_TTL_MIN_SAFE_LEDGERS = 120_960;
+
+/**
+ * Entries at or above this remaining-TTL value are considered healthy.
+ * Between {@link SOROBAN_TTL_MIN_SAFE_LEDGERS} and this value the entry is
+ * reported as `"warning"` so operators have time to act before it crosses the
+ * hard minimum.
+ */
+export const SOROBAN_TTL_WARN_LEDGERS = 241_920;
+
+/** Classification of a single monitored entry's remaining TTL. */
+export type TtlStatus = "ok" | "warning" | "below_threshold" | "unavailable";
+
+/** What kind of Soroban state an entry represents. */
+export type TtlEntryKind = "contract_instance" | "order_persistent";
+
+/** A single entry the diagnostic should monitor. */
+export interface TtlTarget {
+  /** Human-readable, non-secret label (e.g. "contract-instance", "order:42"). */
+  readonly label: string;
+  readonly kind: TtlEntryKind;
+  /** Ledger key to query. */
+  readonly key: xdr.LedgerKey;
+}
+
+/** Result for a single monitored entry. */
+export interface TtlEntryReport {
+  readonly label: string;
+  readonly kind: TtlEntryKind;
+  readonly status: TtlStatus;
+  /** Remaining TTL in ledgers, or `null` when unavailable. */
+  readonly remainingLedgers: number | null;
+  /** Live-until ledger sequence, or `null` when unavailable. */
+  readonly liveUntilLedger: number | null;
+  /** Non-secret, actionable guidance for the operator. */
+  readonly action: string;
+}
+
+/** Aggregate diagnostic report. */
+export interface TtlDiagnosticReport {
+  /** True when every monitored entry is `"ok"`. */
+  readonly healthy: boolean;
+  /** True when at least one entry is `"below_threshold"` or `"unavailable"`. */
+  readonly requiresAction: boolean;
+  /** Ledger sequence the report was computed against, when known. */
+  readonly latestLedger: number | null;
+  readonly entries: readonly TtlEntryReport[];
+  /** Non-secret summary suitable for logs / alerting. */
+  readonly summary: string;
+}
+
+/** Minimal read-only RPC surface the diagnostic depends on. */
+export interface TtlRpcClient {
+  getLatestLedger(): Promise<{ sequence: number }>;
+  getLedgerEntries(
+    ...keys: xdr.LedgerKey[]
+  ): Promise<{ entries: Array<{ key: xdr.LedgerKey; liveUntilLedgerSeq?: number }> }>;
+}
+
+/** Classify a remaining-TTL value against the defined thresholds. */
+export function classifyTtl(remainingLedgers: number): TtlStatus {
+  if (remainingLedgers < SOROBAN_TTL_MIN_SAFE_LEDGERS) return "below_threshold";
+  if (remainingLedgers < SOROBAN_TTL_WARN_LEDGERS) return "warning";
+  return "ok";
+}
+
+function actionForStatus(status: TtlStatus, kind: TtlEntryKind): string {
+  const subject = kind === "contract_instance" ? "contract instance" : "order persistent entry";
+  switch (status) {
+    case "ok":
+      return `${subject} TTL is healthy; no action required.`;
+    case "warning":
+      return `${subject} TTL is approaching the minimum safe threshold; schedule an extension (extendFootprintTtl) before it crosses ${SOROBAN_TTL_MIN_SAFE_LEDGERS} ledgers.`;
+    case "below_threshold":
+      return `${subject} TTL is below the minimum safe threshold; extend it immediately (extendFootprintTtl) or restore it (restoreFootprint) if already archived.`;
+    case "unavailable":
+      return `${subject} TTL could not be read from RPC; retry the diagnostic and escalate if the RPC remains unavailable.`;
+  }
+}
+
+/**
+ * Build the ledger key for a contract instance entry.
+ */
+export function contractInstanceKey(contractId: string): xdr.LedgerKey {
+  return new Contract(contractId).getFootprint() as unknown as xdr.LedgerKey;
+}
+
+/**
+ * Build the ledger key for a persistent contract-data entry keyed by a symbol
+ * or string (e.g. an order id encoded as a string key).
+ */
+export function persistentEntryKey(
+  contractId: string,
+  entryKey: xdr.ScVal,
+): xdr.LedgerKey {
+  const contract = new Contract(contractId);
+  // ContractData ledger key for a persistent entry.
+  return contract.getFootprint() && buildContractDataKey(contract.address(), entryKey);
+}
+
+function buildContractDataKey(
+  contractAddress: Address,
+  entryKey: xdr.ScVal,
+): xdr.LedgerKey {
+  // Delegate to the SDK's ledger-key builder via a throwaway footprint is not
+  // available, so construct the ContractData key directly.
+  const { xdr: xdrNs } = require("@stellar/stellar-sdk") as typeof import("@stellar/stellar-sdk");
+  return xdrNs.LedgerKey.contractData(
+    new xdrNs.LedgerKeyContractData({
+      contract: contractAddress.toScAddress(),
+      key: entryKey,
+      durability: xdrNs.ContractDataDurability.persistent(),
+    }),
+  );
+}
+
+/**
+ * Run the read-only TTL diagnostic against the supplied RPC client.
+ *
+ * This function performs no state mutation.  It queries the latest ledger and
+ * the live-until sequence for each target, classifies each entry against the
+ * defined thresholds, and returns a non-secret actionable report.
+ *
+ * RPC failures are captured per-entry as `"unavailable"` rather than thrown, so
+ * a single flaky query cannot mask the rest of the report.
+ */
+export async function runTtlDiagnostic(
+  client: TtlRpcClient,
+  targets: readonly TtlTarget[],
+): Promise<TtlDiagnosticReport> {
+  let latestLedger: number | null = null;
+  try {
+    const latest = await client.getLatestLedger();
+    latestLedger = latest.sequence;
+  } catch {
+    latestLedger = null;
+  }
+
+  const entries: TtlEntryReport[] = [];
+
+  for (const target of targets) {
+    let remainingLedgers: number | null = null;
+    let liveUntilLedger: number | null = null;
+
+    try {
+      const response = await client.getLedgerEntries(target.key);
+      const entry = response.entries.find((e) => e.key !== undefined);
+      if (entry && typeof entry.liveUntilLedgerSeq === "number") {
+        liveUntilLedger = entry.liveUntilLedgerSeq;
+        if (latestLedger !== null) {
+          remainingLedgers = liveUntilLedger - latestLedger;
+        }
+      }
+    } catch {
+      remainingLedgers = null;
+      liveUntilLedger = null;
+    }
+
+    const status: TtlStatus =
+      remainingLedgers === null ? "unavailable" : classifyTtl(remainingLedgers);
+
+    entries.push({
+      label: target.label,
+      kind: target.kind,
+      status,
+      remainingLedgers,
+      liveUntilLedger,
+      action: actionForStatus(status, target.kind),
+    });
+  }
+
+  const requiresAction = entries.some(
+    (e) => e.status === "below_threshold" || e.status === "unavailable",
+  );
+  const healthy = entries.every((e) => e.status === "ok");
+
+  const counts = entries.reduce<Record<TtlStatus, number>>(
+    (acc, e) => {
+      acc[e.status] += 1;
+      return acc;
+    },
+    { ok: 0, warning: 0, below_threshold: 0, unavailable: 0 },
+  );
+
+  const summary =
+    `Soroban TTL diagnostic: ${entries.length} entries ` +
+    `(ok=${counts.ok}, warning=${counts.warning}, ` +
+    `below_threshold=${counts.below_threshold}, unavailable=${counts.unavailable})` +
+    (latestLedger !== null ? ` at ledger ${latestLedger}` : " (latest ledger unavailable)");
+
+  return { healthy, requiresAction, latestLedger, entries, summary };
+}
+
+/**
+ * Convenience wrapper that builds a read-only RPC client from a Soroban RPC URL
+ * and runs the diagnostic.  The client is only used for read calls.
+ */
+export async function runTtlDiagnosticAgainstRpc(
+  rpcUrl: string,
+  targets: readonly TtlTarget[],
+): Promise<TtlDiagnosticReport> {
+  const server = new rpc.Server(rpcUrl);
+  const client: TtlRpcClient = {
+    getLatestLedger: () => server.getLatestLedger(),
+    getLedgerEntries: (...keys) => server.getLedgerEntries(...keys),
+  };
+  return runTtlDiagnostic(client, targets);
 }
