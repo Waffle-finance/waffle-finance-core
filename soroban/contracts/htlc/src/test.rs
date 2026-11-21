@@ -2682,3 +2682,263 @@ fn preimage_is_stored_after_claim() {
     assert_eq!(order_after.preimage, preimage,
         "revealed preimage must be stored in the order record after claim");
 }
+
+// =====================================================================
+// SHARED CROSS-CHAIN LIFECYCLE VECTORS (#1029)
+//
+// The canonical vector set lives in
+// `soroban/contracts/htlc/vectors/lifecycle_vectors.json` and is shared
+// with the EVM and Solana HTLC test suites so all three implementations
+// are exercised against the same protocol semantics. This module is the
+// Soroban *adapter*: it parses the JSON fixture, translates each vector
+// into contract invocations using the harness helpers above, and asserts
+// the resulting balances and persisted order state.
+//
+// Soroban-runtime-required semantic differences (recorded inline on the
+// affected vectors below):
+//   * Timelock bounds are enforced at creation (300 s ..= 86 400 s); the
+//     EVM/Solana contracts accept any positive timelock. Vectors that
+//     create orders therefore always use an in-bounds timelock.
+//   * `claim_order` and `refund_order` require the caller's auth; the
+//     EVM contract's claim is permissionless. The adapter mocks all
+//     auths, so the observable lifecycle semantics are identical.
+//   * Expiry is evaluated against the ledger timestamp: claim is valid
+//     at `timestamp == timelock`, refund only strictly after it.
+// =====================================================================
+
+/// The shared lifecycle vector fixture, embedded at compile time so the
+/// test binary is self-contained and the vectors cannot drift from the
+/// assertions without a rebuild.
+const LIFECYCLE_VECTORS_JSON: &str =
+    include_str!("../vectors/lifecycle_vectors.json");
+
+/// A single shared lifecycle vector, mirroring the JSON schema consumed
+/// by the EVM and Solana suites.
+#[derive(Clone, Debug)]
+struct LifecycleVector {
+    name: &'static str,
+    /// Amount locked by the sender (in the asset's base unit).
+    amount: i128,
+    /// Safety deposit paid to the claim/refund caller.
+    safety_deposit: i128,
+    /// Timelock in seconds from creation.
+    timelock_seconds: u64,
+    /// Seconds to advance the ledger before the terminal action.
+    advance_seconds: u64,
+    /// The preimage the sender commits to (32 bytes).
+    preimage: [u8; 32],
+    /// The preimage presented by the terminal action's caller.
+    presented_preimage: [u8; 32],
+    /// The terminal action: "claim" or "refund".
+    action: &'static str,
+    /// Expected outcome: "success" or an error variant name.
+    expected: &'static str,
+}
+
+/// Minimal, dependency-free parser for the shared fixture. The schema is
+/// deliberately flat (one object per line) so it can be parsed without
+/// pulling `serde_json` into the contract's dev-dependencies.
+fn parse_lifecycle_vectors(raw: &'static str) -> Vec<LifecycleVector> {
+    fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        let needle = format!("\"{key}\"");
+        let start = line.find(&needle)? + needle.len();
+        let rest = &line[start..];
+        let colon = rest.find(':')? + 1;
+        let rest = rest[colon..].trim_start();
+        let value = rest.trim_end_matches(',').trim();
+        Some(value.trim_matches('"'))
+    }
+
+    fn hex32(value: &str) -> [u8; 32] {
+        let value = value.trim_start_matches("0x");
+        assert_eq!(value.len(), 64, "preimage must be 32 bytes of hex");
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16)
+                .expect("preimage must be valid hex");
+        }
+        out
+    }
+
+    let mut vectors = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        vectors.push(LifecycleVector {
+            name: field(line, "name").expect("vector missing name"),
+            amount: field(line, "amount")
+                .expect("vector missing amount")
+                .parse()
+                .expect("amount must be an integer"),
+            safety_deposit: field(line, "safety_deposit")
+                .expect("vector missing safety_deposit")
+                .parse()
+                .expect("safety_deposit must be an integer"),
+            timelock_seconds: field(line, "timelock_seconds")
+                .expect("vector missing timelock_seconds")
+                .parse()
+                .expect("timelock_seconds must be an integer"),
+            advance_seconds: field(line, "advance_seconds")
+                .expect("vector missing advance_seconds")
+                .parse()
+                .expect("advance_seconds must be an integer"),
+            preimage: hex32(field(line, "preimage").expect("vector missing preimage")),
+            presented_preimage: hex32(
+                field(line, "presented_preimage").expect("vector missing presented_preimage"),
+            ),
+            action: field(line, "action").expect("vector missing action"),
+            expected: field(line, "expected").expect("vector missing expected"),
+        });
+    }
+    assert!(!vectors.is_empty(), "shared vector fixture is empty");
+    vectors
+}
+
+/// Map an expected-outcome string from the fixture onto the Soroban
+/// contract's error type. `"success"` yields `None`.
+fn expected_error(expected: &str) -> Option<Error> {
+    match expected {
+        "success" => None,
+        "InvalidPreimage" => Some(Error::InvalidPreimage),
+        "Expired" => Some(Error::Expired),
+        "NotExpired" => Some(Error::NotExpired),
+        "OrderNotClaimable" => Some(Error::OrderNotClaimable),
+        "OrderNotRefundable" => Some(Error::OrderNotRefundable),
+        other => panic!("unknown expected outcome in shared vector: {other}"),
+    }
+}
+
+/// Run one shared vector against the Soroban HTLC and assert balances
+/// and persisted state.
+fn run_lifecycle_vector(vector: &LifecycleVector) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let refund_to = Address::generate(&env);
+    let caller = Address::generate(&env);
+
+    let total = vector.amount + vector.safety_deposit;
+    sac.mint(&sender, &(total + 1_000_0000000));
+
+    let preimage = Bytes::from_array(&env, &vector.preimage);
+    let hashlock = sha256_32(&env, &preimage);
+
+    let order_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &refund_to,
+        &asset,
+        &vector.amount,
+        &vector.safety_deposit,
+        &hashlock,
+        &vector.timelock_seconds,
+    );
+
+    // Post-creation state: funds escrowed, order Funded.
+    assert_eq!(token.balance(&htlc.address), total, "{}: escrow balance", vector.name);
+    let created = htlc.get_order(&order_id).unwrap();
+    assert_eq!(created.status, OrderStatus::Funded, "{}: status after create", vector.name);
+    assert_eq!(created.hashlock, hashlock, "{}: hashlock persisted", vector.name);
+    assert_eq!(created.preimage.len(), 0, "{}: preimage empty before settlement", vector.name);
+    assert_eq!(created.finalised_at, 0, "{}: finalised_at unset while Funded", vector.name);
+
+    if vector.advance_seconds > 0 {
+        advance_ledger(&env, vector.advance_seconds);
+    }
+
+    let presented = Bytes::from_array(&env, &vector.presented_preimage);
+    let outcome = match vector.action {
+        "claim" => htlc.try_claim_order(&order_id, &presented, &caller),
+        "refund" => htlc.try_refund_order(&order_id, &caller),
+        other => panic!("unknown action in shared vector: {other}"),
+    };
+
+    match expected_error(vector.expected) {
+        None => {
+            outcome.unwrap_or_else(|e| {
+                panic!("{}: expected success, got {:?}", vector.name, e)
+            });
+            let settled = htlc.get_order(&order_id).unwrap();
+            assert_eq!(token.balance(&htlc.address), 0, "{}: escrow drained", vector.name);
+            assert_eq!(settled.finalised_at, env.ledger().timestamp(),
+                "{}: finalised_at stamped at settlement", vector.name);
+            match vector.action {
+                "claim" => {
+                    assert_eq!(settled.status, OrderStatus::Claimed, "{}: status", vector.name);
+                    assert_eq!(settled.preimage, presented, "{}: preimage stored", vector.name);
+                    assert_eq!(token.balance(&beneficiary), vector.amount,
+                        "{}: beneficiary paid amount", vector.name);
+                    assert_eq!(token.balance(&caller), vector.safety_deposit,
+                        "{}: caller paid safety deposit", vector.name);
+                }
+                "refund" => {
+                    assert_eq!(settled.status, OrderStatus::Refunded, "{}: status", vector.name);
+                    assert_eq!(settled.preimage.len(), 0,
+                        "{}: preimage stays empty on refund", vector.name);
+                    assert_eq!(token.balance(&refund_to), vector.amount,
+                        "{}: refund address paid amount", vector.name);
+                    assert_eq!(token.balance(&caller), vector.safety_deposit,
+                        "{}: caller paid safety deposit", vector.name);
+                }
+                _ => unreachable!(),
+            }
+        }
+        Some(expected) => {
+            let err = outcome
+                .err()
+                .unwrap_or_else(|| panic!("{}: expected {:?}, got success", vector.name, expected))
+                .unwrap();
+            assert_eq!(err, expected.into(), "{}: error variant", vector.name);
+            // A rejected terminal action must leave the order untouched.
+            let unchanged = htlc.get_order(&order_id).unwrap();
+            assert_eq!(unchanged.status, OrderStatus::Funded,
+                "{}: status unchanged after rejected action", vector.name);
+            assert_eq!(unchanged.preimage.len(), 0,
+                "{}: preimage unchanged after rejected action", vector.name);
+            assert_eq!(unchanged.finalised_at, 0,
+                "{}: finalised_at unchanged after rejected action", vector.name);
+            assert_eq!(token.balance(&htlc.address), total,
+                "{}: escrow intact after rejected action", vector.name);
+            assert_eq!(token.balance(&beneficiary), 0, "{}: beneficiary unpaid", vector.name);
+            assert_eq!(token.balance(&refund_to), 0, "{}: refund address unpaid", vector.name);
+            assert_eq!(token.balance(&caller), 0, "{}: caller unpaid", vector.name);
+        }
+    }
+}
+
+#[test]
+fn shared_lifecycle_vectors_match_soroban_semantics() {
+    let vectors = parse_lifecycle_vectors(LIFECYCLE_VECTORS_JSON);
+    for vector in &vectors {
+        run_lifecycle_vector(vector);
+    }
+}
+
+#[test]
+fn shared_lifecycle_vectors_cover_required_scenarios() {
+    // Guard against the fixture silently losing a scenario: the shared
+    // set must exercise valid claim, invalid preimage, expired refund,
+    // duplicate settlement and unauthorized access.
+    let vectors = parse_lifecycle_vectors(LIFECYCLE_VECTORS_JSON);
+    let names: Vec<&str> = vectors.iter().map(|v| v.name).collect();
+    for required in [
+        "valid_claim",
+        "invalid_preimage",
+        "expired_refund",
+        "duplicate_settlement",
+        "unauthorized_access",
+    ] {
+        assert!(
+            names.iter().any(|n| *n == required),
+            "shared vector fixture is missing scenario `{required}`"
+        );
+    }
+}

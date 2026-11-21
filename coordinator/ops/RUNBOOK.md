@@ -11,6 +11,7 @@
 - [Monitoring Setup](#monitoring-setup)
 - [Alert Integration](#alert-integration)
 - [On-Call Runbook](#on-call-runbook)
+- [Soroban Admin Key Rotation](#soroban-admin-key-rotation)
 - [Dashboard Configuration](#dashboard-configuration)
 - [Troubleshooting Guide](#troubleshooting-guide)
 
@@ -401,6 +402,153 @@ email_configs:
 
 ---
 
+## Soroban Admin Key Rotation
+
+The Soroban HTLC contract and the resolver registry expose privileged
+configuration entrypoints that affect the safety of future orders. The
+deployer identity may be distinct from long-term governance, so authority
+must be rotated through a controlled procedure that verifies the new
+authority **before** the previous one is relinquished.
+
+> **Secret handling rule (non-negotiable):** Never paste, print, log, or
+> attach secret key material (seed phrases, `S...` secret keys, private
+> keys, keystore files, or decrypted environment dumps) in terminal output,
+> logs, tickets, issue text, chat, or PR descriptions. Only public
+> identifiers (`G...` addresses, contract IDs, transaction hashes) may be
+> recorded. If secret material is ever exposed, treat it as a security
+> incident: stop, rotate the key immediately, and escalate.
+
+### Admin-Controlled Entrypoints
+
+| Contract | Entrypoint | Authorization requirement |
+|----------|------------|---------------------------|
+| HTLC | `set_admin` / admin transfer | Current admin address must authorize (`require_auth` on stored admin); new admin address is recorded |
+| HTLC | `pause` / `unpause` (emergency controls) | Current admin address must authorize |
+| HTLC | Fee / config setters (e.g. fee bps, treasury) | Current admin address must authorize |
+| HTLC | `upgrade` (wasm replacement) | Current admin address must authorize |
+| Resolver registry | `set_admin` / admin transfer | Current registry admin must authorize |
+| Resolver registry | `add_resolver` / `remove_resolver` | Current registry admin must authorize |
+| Resolver registry | Resolver metadata / config updates | Current registry admin must authorize |
+
+Notes:
+
+- Authorization is enforced on-chain via `require_auth` against the
+  **currently stored** admin address. After a successful rotation, the
+  previous admin's signatures are rejected for every entrypoint above.
+- Read-only entrypoints (e.g. `get_admin`, order lookups) require no auth
+  and are used for verification below.
+- Confirm the exact entrypoint names against the deployed contract
+  interface (`stellar contract invoke -- --help`) before executing; names
+  may differ between contract versions.
+
+### Procedure
+
+#### 1. Prepare the new key
+
+1. Generate the new admin keypair in an approved signer/HSM or offline
+   environment. Do not generate it on a shared host.
+2. Record only the **public** address (`G...`) in the change ticket.
+3. Fund the new account if required by the network (reserve balance).
+4. Confirm the new key holder has completed authorization review and is
+   listed as the intended long-term governance authority.
+
+#### 2. Pre-rotation verification
+
+```bash
+# Read current admin (public info only)
+stellar contract invoke \
+  --id "$HTLC_CONTRACT_ID" \
+  --source-account "$OPS_ACCOUNT" \
+  -- get_admin
+
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT_ID" \
+  --source-account "$OPS_ACCOUNT" \
+  -- get_admin
+```
+
+- [ ] Current admin matches the expected value in the change ticket.
+- [ ] New admin public address matches the reviewed value.
+- [ ] A dry run on testnet (or a fork) succeeded with the same parameters.
+
+#### 3. Update authority
+
+Submit the rotation from the **current** admin signer. Signing happens in
+the signer/HSM; the secret never enters shell history or logs.
+
+```bash
+# HTLC rotation
+stellar contract invoke \
+  --id "$HTLC_CONTRACT_ID" \
+  --source-account "$CURRENT_ADMIN_SIGNER" \
+  --network "$NETWORK" \
+  -- set_admin --new_admin "$NEW_ADMIN_ADDRESS"
+
+# Resolver registry rotation
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT_ID" \
+  --source-account "$CURRENT_ADMIN_SIGNER" \
+  --network "$NETWORK" \
+  -- set_admin --new_admin "$NEW_ADMIN_ADDRESS"
+```
+
+Record the resulting transaction hash (public) in the change ticket.
+
+#### 4. Read-back verification
+
+```bash
+# Confirm stored admin equals the new address
+stellar contract invoke --id "$HTLC_CONTRACT_ID" \
+  --source-account "$OPS_ACCOUNT" -- get_admin
+stellar contract invoke --id "$REGISTRY_CONTRACT_ID" \
+  --source-account "$OPS_ACCOUNT" -- get_admin
+```
+
+- [ ] Both `get_admin` calls return the new admin address.
+- [ ] New admin performs a low-risk protected operation (e.g. a no-op
+      config update on testnet, or a pause/unpause cycle in a maintenance
+      window) and it succeeds.
+- [ ] Old admin attempts the same protected operation and is **rejected**
+      with an authorization error. This proves the rotation took effect.
+
+#### 5. Response to a failed transaction
+
+If the rotation transaction fails or read-back does not match:
+
+1. **Do not** retry blindly. Capture the transaction hash and the error
+   code/message (public data only).
+2. Common causes:
+   - `Error(Auth, InvalidAction)` — signer is not the current admin, or
+     the new admin address is malformed.
+   - Insufficient fee/reserve — fund the source account and resubmit.
+   - Wrong network passphrase — verify `--network` matches the target.
+3. If the transaction failed, the stored admin is unchanged; the old admin
+   remains authoritative. Re-verify with `get_admin` before retrying.
+4. If the transaction succeeded but read-back shows the old admin, treat as
+   a critical incident: halt privileged operations, escalate to the
+   platform lead and security, and investigate before any further attempt.
+5. Never "fix" a failed rotation by exporting or sharing the admin secret;
+   re-run signing through the approved signer.
+
+#### 6. Post-rotation
+
+- [ ] Update the change ticket with new admin public address and tx hash.
+- [ ] Revoke/retire the old signer per key-management policy.
+- [ ] Update secret-manager references to the new signer.
+- [ ] Confirm monitoring/alerting still has a valid admin signer configured.
+
+### Release & Mainnet Readiness Checklist
+
+Before any release or mainnet launch, confirm:
+
+- [ ] Admin rotation runbook reviewed and rehearsed on testnet.
+- [ ] Current admin and intended governance admin documented (public
+      addresses only).
+- [ ] Rotation test passes: new admin succeeds, old admin is rejected.
+- [ ] No secret key material present in logs, tickets, or issue text.
+
+---
+
 ## Dashboard Configuration
 
 ### Key Panels to Monitor
@@ -593,3 +741,4 @@ Check on-call runbook
 - [Coordinator README](./README.md) - Full observability guide
 - [Alert Rules](./coordinator-alerts.yml) - Prometheus alert definitions
 - [Metrics Handbook](../../README.md#metrics) - All coordinator metrics
+- [Soroban Admin Key Rotation](#soroban-admin-key-rotation) - Admin authority rotation procedure (also required in release and mainnet readiness checklists)
