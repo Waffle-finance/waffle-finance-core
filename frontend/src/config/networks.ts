@@ -222,3 +222,16 @@ export const getFaucets = () => {
     stellar: FAUCETS.stellar.testnet,
   };
 };
+
+// ── Route selection ───────────────────────────────────────────────────────────
+
+export type AppRouteSurface = 'mainnet' | 'testnet';
+
+/**
+ * Select the route surface for the app. Mainnet routes are only reachable when
+ * the mainnet build flag is enabled; otherwise the requested mode is clamped to
+ * testnet by `resolveNetworkMode`.
+ */
+export const selectRouteSurface = (
+  requested: AppNetworkMode = readNetworkNameFromEnvOrUrl(),
+): AppRouteSurface => resolveNetworkMode(requested);

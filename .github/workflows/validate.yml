@@ -10,7 +10,8 @@ name: Repository Validation
 #
 # Because all four validators are dependency-free Node scripts, no
 # pnpm install step is needed — this job stays fast and cannot be broken
-# by a registry outage.
+# by a registry outage.  Any validator that requires installed dependencies
+# is invoked through `pnpm validate` and will install as needed.
 #
 # See docs/QUALITY_GATE.md for the full check inventory.
 

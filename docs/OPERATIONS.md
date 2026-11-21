@@ -160,6 +160,86 @@ The validation script performs:
 3. **Interface verification** - Confirms on-chain contract ABI matches source
 4. **Configuration validation** - Checks stake asset and minimum values
 
+### Repository-wide Validation (`pnpm validate`)
+
+The root `pnpm validate` command runs the static consistency checks below in
+addition to the per-package lint, type-check, and test suites. All of them are
+static: they read source files and documentation, never print secret values,
+and never contact a network. Run `pnpm validate` before opening a PR that
+touches configuration, metrics, or deployment artifacts.
+
+#### Environment-variable coverage
+
+The environment-variable validator extracts every variable referenced through
+`process.env`, `import.meta.env`, and the config package accessors, then
+compares that set against the example environment files and package
+documentation.
+
+- **Missing key** — a variable is read in code but absent from the relevant
+  example file. Add it to the example file (with a placeholder value, never a
+  real secret) and document its purpose.
+- **Stale key** — an example file documents a variable that no code reads.
+  Remove it, or, if it is intentionally reserved for operators, add it to the
+  exemption list in the validator with a comment explaining why.
+- **Exempt keys** — variables provided by the platform or CI (for example
+  `CI`, `NODE_ENV`, or `VITE_*` values injected at build time) are exempt and
+  listed in the validator. Add new exemptions there rather than deleting the
+  check.
+
+Failures report the variable name and the source location of the reference or
+example entry; they never print the variable's value.
+
+#### Metric-name consistency
+
+The metric validator inventories the counters, gauges, and histograms
+registered in `coordinator/src/metrics.ts` and related files, then parses the
+metric-bearing entries in the Grafana dashboard, the Prometheus alert rules,
+and the coordinator operations docs.
+
+- A registered metric that is missing from an alert or from the documented
+  metric list causes a failure naming the metric and the file that should
+  reference it.
+- **Label variations** are not failures: a metric may be referenced with any
+  subset of its labels (for example `orders_completed_total{chain="stellar"}`
+  matches `orders_completed_total`).
+- **Intentional exclusions** — metrics that are deliberately not alerted on
+  (debug-only or informational metrics) are listed in the validator's
+  exclusion list with a comment. Add new exclusions there, not by weakening
+  the check.
+
+#### Deployment address consistency
+
+The deployment validator compares chain-specific contract and program
+identifiers across the sources that must stay synchronized:
+`deployments.testnet.json`, the example environment files, and the operator
+documentation. It uses explicit mappings for EVM, Soroban, and Solana
+identifiers rather than searching for arbitrary strings.
+
+- A mismatch reports the chain, the field, and the artifacts that disagree —
+  never unrelated values or secrets.
+- Optional networks that are intentionally unconfigured are skipped, so a
+  clean checkout validates the testnet configuration without requiring every
+  network to be set.
+
+**How deployments update the artifacts:** when a contract or program is
+deployed or migrated, update `deployments.testnet.json` first, then propagate
+the same identifiers to the example environment files and the operator docs in
+the same PR. Run `pnpm validate` to confirm all copies agree before merging.
+
+### Mainnet-enabled frontend CI
+
+CI builds and tests the frontend in both mainnet-disabled and
+mainnet-enabled (`VITE_MAINNET_ENABLED=true`) configurations, using public
+fixture values only. This job validates that the gated mainnet code paths
+still compile and that mainnet route selection and disabled-mode gating behave
+correctly.
+
+**This job validates code paths only.** It does not authorize a mainnet
+deployment, does not lift the independent security-audit gate, and does not
+enable mainnet in production deployment configuration. Production mainnet
+remains disabled until the security audit is complete and the release is
+explicitly approved.
+
 ---
 
 ## Service Dependencies
