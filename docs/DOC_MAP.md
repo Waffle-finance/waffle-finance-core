@@ -59,6 +59,11 @@ If you add a new document, add a row here in the same PR.
 | `docs/RPC_DEGRADATION_TEST_MATRIX.md` | current | Engineering | RPC failure modes and expected service behaviour |
 | `docs/SOLANA_ACCOUNT_INIT_RENT_AUDIT.md` | current | Engineering | **Solana account initialisation & rent audit** — per-account size tables, rent assumptions, and the centralised sizing/rent/verification helpers that replaced them |
 | `docs/postmortem/` | current | Engineering | Post-mortem reports; each file is a permanent record of a specific incident |
+| `docs/adr/README.md` | current | Engineering | ADR index — lists active and superseded architecture decision records |
+| `docs/adr/ADR-000-template.md` | current | Engineering | Blank ADR template — copy this to create a new record |
+| `docs/adr/ADR-001-dual-state-machine.md` | current | Engineering | Why the order state machine is implemented independently in the SDK and the coordinator |
+| `docs/adr/ADR-002-sha256-primary-hashlock.md` | current | Engineering | Why sha256 is the primary cross-chain hashlock and how the dual-hash EVM clause works |
+| `docs/adr/ADR-003-coordinator-db-as-cache.md` | current | Engineering | Why the coordinator database is a rebuildable cache rather than an authoritative ledger |
 
 ---
 
@@ -131,6 +136,7 @@ If you add a new document, add a row here in the same PR.
 | Technical debt items (the register) | `docs/TECHNICAL_DEBT.md` |
 | Technical debt triage, priority model, sprint planning | `docs/TECHNICAL_DEBT_MAINTENANCE.md` |
 | System architecture, runtime assumptions, cross-chain invariants | `docs/ARCHITECTURE.md` |
+| Why a particular protocol or service-boundary decision was made | `docs/adr/README.md` → linked ADR file |
 | Debugging a failing service during an incident | `docs/DEBUGGING_GUIDE.md` |
 | Local development setup | `docs/DEVELOPMENT.md` |
 | Production operations | `docs/OPERATIONS.md` |

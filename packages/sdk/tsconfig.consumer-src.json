@@ -1,0 +1,35 @@
+{
+  // Type-check consumer fixtures against the TypeScript SOURCE of the SDK.
+  // This matches the resolution mode used by:
+  //   - frontend (via vite.config.ts aliases)
+  //   - e2e      (via e2e/vitest.config.ts aliases)
+  //
+  // No build step required.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "noEmit": true,
+    "types": ["node"],
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@wafflefinance/sdk":               ["./src/index.ts"],
+      "@wafflefinance/sdk/types":         ["./src/types/index.ts"],
+      "@wafflefinance/sdk/state-machine": ["./src/state-machine/index.ts"],
+      "@wafflefinance/sdk/secrets":       ["./src/secrets/index.ts"],
+      "@wafflefinance/sdk/htlc-client":   ["./src/htlc-client.ts"],
+      "@wafflefinance/sdk/coordinator":   ["./src/coordinator/index.ts"],
+      "@wafflefinance/sdk/assets":        ["./src/assets/index.ts"],
+      "@wafflefinance/sdk/routes":        ["./src/routes/index.ts"],
+      "@wafflefinance/sdk/routes/fee-policy": ["./src/routes/fee-policy.ts"],
+      "@wafflefinance/sdk/config-validation": ["./src/config-validation.ts"],
+      "@wafflefinance/sdk/ethereum":      ["./src/ethereum/index.ts"],
+      "@wafflefinance/sdk/soroban":       ["./src/soroban/index.ts"],
+      "@wafflefinance/sdk/solana":        ["./src/solana/index.ts"],
+      "@wafflefinance/sdk/approval":      ["./src/approval.ts"]
+    }
+  },
+  "include": [
+    "consumer-fixtures/source-alias.consumer.ts"
+  ]
+}

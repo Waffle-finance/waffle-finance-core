@@ -8,6 +8,7 @@ For the canonical map of build, test, lint, and smoke-test commands per package 
 
 ## Table of contents
 
+- [Quickstart — no credentials required](#quickstart--no-credentials-required)
 - [Stack overview](#stack-overview)
 - [Option A: Dev container (recommended)](#option-a-dev-container-recommended)
 - [Option B: Native host setup](#option-b-native-host-setup)
@@ -25,6 +26,115 @@ For the canonical map of build, test, lint, and smoke-test commands per package 
 - [Running the full local stack](#running-the-full-local-stack)
 - [Troubleshooting](#troubleshooting)
 - [Dependency updates](./DEPENDENCY_UPDATES.md) — automated Renovate workflow, review guardrails, and how to pause it for sensitive packages.
+
+---
+
+## Quickstart — no credentials required
+
+This path takes a fresh checkout to a passing coordinator test run and a
+locally-served frontend **without** any RPC keys, funded wallets, or deployed
+contracts.  It is validated in the dev container on every change to this file.
+
+**Prerequisites:** Docker Desktop and VS Code with the Dev Containers extension
+(for the dev container path), or Node ≥ 22.5 and pnpm 8.15.0 (for native).
+Full tool requirements are listed under [Option B](#option-b-native-host-setup).
+
+### Steps
+
+**1 — Clone and enter the repo**
+
+```bash
+git clone https://github.com/Waffle-finance/waffle-finance-core
+cd waffle-finance-core
+```
+
+**2 — Copy the example environment file**
+
+No real secrets are needed for the steps below.  The example file ships safe
+placeholder values for every required variable.
+
+```bash
+cp env.example .env
+```
+
+**3 — Install dependencies**
+
+```bash
+pnpm install
+```
+
+Expected output ends with a summary line like `Done in Xs`.  If you see peer
+dependency errors, check that pnpm is exactly 8.15.0 (`pnpm --version`).
+
+**4 — Build the SDK**
+
+Every service that imports `@wafflefinance/sdk` needs the compiled output.
+Build it once before running any tests.
+
+```bash
+pnpm --filter @wafflefinance/sdk build
+```
+
+Expected output: `tsc` completes with no errors and writes files to
+`packages/sdk/dist/`.
+
+**5 — Run a representative service test**
+
+The coordinator test suite exercises the full order lifecycle, reconciliation
+replay, and state machine invariants — no live chain connection required.
+
+```bash
+pnpm --filter @wafflefinance/coordinator test
+```
+
+Expected output: all tests pass (`✓` lines), suite summary shows zero
+failures.  Typical wall time is under 30 seconds on first run.
+
+**6 — Start the frontend against local coordinator fixtures**
+
+Open two terminals:
+
+```bash
+# Terminal 1 — coordinator (SQLite, in-memory fixture data, no RPC needed)
+pnpm --filter @wafflefinance/coordinator dev
+```
+
+Wait until you see `coordinator listening on port 3001`.
+
+```bash
+# Terminal 2 — frontend dev server
+VITE_API_BASE_URL=http://localhost:3001 pnpm --filter @wafflefinance/frontend dev
+```
+
+Expected output: `➜  Local:   http://localhost:5173/`
+
+Open http://localhost:5173.  The bridge form loads and shows the token
+selector.  Order submission will return a coordinator-side error (no funded
+wallet or deployed contract) — that is expected and correct.
+
+**7 — Cleanup**
+
+```bash
+# Stop both dev servers with Ctrl-C.
+# Remove the generated SQLite file:
+rm -f coordinator/wafflefinance.db
+```
+
+### What this path proves
+
+| Step | Validates |
+|------|-----------|
+| `pnpm install` | workspace dependency graph resolves cleanly |
+| SDK `build` | TypeScript compiles; all subpath exports exist in `dist/` |
+| coordinator `test` | state machine, reconciliation replay, persistence, SSE |
+| frontend `dev` | Vite resolves SDK source alias; React app renders without errors |
+
+### What this path does NOT require
+
+- Ethereum, Stellar, or Solana RPC endpoints
+- Private keys or funded wallets
+- Deployed contract addresses
+- PostgreSQL (the coordinator uses SQLite automatically)
 
 ---
 
