@@ -18,6 +18,8 @@ For replacing the escrow (whose registry reference is immutable), including the 
 - [Rollback Procedures](#rollback-procedures)
 - [Escrow Replacement Migration](#escrow-replacement-migration)
 - [Monitoring Guide](#monitoring-guide)
+- [Soroban Admin Key Rotation](#soroban-admin-key-rotation)
+- [Soroban TTL Monitoring and Renewal](#soroban-ttl-monitoring-and-renewal)
 
 ---
 
@@ -63,6 +65,12 @@ Before deploying contracts or services, complete the following checklist:
 4. **Review chain operator guides:**
    - Stellar / Soroban: see [docs/SOROBAN_OPERATOR_GUIDE.md](SOROBAN_OPERATOR_GUIDE.md)
    - Solana: see [docs/SOLANA_OPERATOR_GUIDE.md](SOLANA_OPERATOR_GUIDE.md) (devnet vs production gap audit, Anchor lifecycle, readiness gating, settlement checklist)
+
+5. **Complete the Soroban operational checks** (required for release and mainnet readiness):
+   - [ ] Soroban admin key rotation rehearsed per [Soroban Admin Key Rotation](#soroban-admin-key-rotation) — new admin verified via read-back, old admin rejection confirmed, old key revoked.
+   - [ ] Soroban TTL diagnostic run per [Soroban TTL Monitoring and Renewal](#soroban-ttl-monitoring-and-renewal) — no contract instance or order entry below its minimum safe threshold, or renewal executed and verified.
+   - [ ] TTL renewal owner and escalation contact recorded for the deployment.
+=======
 
 5. **Generate and store `SECRET_STORAGE_KEY`** — see the full guide below.
 
@@ -140,6 +148,165 @@ secrets manager for at least 24 hours after a successful rotation.
 
 ---
 
+## Soroban Admin Key Rotation
+
+The Soroban HTLC and resolver registry expose privileged configuration
+entrypoints that affect the safety of future orders. The deployer identity is
+often distinct from long-term governance, so authority must be handed over
+through a controlled rotation that verifies the new authority **before** the
+previous one is relinquished.
+
+> **Secrets policy:** this runbook never asks you to print, paste, log, or
+> commit secret key material. Commands reference key aliases (e.g.
+> `NEW_ADMIN_KEY_ALIAS`) resolved by your signer or secrets manager at
+> execution time. Never include a secret key, seed phrase, or signed
+> transaction envelope containing one in logs, issue text, PR descriptions, or
+> chat.
+
+### Admin-controlled entrypoints
+
+| Contract | Entrypoint | Authorization requirement |
+|---|---|---|
+| HTLC | `set_admin` | Current admin must authorize the invocation; the new admin address is supplied as an argument and takes effect immediately on success. |
+| HTLC | `set_fee` / fee configuration | Current admin authorization required. |
+| HTLC | `pause` / `unpause` (if enabled) | Current admin authorization required. |
+| HTLC | `upgrade` (if enabled) | Current admin authorization required. |
+| Resolver registry | `set_admin` | Current admin must authorize; new admin takes effect on success. |
+| Resolver registry | `set_min_stake` / registry configuration | Current admin authorization required. |
+| Resolver registry | `add_resolver` / `remove_resolver` (privileged variants) | Current admin authorization required. |
+
+Authorization is enforced on-chain by Soroban's `require_auth` against the
+admin address stored in contract instance storage. After a successful
+`set_admin`, invocations authorized by the old admin are rejected.
+
+### Rotation procedure
+
+1. **Create the new key.** Generate the new admin keypair in your signer or
+   HSM and store it under an alias (e.g. `NEW_ADMIN_KEY_ALIAS`) in the secrets
+   manager. Record only the **public** key (`G...`) in the change ticket.
+2. **Fund and verify the new account.** Confirm the new admin account exists
+   on the target network and has enough XLM for future admin transactions.
+3. **Pre-flight read-back.** Read the current admin from each contract and
+   record it in the ticket:
+   ```bash
+   stellar contract invoke --id "$SOROBAN_HTLC_ID" --network "$STELLAR_NETWORK" \
+     -- get_admin
+   stellar contract invoke --id "$SOROBAN_RESOLVER_REGISTRY_ID" --network "$STELLAR_NETWORK" \
+     -- get_admin
+   ```
+4. **Submit the authority update** for each contract, signing with the
+   **current** admin key alias:
+   ```bash
+   stellar contract invoke --id "$SOROBAN_HTLC_ID" --network "$STELLAR_NETWORK" \
+     --source "$CURRENT_ADMIN_KEY_ALIAS" \
+     -- set_admin --new_admin "$NEW_ADMIN_PUBLIC_KEY"
+   ```
+   Repeat for the resolver registry. Do one contract at a time and verify
+   before moving to the next.
+5. **Read-back verification.** Re-run the `get_admin` read-back and confirm it
+   returns `$NEW_ADMIN_PUBLIC_KEY` for every contract.
+6. **Prove the new authority works.** Perform a low-risk admin-authorized
+   operation (for example, re-setting a configuration value to its current
+   value) signed with `NEW_ADMIN_KEY_ALIAS`, and confirm success.
+7. **Prove the old authority is rejected.** Attempt the same operation signed
+   with the old key alias and confirm the transaction fails with an
+   authorization error. A success here means rotation did not take effect —
+   stop and investigate.
+8. **Revoke the old key** from the secrets manager and signer once both
+   contracts pass steps 5–7. Keep the old public key in the ticket for audit.
+
+### Response to a failed transaction
+
+- **`set_admin` failed:** the admin is unchanged. Re-check the source alias,
+  network passphrase, and that the current admin still authorizes. Do not
+  retry with a different key until you know which key the contract expects.
+- **Read-back does not show the new admin:** treat the rotation as
+  incomplete. Do not revoke the old key. Re-run the read-back, then re-submit
+  the update if the transaction was not included in a ledger.
+- **Old admin still succeeds after rotation:** escalate immediately as a
+  security incident; do not revoke the old key until the discrepancy is
+  understood.
+- **New admin cannot authorize:** verify the new account exists, is funded,
+  and that the alias resolves to the expected public key. Never fall back to
+  pasting a raw secret key into a shell history or issue.
+
+---
+
+## Soroban TTL Monitoring and Renewal
+
+Soroban contract instance storage and persistent order entries have
+ledger-based TTLs, unlike permanent EVM storage. Expiration does not move
+funds — settlement remains governed by chain rules — but it can make contract
+state unreadable or unextendable for clients and operators until renewed.
+
+### What requires renewal
+
+| State | Storage class | Responsible operator action |
+|---|---|---|
+| HTLC contract instance (admin, config, counters) | Instance | Extend instance TTL before threshold; owner: Soroban deployment operator |
+| Resolver registry contract instance | Instance | Extend instance TTL before threshold; owner: Soroban deployment operator |
+| Order entries (per-order persistent data) | Persistent | Extend entry TTL for orders still within their settlement/refund window; owner: Soroban deployment operator, coordinated with the resolver on-call |
+
+### Observable thresholds
+
+The diagnostic reports, per contract instance and per tracked order entry, the
+remaining TTL in ledgers and the equivalent time estimate. Alert when:
+
+| Condition | Severity | Action |
+|---|---|---|
+| Remaining TTL > minimum safe threshold | OK | No action; re-check on the normal cadence |
+| Remaining TTL ≤ minimum safe threshold (default: 30 days of ledgers) | Warning | Schedule renewal within the current on-call shift |
+| Remaining TTL ≤ critical threshold (default: 7 days of ledgers) | Critical | Renew immediately; page the Soroban operator |
+| TTL metadata unavailable (RPC error) | Warning | Retry; if persistent, treat as unknown and escalate — do not assume healthy |
+
+### Diagnostic (read-only)
+
+Run the TTL diagnostic before every release and on the monitoring cadence. It
+queries TTL metadata only and never mutates state:
+
+```bash
+pnpm --filter @wafflefinance/soroban-ops ttl-check \
+  --network "$STELLAR_NETWORK" \
+  --htlc "$SOROBAN_HTLC_ID" \
+  --registry "$SOROBAN_RESOLVER_REGISTRY_ID" \
+  --warn-days 30 --critical-days 7
+```
+
+The report lists each contract and order entry with its remaining TTL, the
+threshold it crossed, and the recommended action. It contains only public
+contract IDs and ledger numbers — no secret material. Attach the report to the
+release ticket.
+
+### Renewal execution and verification
+
+1. Extend the contract instance TTL for each contract flagged by the
+   diagnostic, signing with the operator key alias:
+   ```bash
+   stellar contract extend --id "$SOROBAN_HTLC_ID" --network "$STELLAR_NETWORK" \
+     --source "$SOROBAN_OPERATOR_KEY_ALIAS" --ledgers-to-extend "$TTL_EXTEND_LEDGERS"
+   ```
+2. Extend persistent order entries flagged by the diagnostic using the same
+   pattern with the order's storage key.
+3. Re-run the read-only diagnostic and confirm every flagged entry now reports
+   above its minimum safe threshold.
+4. Record the extension ledger and new TTL in the operations log.
+
+### Recovery when the threshold has already been crossed
+
+- **Instance TTL expired:** the contract cannot be invoked until its instance
+  is restored. Use Soroban's restore path for the contract instance, then
+  re-run the diagnostic. Funds are unaffected; settlement rules still apply.
+- **Persistent order entry expired:** restore the entry, then verify the order
+  state via read-only calls before any settlement action. Do not attempt to
+  settle an order whose state cannot be read.
+- **RPC unavailable:** retry with backoff and a failover RPC. If TTL status
+  remains unknown past the warning window, escalate as if the critical
+  threshold were crossed.
+- After any recovery, re-run the diagnostic and attach the report to the
+  incident or release ticket.
+
+---
+
 ## Pre-deployment Validation
 
 ### Validate Deployment Artifact
@@ -162,6 +329,86 @@ The validation script performs:
 2. **Contract existence check** - Verifies previously deployed contracts are reachable
 3. **Interface verification** - Confirms on-chain contract ABI matches source
 4. **Configuration validation** - Checks stake asset and minimum values
+
+### Repository-wide Validation (`pnpm validate`)
+
+The root `pnpm validate` command runs the static consistency checks below in
+addition to the per-package lint, type-check, and test suites. All of them are
+static: they read source files and documentation, never print secret values,
+and never contact a network. Run `pnpm validate` before opening a PR that
+touches configuration, metrics, or deployment artifacts.
+
+#### Environment-variable coverage
+
+The environment-variable validator extracts every variable referenced through
+`process.env`, `import.meta.env`, and the config package accessors, then
+compares that set against the example environment files and package
+documentation.
+
+- **Missing key** — a variable is read in code but absent from the relevant
+  example file. Add it to the example file (with a placeholder value, never a
+  real secret) and document its purpose.
+- **Stale key** — an example file documents a variable that no code reads.
+  Remove it, or, if it is intentionally reserved for operators, add it to the
+  exemption list in the validator with a comment explaining why.
+- **Exempt keys** — variables provided by the platform or CI (for example
+  `CI`, `NODE_ENV`, or `VITE_*` values injected at build time) are exempt and
+  listed in the validator. Add new exemptions there rather than deleting the
+  check.
+
+Failures report the variable name and the source location of the reference or
+example entry; they never print the variable's value.
+
+#### Metric-name consistency
+
+The metric validator inventories the counters, gauges, and histograms
+registered in `coordinator/src/metrics.ts` and related files, then parses the
+metric-bearing entries in the Grafana dashboard, the Prometheus alert rules,
+and the coordinator operations docs.
+
+- A registered metric that is missing from an alert or from the documented
+  metric list causes a failure naming the metric and the file that should
+  reference it.
+- **Label variations** are not failures: a metric may be referenced with any
+  subset of its labels (for example `orders_completed_total{chain="stellar"}`
+  matches `orders_completed_total`).
+- **Intentional exclusions** — metrics that are deliberately not alerted on
+  (debug-only or informational metrics) are listed in the validator's
+  exclusion list with a comment. Add new exclusions there, not by weakening
+  the check.
+
+#### Deployment address consistency
+
+The deployment validator compares chain-specific contract and program
+identifiers across the sources that must stay synchronized:
+`deployments.testnet.json`, the example environment files, and the operator
+documentation. It uses explicit mappings for EVM, Soroban, and Solana
+identifiers rather than searching for arbitrary strings.
+
+- A mismatch reports the chain, the field, and the artifacts that disagree —
+  never unrelated values or secrets.
+- Optional networks that are intentionally unconfigured are skipped, so a
+  clean checkout validates the testnet configuration without requiring every
+  network to be set.
+
+**How deployments update the artifacts:** when a contract or program is
+deployed or migrated, update `deployments.testnet.json` first, then propagate
+the same identifiers to the example environment files and the operator docs in
+the same PR. Run `pnpm validate` to confirm all copies agree before merging.
+
+### Mainnet-enabled frontend CI
+
+CI builds and tests the frontend in both mainnet-disabled and
+mainnet-enabled (`VITE_MAINNET_ENABLED=true`) configurations, using public
+fixture values only. This job validates that the gated mainnet code paths
+still compile and that mainnet route selection and disabled-mode gating behave
+correctly.
+
+**This job validates code paths only.** It does not authorize a mainnet
+deployment, does not lift the independent security-audit gate, and does not
+enable mainnet in production deployment configuration. Production mainnet
+remains disabled until the security audit is complete and the release is
+explicitly approved.
 
 ---
 
