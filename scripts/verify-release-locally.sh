@@ -35,6 +35,19 @@ info() {
     echo "ℹ️  $1"
 }
 
+# ========================================
+# Release-Check Manifest
+# ========================================
+# The canonical list of required release gates lives in
+# scripts/release-checks.manifest.json. This script reads that manifest
+# instead of maintaining its own duplicated command list.
+MANIFEST_PATH="scripts/release-checks.manifest.json"
+MANIFEST_CHECKER="scripts/check-release-manifest.mjs"
+
+if [ ! -f "$MANIFEST_PATH" ]; then
+    error "Release-check manifest not found: $MANIFEST_PATH"
+fi
+
 # Check prerequisites
 info "Checking prerequisites..."
 
@@ -56,6 +69,71 @@ fi
 
 success "All prerequisites found"
 echo ""
+
+info "Validating release-check manifest..."
+if [ ! -f "$MANIFEST_CHECKER" ]; then
+    error "Release manifest checker not found: $MANIFEST_CHECKER"
+fi
+node "$MANIFEST_CHECKER" --manifest "$MANIFEST_PATH"
+success "Release-check manifest validated"
+echo ""
+
+# Helper: read a manifest field for a named check
+manifest_field() {
+    local check_name="$1"
+    local field="$2"
+    jq -r --arg name "$check_name" --arg field "$field" \
+        '.checks[] | select(.name == $name) | .[$field] // empty' "$MANIFEST_PATH"
+}
+
+# Helper: run a required (non-conditional) manifest check by name
+run_manifest_check() {
+    local check_name="$1"
+    local command
+    command=$(manifest_field "$check_name" "command")
+    if [ -z "$command" ]; then
+        error "Manifest check '$check_name' has no command defined"
+    fi
+    info "Running manifest check '$check_name': $command"
+    if ! bash -c "$command"; then
+        error "Manifest check '$check_name' failed"
+    fi
+    success "Manifest check '$check_name' passed"
+    echo ""
+}
+
+# Helper: run a conditional (network-dependent) manifest check by name.
+# Records the outcome so the final report can state whether it ran or was
+# skipped, and why.
+CONDITIONAL_RESULTS=()
+
+run_conditional_check() {
+    local check_name="$1"
+    local command
+    local prerequisite
+    command=$(manifest_field "$check_name" "command")
+    prerequisite=$(manifest_field "$check_name" "prerequisite")
+
+    if [ -z "$command" ]; then
+        error "Conditional manifest check '$check_name' has no command defined"
+    fi
+
+    if [ -n "$prerequisite" ] && [ -z "${!prerequisite:-}" ]; then
+        warning "SKIPPED: '$check_name' requires environment variable $prerequisite (not set)"
+        CONDITIONAL_RESULTS+=("$check_name|skipped|missing $prerequisite")
+        echo ""
+        return 0
+    fi
+
+    info "Running conditional manifest check '$check_name': $command"
+    if bash -c "$command"; then
+        success "Conditional manifest check '$check_name' passed"
+        CONDITIONAL_RESULTS+=("$check_name|ran|passed")
+    else
+        error "Conditional manifest check '$check_name' failed"
+    fi
+    echo ""
+}
 
 # Install dependencies
 info "Installing dependencies..."
@@ -130,10 +208,7 @@ info "Foundry bytecode prefix: $foundry_bytecode..."
 success "Contract bytecode verification complete"
 echo ""
 
-info "Running Hardhat contract tests..."
-pnpm --filter @wafflefinance/contracts exec hardhat test test/HTLCEscrow.test.ts test/ResolverRegistry.test.ts
-success "Hardhat tests passed"
-echo ""
+run_manifest_check "hardhat-tests"
 
 info "Running Foundry tests..."
 cd contracts
@@ -141,6 +216,9 @@ forge test --match-path "test/foundry/*" -v
 cd ..
 success "Foundry tests passed"
 echo ""
+
+# Mainnet fork integration test (conditional: requires fork RPC configuration)
+run_conditional_check "mainnet-fork-escrow-factory"
 
 info "Generating contract artifact checksums..."
 cd contracts
@@ -190,10 +268,7 @@ for path in "${EXPORT_PATHS[@]}"; do
 done
 echo ""
 
-info "Running SDK tests..."
-pnpm --filter @wafflefinance/sdk test
-success "SDK tests passed"
-echo ""
+run_manifest_check "sdk-tests"
 
 info "Verifying SDK package.json exports..."
 EXPORTS=$(jq -r '.exports | keys[]' $SDK_DIR/package.json | grep -v "^\.$")
@@ -265,10 +340,7 @@ echo "Additional Package Verification"
 echo "=========================================="
 echo ""
 
-info "Building all packages..."
-pnpm build
-success "All packages built successfully"
-echo ""
+run_manifest_check "build-all-packages"
 
 info "Running typechecks on all packages..."
 pnpm --filter @wafflefinance/sdk exec tsc --noEmit
@@ -321,6 +393,23 @@ if [ "$SOROBAN_STATUS" = "passed" ]; then
 else
     warning "Soroban (Rust) tests SKIPPED (cargo not found)"
 fi
+echo ""
+echo "Conditional (network-dependent) checks:"
+echo "---------------------------------------"
+if [ ${#CONDITIONAL_RESULTS[@]} -eq 0 ]; then
+    info "No conditional checks were configured in the manifest"
+else
+    for result in "${CONDITIONAL_RESULTS[@]}"; do
+        IFS='|' read -r check_name status detail <<< "$result"
+        if [ "$status" = "ran" ]; then
+            success "$check_name: RAN ($detail)"
+        else
+            warning "$check_name: SKIPPED ($detail)"
+        fi
+    done
+fi
+echo ""
+echo "Manifest: $MANIFEST_PATH"
 echo ""
 echo "Checksums:"
 echo "----------"

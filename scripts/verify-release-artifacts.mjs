@@ -14,15 +14,17 @@
  *   pnpm --filter @wafflefinance/config build
  *   node scripts/verify-release-artifacts.mjs
  *
- * Scope: publishable packages only — @wafflefinance/sdk and
- * @wafflefinance/config.  Private service packages (coordinator, relayer,
- * resolver, frontend) are excluded; their artifact verification is part of
- * the per-service build step.
+ * Scope: the publishable packages and required artifact checks are read from
+ * the release-check manifest (scripts/release-checks.json), which is the
+ * single source of truth for release gates.  Private service packages
+ * (coordinator, relayer, resolver, frontend) are excluded; their artifact
+ * verification is part of the per-service build step.
  *
  * Exit codes
  *   0  All declared artifact paths exist.
  *   1  One or more declared artifact paths are missing; error messages
  *      identify each missing path by its declaring field and resolved location.
+ *   2  The release-check manifest is missing or malformed.
  *
  * Usage
  *   node scripts/verify-release-artifacts.mjs           # check all targets
@@ -49,13 +51,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-
-// Packages whose export artifacts must be verified before release.
-// Only publishable (non-private) packages belong here.
-const PUBLISHABLE_PACKAGES = [
-  'packages/sdk',
-  'packages/config',
-];
+const MANIFEST_PATH = path.join(__dirname, 'release-checks.json');
 
 const verbose = process.argv.includes('--verbose');
 const verifyManifest = process.argv.includes('--verify-manifest');
@@ -214,6 +210,49 @@ function verifyExistingManifest() {
 }
 
 // ---------------------------------------------------------------------------
+// Manifest loading
+// ---------------------------------------------------------------------------
+
+/**
+ * Load the release-check manifest and return the artifact-verification
+ * section.  The manifest is the single source of truth for which packages
+ * must be built and which artifact fields must resolve before release.
+ */
+function loadArtifactManifest() {
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+  } catch (err) {
+    console.error(`❌  Unable to read release-check manifest at ${MANIFEST_PATH}`);
+    console.error(`     ${err.message}`);
+    process.exit(2);
+  }
+
+  const artifacts = manifest?.artifacts;
+  if (!artifacts || !Array.isArray(artifacts.packages) || artifacts.packages.length === 0) {
+    console.error(`❌  Release-check manifest at ${MANIFEST_PATH} has no artifacts.packages entries.`);
+    process.exit(2);
+  }
+
+  for (const entry of artifacts.packages) {
+    if (!entry || typeof entry.path !== 'string' || entry.path.length === 0) {
+      console.error(`❌  Release-check manifest artifact entry is missing a "path": ${JSON.stringify(entry)}`);
+      process.exit(2);
+    }
+  }
+
+  return artifacts;
+}
+
+const ARTIFACT_MANIFEST = loadArtifactManifest();
+// Packages whose export artifacts must be verified before release.
+const PUBLISHABLE_PACKAGES = ARTIFACT_MANIFEST.packages.map((entry) => entry.path);
+// Artifact fields (e.g. main, types, exports) that must resolve on disk.
+const REQUIRED_ARTIFACT_FIELDS = Array.isArray(ARTIFACT_MANIFEST.requiredFields)
+  ? ARTIFACT_MANIFEST.requiredFields
+  : ['main', 'module', 'types', 'typings', 'exports'];
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -243,17 +282,18 @@ function checkPackage(pkgDir) {
 
   const toCheck = [];
 
-  if (pkg.main) toCheck.push({ field: 'main', value: pkg.main });
-  if (pkg.module) toCheck.push({ field: 'module', value: pkg.module });
-  if (pkg.types) toCheck.push({ field: 'types', value: pkg.types });
-  if (pkg.typings) toCheck.push({ field: 'typings', value: pkg.typings });
-
-  if (pkg.exports) {
-    for (const entry of extractExportPaths(pkg.exports)) {
-      // Skip the package.json re-export special case
-      if (entry.value === './package.json' || entry.value === 'package.json') continue;
-      toCheck.push(entry);
+  for (const field of REQUIRED_ARTIFACT_FIELDS) {
+    if (field === 'exports') {
+      if (pkg.exports) {
+        for (const entry of extractExportPaths(pkg.exports)) {
+          // Skip the package.json re-export special case
+          if (entry.value === './package.json' || entry.value === 'package.json') continue;
+          toCheck.push(entry);
+        }
+      }
+      continue;
     }
+    if (pkg[field]) toCheck.push({ field, value: pkg[field] });
   }
 
   let packageOk = true;
@@ -292,9 +332,13 @@ if (verifyManifest) {
 }
 
 console.log('=== Release artifact verification ===\n');
+console.log(`Manifest: ${path.relative(ROOT, MANIFEST_PATH)}`);
 console.log('Prerequisite: packages must be built before this check.');
-console.log('  pnpm --filter @wafflefinance/sdk build');
-console.log('  pnpm --filter @wafflefinance/config build\n');
+for (const entry of ARTIFACT_MANIFEST.packages) {
+  const label = entry.name ?? entry.path;
+  console.log(`  pnpm --filter ${label} build`);
+}
+console.log('');
 
 let allOk = true;
 
@@ -314,10 +358,12 @@ if (allOk) {
   console.log('✅  All release artifact paths verified — packages are ready to publish.');
   writeManifest(buildManifest());
 } else {
+  const buildCommands = ARTIFACT_MANIFEST.packages
+    .map((entry) => `pnpm --filter ${entry.name ?? entry.path} build`)
+    .join(' && ');
   console.error(
     '❌  Release artifact verification failed.\n' +
-    '    Run `pnpm --filter @wafflefinance/sdk build && ' +
-    'pnpm --filter @wafflefinance/config build` and try again.'
+    `    Run \`${buildCommands}\` and try again.`
   );
   process.exit(1);
 }

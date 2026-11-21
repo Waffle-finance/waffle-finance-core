@@ -12,6 +12,7 @@ For the canonical map of build, test, lint, and smoke-test commands per package 
 - [Option A: Dev container (recommended)](#option-a-dev-container-recommended)
 - [Option B: Native host setup](#option-b-native-host-setup)
 - [Environment variables](#environment-variables)
+  - [Configuration reference](./CONFIGURATION.md)
 - [Package reference](#package-reference)
   - [SDK (`packages/sdk`)](#sdk-packagessdk)
   - [Contracts — Solidity (`contracts/`)](#contracts--solidity-contracts)
@@ -112,22 +113,18 @@ cp env.example .env                # fill in secrets — see Environment variabl
 
 Copy `env.example` to `.env` and supply values for the services you plan to run. You do not need every variable for local development — only the ones consumed by the services you start.
 
-| Variable | Required for | Description |
-|---|---|---|
-| `SEPOLIA_RPC_URL` | coordinator, relayer | Sepolia JSON-RPC (Infura / Alchemy recommended) |
-| `INFURA_API_KEY` | coordinator, relayer | Alternative to explicit RPC URLs |
-| `ETHEREUM_RPC_URL` | coordinator, relayer | Mainnet RPC (only needed for mainnet mode) |
-| `STELLAR_HORIZON_URL` | coordinator, relayer | Horizon endpoint; auto-selected if blank |
-| `SOROBAN_RPC_URL` | coordinator | Soroban RPC (required after contract deploy) |
-| `RESOLVER_ETH_PRIVATE_KEY` | coordinator (resolver mode) | ETH key for the reference resolver |
-| `RESOLVER_STELLAR_SECRET` | coordinator (resolver mode) | Stellar secret for the reference resolver |
-| `DATABASE_URL` | coordinator | `file:./wafflefinance.db` (SQLite) or Postgres URL |
-| `COORDINATOR_PORT` | coordinator | Default `3001` |
-| `VITE_API_BASE_URL` | frontend | Default `http://localhost:3001` |
-| `VITE_NETWORK_MODE` | frontend | `testnet` or `mainnet` |
-| `NETWORK_MODE` | relayer, frontend | `testnet` or `mainnet` |
+The authoritative list of configuration keys — including the consuming service, whether each value is required, its default (or absence of a default), and secret classification — is generated from the typed configuration schemas:
 
-Full reference in [`env.example`](../env.example).
+- **[Configuration reference](./CONFIGURATION.md)** — generated; do not edit by hand.
+
+Regenerate it after changing any schema or package-local configuration parser:
+
+```bash
+pnpm docs:config          # rewrite docs/CONFIGURATION.md
+pnpm docs:config:check    # fail if the committed reference is stale
+```
+
+CI runs the check mode, so a schema change without a regenerated reference fails the build. See [`env.example`](../env.example) for a copy-paste starting point.
 
 ---
 

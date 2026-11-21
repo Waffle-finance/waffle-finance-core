@@ -13,7 +13,8 @@ name: Repository Validation
 # by a registry outage.  Any validator that requires installed dependencies
 # is invoked through `pnpm validate` and will install as needed.
 #
-# See docs/QUALITY_GATE.md for the full check inventory.
+# See docs/QUALITY_GATE.md for the full check inventory, and
+# scripts/release-checks.json for the release-check manifest.
 
 on:
   push:

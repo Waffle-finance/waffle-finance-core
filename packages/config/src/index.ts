@@ -11,6 +11,8 @@ export * from "./solana-placeholder.js";
 export * from "./soroban-chain-config.js";
 export * from "./support-policy.js";
 export * from "./feature-flags.js";
+export * from "./metadata.js";
+export * from "./validation.js";
 
 /**
  * Validates and loads frontend configuration.
