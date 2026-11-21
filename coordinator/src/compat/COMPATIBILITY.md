@@ -132,6 +132,61 @@ invariant in either contract requires a coordinated update to:
 
 ---
 
+## Rule 6 — Deployed event topics and encoded logs are pinned
+
+`contracts/contracts/HTLCEscrow.sol` emits five events. Every one of
+them is consumed (directly or indirectly) by the SDK and by the
+coordinator/relayer listeners, so all five are part of the
+compatibility surface:
+
+| Event | Canonical signature | Indexed fields |
+|-------|---------------------|----------------|
+| `OrderCreated` | `OrderCreated(uint256,address,address,address,uint256,uint256,bytes32,uint64)` | `orderId`, `sender`, `beneficiary`, `token` |
+| `OrderClaimed` | `OrderClaimed(uint256,address,bytes32,uint256,uint256)` | `orderId`, `beneficiary`, `preimageHash` |
+| `OrderRefunded` | `OrderRefunded(uint256,address,uint256,uint256)` | `orderId`, `refundAddress` |
+| `PayoutDeferred` | `PayoutDeferred(uint256,address,uint256,uint256)` | `orderId`, `beneficiary` |
+| `Withdrawn` | `Withdrawn(address,uint256)` | `token`, `amount` |
+
+The canonical `topic0` values (keccak256 of the canonical signature)
+and a set of representative encoded logs captured from a local
+deployment are checked in at:
+
+- `coordinator/test/fixtures/event-topics.ts` — canonical signatures,
+  `topic0` hashes, and indexed-field layout for each event.
+- `coordinator/test/fixtures/encoded-logs.ts` — representative
+  `Log` objects (topics + data) produced by a local deployment.
+
+The focused harness `coordinator/test/compat/event-schema.test.ts`
+decodes those logs with **both** the SDK decoder
+(`packages/sdk/src/ethereum/events.ts`) and the coordinator/relayer
+decoder (`coordinator/src/listeners/ethereum-listener.ts`) and asserts
+that both produce identical order identifiers and lifecycle fields.
+
+A change to any event name, parameter type, parameter order, or
+`indexed` flag changes the canonical signature and therefore `topic0`,
+and will fail the event-schema harness. This is intentional.
+
+### Updating the event schema (procedure)
+
+When an event legitimately changes:
+
+1. Update the contract source and the interface
+   (`contracts/contracts/interfaces/IHTLCEscrow.sol`).
+2. Update `packages/sdk/src/ethereum/abi.ts` and the SDK decoder.
+3. Update the coordinator/relayer listener decoder.
+4. Regenerate the canonical topics and encoded logs:
+   `pnpm --filter @wafflefinance/coordinator run fixtures:events`
+   (runs a local deployment and rewrites
+   `coordinator/test/fixtures/event-topics.ts` and
+   `coordinator/test/fixtures/encoded-logs.ts`).
+5. Review the fixture diff — every changed `topic0` or indexed-field
+   layout must be justified in the PR description.
+6. Update the tables in Rule 1 and Rule 6 of this document.
+7. Run `pnpm --filter @wafflefinance/coordinator test` and confirm the
+   event-schema and compat harnesses pass before merging.
+
+---
+
 ## Adding a new event or function
 
 1. Update the contract source (Solidity or Rust).
@@ -139,7 +194,10 @@ invariant in either contract requires a coordinated update to:
    Soroban decoder (Stellar).
 3. Update the coordinator listener and reconciler.
 4. Update the pinned selectors in this document.
-5. Update `coordinator/test/compat/compat-harness.test.ts` with the
+5. Add the new event to `coordinator/test/fixtures/event-topics.ts`
+   and `coordinator/test/fixtures/encoded-logs.ts`, and extend
+   `coordinator/test/compat/event-schema.test.ts` to decode it.
+6. Update `coordinator/test/compat/compat-harness.test.ts` with the
    new expected values.
-6. Run `pnpm --filter @wafflefinance/coordinator test` and confirm all
+7. Run `pnpm --filter @wafflefinance/coordinator test` and confirm all
    compat tests pass before merging.

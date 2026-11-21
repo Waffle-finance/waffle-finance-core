@@ -153,6 +153,10 @@ export interface IHTLCClient<TCreateInput = unknown, TSigner = unknown> {
   /**
    * Reveal the preimage on-chain to claim locked funds.
    *
+   * Claim is only valid strictly before the timelock deadline:
+   * `block.timestamp < timelock`. At exactly the deadline (`block.timestamp ==
+   * timelock`) the order is no longer claimable and the claim reverts.
+   *
    * @param orderId   Chain-canonical order identifier.
    * @param preimage  0x-prefixed 32-byte hex string.
    * @param signer    Chain-specific signer (omit for EVM clients that
@@ -164,6 +168,13 @@ export interface IHTLCClient<TCreateInput = unknown, TSigner = unknown> {
 
   /**
    * Return locked funds to the sender after the timelock has expired.
+   *
+   * Refund is only valid strictly after the timelock deadline:
+   * `block.timestamp > timelock`. At exactly the deadline (`block.timestamp ==
+   * timelock`) the order is still claimable and the refund reverts with
+   * `timelock_not_expired`. Because claim requires `block.timestamp < timelock`
+   * and refund requires `block.timestamp > timelock`, a claim and a refund can
+   * never both settle the same order at the same timestamp.
    *
    * @param orderId  Chain-canonical order identifier.
    * @param signer   Chain-specific signer (omit for EVM clients).

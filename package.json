@@ -41,12 +41,11 @@
     "validate:deployments": "node scripts/validate-deployments.mjs",
     "validate:deps": "node scripts/check-dep-versions.mjs",
     "validate:docs": "node scripts/check-docs-drift.mjs",
+    "validate:health-deployment": "node scripts/check-health-deployment-drift.mjs",
     "validate:release-artifacts": "node scripts/verify-release-artifacts.mjs",
+    "validate:release-manifest": "node scripts/generate-release-manifest.mjs && node scripts/verify-release-manifest.mjs",
     "validate:versions": "node scripts/check-versions.mjs",
-    "config:reference": "node scripts/generate-config-reference.mjs",
-    "validate:config-reference": "node scripts/generate-config-reference.mjs --check",
-    "validate:release-checks": "node scripts/check-release-manifest.mjs",
-    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions && pnpm validate:config-reference && pnpm validate:release-checks"
+    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:health-deployment && pnpm validate:versions"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

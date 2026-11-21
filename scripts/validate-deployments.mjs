@@ -1,3 +1,26 @@
+/**
+ * Deployment artifact validator.
+ *
+ * Validates `deployments.<network>.json` artifacts and cross-checks the
+ * chain-specific identifiers that must stay synchronized across:
+ *   - the deployment artifact itself,
+ *   - environment example files (`.env.example`, `.env.<network>.example`),
+ *   - operator documentation (`docs/OPERATIONS.md`).
+ *
+ * Explicit field mappings (no arbitrary string searching):
+ *   EVM:      ethereum.contracts.HTLCEscrow, ethereum.contracts.ResolverRegistry, ethereum.deployer
+ *   Soroban:  stellar.contracts.HTLC, stellar.contracts.ResolverRegistry, stellar.deployer,
+ *             stellar.resolverRegistryConfig.stakeAsset
+ *   Solana:   solana.programs.* program IDs
+ *
+ * Optional/unconfigured networks (e.g. Solana on testnet) are treated as valid
+ * when absent from every source; a value present in only some sources is
+ * reported as a disagreement naming the chain and artifact.
+ *
+ * Update procedure: when a deployment changes, update the artifact, the
+ * matching env example, and docs/OPERATIONS.md in the same change, then run
+ * `node scripts/validate-deployments.mjs` (part of the standard release check).
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { requireEnv, checkCommand, requireFile } from './preflight.js';
@@ -7,6 +30,30 @@ const ZERO_ETH_ADDRESS = /^0x0{40}$/;
 const STELLAR_CONTRACT = /^C[A-Z2-7]{55}$/;
 const STELLAR_ACCOUNT = /^G[A-Z2-7]{55}$/;
 const HEX_32 = /^[0-9a-fA-F]{64}$/;
+const SOLANA_PROGRAM = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+// Explicit mappings of identifiers that must stay synchronized across sources.
+// Each entry: { chain, label, artifactPath, envKeys, docLabel }
+const SYNCED_IDENTIFIERS = {
+  ethereum: [
+    { label: 'HTLCEscrow', artifactPath: ['ethereum', 'contracts', 'HTLCEscrow'], envKeys: ['HTLC_ESCROW_ADDRESS', 'ETH_HTLC_ESCROW'], docLabel: 'HTLCEscrow' },
+    { label: 'ResolverRegistry', artifactPath: ['ethereum', 'contracts', 'ResolverRegistry'], envKeys: ['RESOLVER_REGISTRY_ADDRESS', 'ETH_RESOLVER_REGISTRY'], docLabel: 'ResolverRegistry' },
+    { label: 'deployer', artifactPath: ['ethereum', 'deployer'], envKeys: ['ETH_DEPLOYER'], docLabel: 'EVM deployer' },
+  ],
+  stellar: [
+    { label: 'HTLC', artifactPath: ['stellar', 'contracts', 'HTLC'], envKeys: ['STELLAR_HTLC_CONTRACT', 'SOROBAN_HTLC'], docLabel: 'HTLC' },
+    { label: 'ResolverRegistry', artifactPath: ['stellar', 'contracts', 'ResolverRegistry'], envKeys: ['STELLAR_RESOLVER_REGISTRY', 'SOROBAN_RESOLVER_REGISTRY'], docLabel: 'ResolverRegistry' },
+    { label: 'deployer', artifactPath: ['stellar', 'deployer'], envKeys: ['STELLAR_DEPLOYER'], docLabel: 'Soroban deployer' },
+    { label: 'stakeAsset', artifactPath: ['stellar', 'resolverRegistryConfig', 'stakeAsset'], envKeys: ['STELLAR_STAKE_ASSET'], docLabel: 'stakeAsset' },
+  ],
+  solana: [
+    { label: 'HTLC', artifactPath: ['solana', 'programs', 'HTLC'], envKeys: ['SOLANA_HTLC_PROGRAM_ID', 'SOLANA_PROGRAM_ID'], docLabel: 'HTLC program' },
+    { label: 'ResolverRegistry', artifactPath: ['solana', 'programs', 'ResolverRegistry'], envKeys: ['SOLANA_RESOLVER_REGISTRY_PROGRAM_ID'], docLabel: 'ResolverRegistry program' },
+  ],
+};
+
+const ENV_EXAMPLE_CANDIDATES = ['.env.example', '.env.testnet.example', '.env.sepolia.example', '.env.mainnet.example'];
+const OPERATIONS_DOC = path.join('docs', 'OPERATIONS.md');
 
 const NETWORKS = {
   testnet: {
@@ -25,6 +72,7 @@ const NETWORKS = {
     ethereumName: 'Ethereum Mainnet',
     stellarPassphrase: 'Public Global Stellar Network ; September 2015',
     stellarHorizon: 'https://horizon.stellar.org',
+    production: true,
   },
 };
 
@@ -97,6 +145,90 @@ function expectPositiveIntegerString(errors, filePath, jsonPath, value) {
   }
 }
 
+function getPath(obj, keys) {
+  let current = obj;
+  for (const key of keys) {
+    if (current == null || typeof current !== 'object') {
+      return undefined;
+    }
+    current = current[key];
+  }
+  return current;
+}
+
+function parseEnvFile(filePath) {
+  const values = {};
+  if (!fs.existsSync(filePath)) {
+    return values;
+  }
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    values[match[1]] = value;
+  }
+  return values;
+}
+
+function readOperationsDoc() {
+  if (!fs.existsSync(OPERATIONS_DOC)) {
+    return null;
+  }
+  return fs.readFileSync(OPERATIONS_DOC, 'utf8');
+}
+
+// Extract a documented value for a label from OPERATIONS.md using an explicit
+// `Label: value` or `Label = value` pattern (no arbitrary substring search).
+function extractDocValue(doc, label) {
+  if (!doc) {
+    return undefined;
+  }
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^\\s*(?:[-*]\\s*)?${escaped}\\s*[:=]\\s*\`?([^\`\\s]+)\`?`, 'm');
+  const match = doc.match(pattern);
+  return match ? match[1] : undefined;
+}
+
+function crossCheckIdentifiers(errors, filePath, artifact, envValues, doc) {
+  for (const [chain, entries] of Object.entries(SYNCED_IDENTIFIERS)) {
+    for (const entry of entries) {
+      const artifactValue = getPath(artifact, entry.artifactPath);
+      const envValue = entry.envKeys.map((key) => envValues[key]).find((v) => v !== undefined && v !== '');
+      const docValue = extractDocValue(doc, entry.docLabel);
+
+      const present = [artifactValue, envValue, docValue].filter((v) => v !== undefined && v !== '');
+      if (present.length === 0) {
+        // Optional/unconfigured network: absent everywhere is valid.
+        continue;
+      }
+
+      const canonical = present[0];
+      const sources = [
+        ['deployment artifact', artifactValue],
+        ['env example', envValue],
+        ['docs/OPERATIONS.md', docValue],
+      ];
+      for (const [sourceName, value] of sources) {
+        if (value === undefined || value === '') {
+          fail(errors, filePath, `${chain}.${entry.label}`, `missing in ${sourceName} but set in another source (${JSON.stringify(canonical)})`);
+        } else if (value !== canonical) {
+          fail(errors, filePath, `${chain}.${entry.label}`, `disagrees with ${sourceName}: expected ${JSON.stringify(canonical)}, got ${JSON.stringify(value)}`);
+        }
+      }
+    }
+  }
+}
+
 function expectReadmeContains(errors, filePath, jsonPath, value) {
   if (!fs.existsSync('README.md') || typeof value !== 'string') {
     return;
@@ -153,6 +285,24 @@ function validateCombinedManifest(errors, filePath, artifact, expected) {
     expectPositiveIntegerString(errors, filePath, 'stellar.resolverRegistryConfig.minStake', registryConfig.minStake);
     expectStellarAccount(errors, filePath, 'stellar.resolverRegistryConfig.slashBeneficiary', registryConfig.slashBeneficiary);
   }
+
+  if (expected.production) {
+    const approved = artifact.stellar.approvedAdminMultisig;
+    if (approved === undefined) {
+      fail(errors, filePath, 'stellar.approvedAdminMultisig', 'is required on production networks');
+    } else {
+      expectStellarAccount(errors, filePath, 'stellar.approvedAdminMultisig', approved);
+      if (registryConfig && typeof registryConfig.admin === 'string' && typeof approved === 'string'
+        && registryConfig.admin !== approved) {
+        fail(
+          errors,
+          filePath,
+          'stellar.resolverRegistryConfig.admin',
+          `must match approved multisig ${approved}, got ${registryConfig.admin}`,
+        );
+      }
+    }
+  }
 }
 
 function validateHardhatManifest(errors, filePath, artifact, expected) {
@@ -165,6 +315,98 @@ function validateHardhatManifest(errors, filePath, artifact, expected) {
 
   if (artifact.config?.minSafetyDeposit !== undefined && !/^[0-9]+$/.test(String(artifact.config.minSafetyDeposit))) {
     fail(errors, filePath, 'config.minSafetyDeposit', 'must be a non-negative integer string');
+  }
+
+  validateOwnerPolicy(errors, filePath, artifact, expected);
+  validateEscrowRegistryLinkage(errors, filePath, artifact);
+}
+
+// Production networks must record an approved multisig owner; testnets stay flexible.
+function validateOwnerPolicy(errors, filePath, artifact, expected) {
+  const owner = artifact.ethereum?.resolverRegistryOwner ?? artifact.config?.resolverRegistryOwner;
+  const approved = artifact.config?.approvedOwnerMultisig ?? artifact.ethereum?.approvedOwnerMultisig;
+
+  if (owner !== undefined) {
+    expectEthereumAddress(errors, filePath, 'config.resolverRegistryOwner', owner);
+  }
+
+  if (approved !== undefined) {
+    expectEthereumAddress(errors, filePath, 'config.approvedOwnerMultisig', approved);
+  }
+
+  if (!expected.production) {
+    return;
+  }
+
+  if (owner === undefined) {
+    fail(errors, filePath, 'config.resolverRegistryOwner', 'is required on production networks');
+    return;
+  }
+
+  if (approved === undefined) {
+    fail(errors, filePath, 'config.approvedOwnerMultisig', 'is required on production networks');
+    return;
+  }
+
+  if (typeof owner === 'string' && typeof approved === 'string' && owner.toLowerCase() !== approved.toLowerCase()) {
+    fail(
+      errors,
+      filePath,
+      'config.resolverRegistryOwner',
+      `must match approved multisig ${approved}, got ${owner}`,
+    );
+  }
+}
+
+// The escrow's registry reference is immutable, so a replacement escrow must
+// point at the current registry and the manifest must record the migration.
+function validateEscrowRegistryLinkage(errors, filePath, artifact) {
+  const escrow = artifact.ethereum?.htlcEscrow;
+  const registry = artifact.ethereum?.resolverRegistry;
+  const linked = artifact.ethereum?.htlcEscrowRegistry ?? artifact.config?.htlcEscrowRegistry;
+
+  if (linked !== undefined) {
+    expectEthereumAddress(errors, filePath, 'ethereum.htlcEscrowRegistry', linked);
+    if (typeof registry === 'string' && typeof linked === 'string' && linked.toLowerCase() !== registry.toLowerCase()) {
+      fail(
+        errors,
+        filePath,
+        'ethereum.htlcEscrowRegistry',
+        `escrow is linked to ${linked} but manifest registry is ${registry}; migration is incomplete`,
+      );
+    }
+  }
+
+  const migration = artifact.ethereum?.escrowMigration;
+  if (!migration) {
+    return;
+  }
+
+  expectEthereumAddress(errors, filePath, 'ethereum.escrowMigration.previousEscrow', migration.previousEscrow);
+  expectEthereumAddress(errors, filePath, 'ethereum.escrowMigration.newEscrow', migration.newEscrow);
+
+  if (typeof escrow === 'string' && typeof migration.newEscrow === 'string'
+    && escrow.toLowerCase() !== migration.newEscrow.toLowerCase()) {
+    fail(
+      errors,
+      filePath,
+      'ethereum.escrowMigration.newEscrow',
+      `must match ethereum.htlcEscrow ${escrow}; migration is incomplete`,
+    );
+  }
+
+  if (typeof migration.previousEscrow === 'string' && typeof migration.newEscrow === 'string'
+    && migration.previousEscrow.toLowerCase() === migration.newEscrow.toLowerCase()) {
+    fail(errors, filePath, 'ethereum.escrowMigration.newEscrow', 'must differ from previousEscrow');
+  }
+
+  if (migration.newOrderIntakeGated !== true) {
+    fail(
+      errors,
+      filePath,
+      'ethereum.escrowMigration.newOrderIntakeGated',
+      'must be true so new orders are not routed to the wrong registry during migration',
+    );
   }
 }
 
@@ -191,6 +433,21 @@ function validateDeploymentArtifact(filePath) {
   } else {
     validateHardhatManifest(errors, filePath, artifact, expected);
   }
+
+  if (artifact.solana) {
+    for (const [name, programId] of Object.entries(artifact.solana.programs ?? {})) {
+      if (typeof programId !== 'string' || !SOLANA_PROGRAM.test(programId)) {
+        fail(errors, filePath, `solana.programs.${name}`, `must be a Solana program ID, got ${JSON.stringify(programId)}`);
+      }
+    }
+  }
+
+  const envValues = {};
+  for (const candidate of ENV_EXAMPLE_CANDIDATES) {
+    Object.assign(envValues, parseEnvFile(candidate));
+  }
+  const doc = readOperationsDoc();
+  crossCheckIdentifiers(errors, filePath, artifact, envValues, doc);
 
   return errors;
 }
