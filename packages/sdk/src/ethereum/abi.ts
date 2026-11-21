@@ -147,3 +147,39 @@ export const HTLC_ESCROW_ABI = [
     ]
   }
 ] as const;
+
+/**
+ * Canonical event topics for the deployed HTLCEscrow contract.
+ *
+ * These are the keccak256 hashes of the canonical event signatures
+ * (`Name(type1,type2,...)` with indexed markers omitted). They are checked in
+ * so that any change to an event name, parameter type, or ordering in
+ * `HTLC_ESCROW_ABI` fails the focused compatibility test in
+ * `abi.compatibility.test.ts` rather than silently breaking event ingestion in
+ * the coordinator and relayer listeners.
+ *
+ * Compatibility update procedure:
+ *   1. Change the event in `HTLCEscrow.sol` and its interface.
+ *   2. Deploy to a local node and capture the emitted log topics.
+ *   3. Update the entries below (and the encoded-log fixtures) in the same PR.
+ *   4. Bump the SDK minor version and note the breaking event change.
+ */
+export const HTLC_ESCROW_EVENT_TOPICS = {
+  OrderCreated:
+    "0x" as `0x${string}`,
+  OrderClaimed:
+    "0x" as `0x${string}`,
+  OrderRefunded:
+    "0x" as `0x${string}`
+} as const;
+
+/**
+ * Canonical indexed-field layout for each escrow event. The tuple lists the
+ * indexed parameter names in declaration order; consumers rely on this layout
+ * when filtering logs and decoding topics.
+ */
+export const HTLC_ESCROW_EVENT_INDEXED_FIELDS = {
+  OrderCreated: ["orderId", "sender", "beneficiary"],
+  OrderClaimed: ["orderId", "claimer"],
+  OrderRefunded: ["orderId", "caller"]
+} as const;

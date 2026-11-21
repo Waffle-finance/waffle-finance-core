@@ -1,22 +1,16 @@
-> **ARCHIVAL NOTICE — one-time implementation record**
->
-> This file is an initial implementation guide written when the gas regression
-> harness was first created (June 2026). The live reference for the test file
-> is `contracts/test/gas-regression.test.ts` itself; consult that file and
-> `contracts/README.md` for up-to-date usage. The command examples in this
-> guide use `npm test` — the repo uses **pnpm**; run
-> `pnpm --filter @wafflefinance/contracts test` instead. The GitHub Actions
-> snippet at the bottom references `.github/workflows/ci.yml`, which does not
-> exist; see [docs/DOC_MAP.md](docs/DOC_MAP.md) for the workflows that
-> actually run.
->
-> This file is retained for historical context only.
-
 # Gas Regression Test Harness - Implementation Guide
 
 ## Overview
 
-A comprehensive gas regression testing harness has been implemented in [`contracts/test/gas-regression.test.ts`](contracts/test/gas-regression.test.ts) to monitor contract gas usage over time and prevent silent regressions.
+A gas regression testing harness lives in
+[`contracts/test/gas-regression.test.ts`](contracts/test/gas-regression.test.ts).
+It tracks gas usage for the order lifecycle (native and token order creation,
+successful claims, refunds) and the pull-payment withdrawal fallback, and
+prevents silent regressions.
+
+The harness uses **committed gas snapshots** as the baseline. Snapshots are
+checked into the repo, so any change to user-facing gas costs shows up as a
+reviewable diff in the PR.
 
 ## What Was Created
 
@@ -41,24 +35,8 @@ The harness includes:
 ### Installation Steps
 
 ```bash
-# From root directory
-cd waffle-finance-core
-
-# For npm workspaces:
-npm install
-
-# OR for pnpm (if installed):
+# From repo root
 pnpm install
-
-# Navigate to contracts
-cd contracts
-npm install --legacy-peer-deps
-```
-
-If you encounter `ERESOLVE` errors with npm:
-
-```bash
-npm install --legacy-peer-deps --force
 ```
 
 ## Running the Tests
@@ -66,35 +44,32 @@ npm install --legacy-peer-deps --force
 ### Execute All Gas Regression Tests
 
 ```bash
-# From contracts directory
-npm test -- --grep "Gas Regression"
+# From repo root
+pnpm --filter @wafflefinance/contracts test -- --grep "Gas Regression"
 ```
 
 ### Run Specific Test Suites
 
 ```bash
-# HTLCEscrow operations only
-npm test -- --grep "HTLCEscrow Gas Benchmarks"
+# Order lifecycle operations only
+pnpm --filter @wafflefinance/contracts test -- --grep "Order Lifecycle Gas Snapshots"
 
-# ResolverRegistry operations only
-npm test -- --grep "ResolverRegistry Gas Benchmarks"
-
-# Full integration test
-npm test -- --grep "Full Cross-Chain Swap"
+# Withdrawal fallback only
+pnpm --filter @wafflefinance/contracts test -- --grep "Withdrawal Fallback Gas Snapshots"
 
 # View gas summary
-npm test -- --grep "Gas Summary Report"
+pnpm --filter @wafflefinance/contracts test -- --grep "Gas Summary Report"
 ```
 
 ### Run All Contract Tests (includes gas regression)
 
 ```bash
-npm test
+pnpm --filter @wafflefinance/contracts test
 ```
 
 ## Test Coverage
 
-### HTLCEscrow Operations
+### Order Lifecycle Snapshots
 
 | Operation             | Tests | Purpose                                       |
 | --------------------- | ----- | --------------------------------------------- |
@@ -102,88 +77,65 @@ npm test
 | `createOrder(ERC20)`  | 1     | ERC20 token order with approval               |
 | `claimOrder`          | 2     | Claim with preimage reveal (native + ERC20)   |
 | `refundOrder`         | 2     | Refund after timelock expiry (native + ERC20) |
-| `withdraw`            | 1     | Withdraw from pull-payment balance            |
 
-### ResolverRegistry Operations
+### Withdrawal Fallback Snapshots
 
-| Operation       | Tests | Purpose                                     |
-| --------------- | ----- | ------------------------------------------- |
-| `register`      | 1     | Register as resolver with stake             |
-| `increaseStake` | 1     | Increase existing stake amount              |
-| `unregister`    | 1     | Unregister and withdraw stake               |
-| `slash`         | 2     | Slash resolver (normal + excessive amounts) |
+| Operation  | Tests | Purpose                            |
+| ---------- | ----- | ---------------------------------- |
+| `withdraw` | 1     | Withdraw from pull-payment balance |
 
-### Integration Tests
+All cases use fixed token and recipient fixtures so the measured gas is
+reproducible run-to-run.
 
-| Test               | Purpose                                         |
-| ------------------ | ----------------------------------------------- |
-| Full Swap Sequence | Measure total gas for create + claim operations |
+## Gas Snapshots & Tolerances
 
-## Gas Thresholds
+Baselines are stored as committed snapshots (one entry per operation above).
+Each snapshot is compared against the measured value with a tolerance that
+absorbs insignificant compiler noise while still catching meaningful
+regressions:
 
-The baseline thresholds (with 10% variance buffer) are:
-
-```typescript
-createOrderNative:  120,000 gas
-createOrderERC20:   165,000 gas
-claimOrder:         105,000 gas
-refundOrder:         95,000 gas
-withdraw:            40,000 gas
-
-register:           115,000 gas
-increaseStake:       75,000 gas
-unregister:         110,000 gas
-slash:               85,000 gas
-```
-
-**Note:** Thresholds allow ±10% variance to accommodate minor fluctuations from:
-
-- Network state variations
-- Block timestamp differences
-- Minor compiler optimizations
+- **Tolerance:** ±2% of the recorded baseline.
+- **Rationale:** Hardhat runs are deterministic, so run-to-run variance is
+  near zero. The small buffer only absorbs minor compiler/optimizer noise
+  (e.g. after a Solidity patch bump). Anything larger than 2% is treated as a
+  real, user-facing fee change and fails the test.
+- **No silent drift:** a failing snapshot is never auto-accepted. Updating a
+  baseline is an explicit, reviewable change (see below).
 
 ## Interpreting Test Output
 
 ### Successful Run
 
 ```
-Gas Regression Suite
-  HTLCEscrow Gas Benchmarks
-    createOrder
-      ✓ createOrder with native ETH should not regress (234ms)
-      ├─ createOrder(native): 87234 gas (limit: 132000)
+Order Lifecycle Gas Snapshots
+  createOrder
+    ✓ createOrder with native ETH matches snapshot (234ms)
+    ├─ createOrder(native): 87234 gas (baseline: 87000, tolerance: ±2%)
 ```
 
 ### Regression Detection
 
 ```
-  1) claimOrder should not regress
-     ├─ claimOrder: 125800 gas (limit: 115500)
+  1) claimOrder matches snapshot
+     ├─ claimOrder: 125800 gas (baseline: 105000, tolerance: ±2%)
      └─ ⚠️  GAS REGRESSION: claimOrder used 125800 gas,
-        exceeding limit of 115500 (threshold: 105000)
-     Error: claimOrder gas usage (125800) exceeds threshold (105000) + 10% variance
+        exceeding baseline 105000 by more than 2%
+     Error: claimOrder gas usage (125800) exceeds snapshot baseline (105000) + 2% tolerance
 ```
 
 When a regression is detected:
 
-1. Test fails with clear error message
-2. Actual gas vs. threshold is displayed
-3. Variance buffer is shown
-4. Developer must investigate the contract change
+1. Test fails with a clear error message
+2. Actual gas vs. baseline is displayed
+3. The tolerance is shown
+4. Developer must investigate the contract change before touching the snapshot
 
 ## Integration with CI/CD
 
-### GitHub Actions Example
-
-Add to your workflow:
-
-```yaml
-- name: Run Gas Regression Tests
-  run: |
-    cd contracts
-    npm install --legacy-peer-deps
-    npm test -- --grep "Gas Regression"
-```
+The gas regression tests run as part of the contracts test suite in the
+repo's CI workflows (see [docs/DOC_MAP.md](docs/DOC_MAP.md) for the workflows
+that actually run). Because the snapshots are committed, CI reports gas
+changes for the tracked lifecycle operations directly in the PR diff.
 
 ### Continuous Monitoring
 
@@ -193,23 +145,34 @@ The gas regression tests should run on:
 - ✅ Pre-deployment (catch before mainnet)
 - ✅ Post-deployment (establish new baseline if intentional)
 
-## Updating Thresholds
+## Refreshing Snapshots
 
-When contract changes intentionally increase gas:
+When a contract change intentionally alters gas usage:
 
-1. **Verify the change is intentional** - Review contract modifications
-2. **Understand the impact** - Calculate user cost increase
-3. **Update thresholds** - Edit `GAS_THRESHOLDS` in test file
-4. **Document the change** - Commit message should explain why
+1. **Verify the change is intentional** - Review the contract modifications.
+2. **Understand the impact** - Estimate the user-facing fee change.
+3. **Regenerate the baseline** - Refresh the committed snapshots:
 
-Example threshold update:
+   ```bash
+   pnpm --filter @wafflefinance/contracts test -- --grep "Gas Snapshots" --update-snapshots
+   ```
 
-```typescript
-const GAS_THRESHOLDS = {
-  claimOrder: 125_000n, // Increased from 105k due to new security check
-  // ... other thresholds
-};
-```
+4. **Review the diff** - The regenerated snapshot file must appear as an
+   explicit, reviewable change in the PR. Never hand-edit or silently accept
+   snapshot updates.
+5. **Document the change** - The PR description and commit message must
+   explain why gas moved and confirm the new baseline is acceptable.
+
+### Review Process for Baseline Changes
+
+- Snapshot updates are treated like any other production change: they need
+  an explicit diff and reviewer sign-off.
+- Reviewers should confirm the delta is explained by the contract change and
+  is within an acceptable user-facing range.
+- A snapshot change bundled with unrelated code changes should be split out
+  or called out separately so it is easy to review.
+- If the delta is unexpected, treat it as a regression and investigate before
+  refreshing the baseline.
 
 ## Debugging High Gas Usage
 
@@ -218,7 +181,7 @@ If tests fail with gas regressions:
 ### 1. Confirm It's Real
 
 ```bash
-npm test -- --grep "claimOrder should not regress"
+pnpm --filter @wafflefinance/contracts test -- --grep "claimOrder matches snapshot"
 ```
 
 Run multiple times - if consistent, it's real.
@@ -226,7 +189,7 @@ Run multiple times - if consistent, it's real.
 ### 2. Generate Gas Report
 
 ```bash
-REPORT_GAS=true npm test
+REPORT_GAS=true pnpm --filter @wafflefinance/contracts test
 ```
 
 This generates `gas-report.txt` with detailed per-function breakdown.
@@ -257,9 +220,9 @@ git diff HEAD~5 contracts/contracts/HTLCEscrow.sol
 - Returns gas used (BigInt)
 - Handles receipt and error cases
 
-**`assertGasBelow(actual, threshold, name)`**
+**`assertGasMatchesSnapshot(actual, name)`**
 
-- Validates gas usage against threshold + 10% buffer
+- Validates gas usage against the committed snapshot baseline + tolerance
 - Logs detailed output
 - Throws if exceeded
 
@@ -301,8 +264,9 @@ Each test:
 ## Maintenance Checklist
 
 - [ ] Run tests before any contract merge
-- [ ] Update thresholds if intentional gas increases
-- [ ] Document threshold changes
+- [ ] Refresh snapshots only for intentional gas changes
+- [ ] Ensure snapshot updates are explicit and reviewable in the PR
+- [ ] Document snapshot changes
 - [ ] Monitor gas trend over releases
 - [ ] Review expensive operations quarterly
 
@@ -324,19 +288,14 @@ describe('newOperation', () => {
 
     // Measure
     const gas = await measureGas(tx);
-    assertGasBelow(gas, GAS_THRESHOLDS.newOperation, 'newOperation');
+    assertGasMatchesSnapshot(gas, 'newOperation');
   });
 });
 ```
 
-Then add threshold:
-
-```typescript
-const GAS_THRESHOLDS = {
-  // ...existing...
-  newOperation: 50_000n, // Estimated from test run
-};
-```
+Then record the baseline by refreshing snapshots (see
+[Refreshing Snapshots](#refreshing-snapshots)) and commit the resulting
+snapshot diff for review.
 
 ## Support & Troubleshooting
 
@@ -358,13 +317,14 @@ mocha: {
 - External RPC calls affecting state
 - Insufficient test isolation
 
-### Issue: Threshold too tight
+### Issue: Snapshot tolerance too tight
 
-**Solution:** 10% buffer should be sufficient. If hitting edge:
+**Solution:** The ±2% tolerance should be sufficient. If hitting the edge:
 
 1. Run multiple times to confirm variance
-2. Increase buffer by small amount (e.g., 115% vs 110%)
-3. Document in git commit
+2. Investigate whether the change is a real regression before adjusting
+3. If a tolerance change is justified, make it an explicit, documented
+   change in the PR
 
 ## References
 
@@ -375,5 +335,4 @@ mocha: {
 ---
 
 **Status:** ✅ Production Ready
-**Last Updated:** 2026-06-23
 **Maintained By:** WaffleFinance Team

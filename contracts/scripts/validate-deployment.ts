@@ -15,6 +15,15 @@ interface DeploymentArtifact {
     };
     htlcEscrow?: string;
     resolverRegistry?: string;
+    // Optional migration metadata. When present, the validator enforces
+    // consistency between the manifest and on-chain state.
+    registryOwner?: string;
+    bytecodeHashes?: {
+      HTLCEscrow?: string;
+      ResolverRegistry?: string;
+    };
+    // Registry that the escrow previously pointed at (pre-migration).
+    previousResolverRegistry?: string;
   };
   soroban?: {
     htlc: string;
@@ -40,6 +49,16 @@ interface ValidationResult {
   warnings: string[];
 }
 
+interface ValidationOptions {
+  dryRun: boolean;
+}
+
+function parseOptions(): ValidationOptions {
+  const args = process.argv.slice(2);
+  const dryRun = args.includes("--dry-run") || process.env.DRY_RUN === "1";
+  return { dryRun };
+}
+
 function readDeploymentArtifact(): DeploymentArtifact | null {
   let artifactPath = path.resolve(__dirname, `../../deployments.${network.name}.json`);
   if (!fs.existsSync(artifactPath)) {
@@ -53,6 +72,10 @@ function readDeploymentArtifact(): DeploymentArtifact | null {
     }
   }
   return JSON.parse(fs.readFileSync(artifactPath, "utf8")) as DeploymentArtifact;
+}
+
+function hashBytecode(code: string): string {
+  return ethers.keccak256(code);
 }
 
 async function validateEthereumContracts(artifact: DeploymentArtifact, results: ValidationResult): Promise<void> {
@@ -77,14 +100,32 @@ async function validateEthereumContracts(artifact: DeploymentArtifact, results: 
       results.errors.push(`HTLCEscrow contract not deployed at ${htlcEscrow}`);
       results.valid = false;
     } else {
+      const expectedHash = artifact.ethereum.bytecodeHashes?.HTLCEscrow;
+      if (expectedHash) {
+        const actualHash = hashBytecode(escrowCode);
+        if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
+          results.errors.push(
+            `HTLCEscrow bytecode hash mismatch at ${htlcEscrow}: on-chain ${actualHash}, manifest ${expectedHash}`
+          );
+          results.valid = false;
+        }
+      }
+
       // Verify the contract has expected interface
       const escrow = await ethers.getContractAt("HTLCEscrow", htlcEscrow);
       try {
         const onChainRegistry = await escrow.resolverRegistry();
         if (onChainRegistry.toLowerCase() !== resolverRegistry.toLowerCase()) {
-          results.errors.push(
-            `HTLCEscrow.resolverRegistry = ${onChainRegistry} but expected ${resolverRegistry}`
-          );
+          const previous = artifact.ethereum.previousResolverRegistry;
+          if (previous && onChainRegistry.toLowerCase() === previous.toLowerCase()) {
+            results.errors.push(
+              `Incomplete migration: HTLCEscrow.resolverRegistry still points at old registry ${onChainRegistry}; expected new registry ${resolverRegistry}`
+            );
+          } else {
+            results.errors.push(
+              `HTLCEscrow.resolverRegistry = ${onChainRegistry} but expected ${resolverRegistry}`
+            );
+          }
           results.valid = false;
         }
       } catch {
@@ -103,6 +144,41 @@ async function validateEthereumContracts(artifact: DeploymentArtifact, results: 
     if (registryCode === "0x") {
       results.errors.push(`ResolverRegistry contract not deployed at ${resolverRegistry}`);
       results.valid = false;
+    } else {
+      const expectedHash = artifact.ethereum.bytecodeHashes?.ResolverRegistry;
+      if (expectedHash) {
+        const actualHash = hashBytecode(registryCode);
+        if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
+          results.errors.push(
+            `ResolverRegistry bytecode hash mismatch at ${resolverRegistry}: on-chain ${actualHash}, manifest ${expectedHash}`
+          );
+          results.valid = false;
+        }
+      }
+
+      // Verify on-chain owner matches the manifest-recorded owner.
+      const expectedOwner = artifact.ethereum.registryOwner;
+      if (expectedOwner) {
+        try {
+          const registry = await ethers.getContractAt("ResolverRegistry", resolverRegistry);
+          const onChainOwner = await registry.owner();
+          if (onChainOwner.toLowerCase() !== expectedOwner.toLowerCase()) {
+            results.errors.push(
+              `ResolverRegistry.owner = ${onChainOwner} but manifest expects ${expectedOwner}`
+            );
+            results.valid = false;
+          }
+        } catch (err: any) {
+          results.errors.push(
+            `Failed to read ResolverRegistry.owner: ${err?.message ?? String(err)}`
+          );
+          results.valid = false;
+        }
+      } else {
+        results.warnings.push(
+          "No registryOwner recorded in manifest; ownership policy cannot be verified"
+        );
+      }
     }
   } catch (err: any) {
     results.errors.push(`Failed to verify ResolverRegistry: ${err?.message ?? String(err)}`);
@@ -158,7 +234,11 @@ async function validateChainId(artifact: DeploymentArtifact, results: Validation
 }
 
 async function main(): Promise<void> {
+  const options = parseOptions();
   console.log("\n=== WaffleFinance Deployment Validation ===\n");
+  if (options.dryRun) {
+    console.log("Mode: DRY RUN (read-only, no transactions will be sent)\n");
+  }
 
   const results: ValidationResult = { valid: true, errors: [], warnings: [] };
 
@@ -203,7 +283,11 @@ async function main(): Promise<void> {
 
   if (results.valid) {
     console.log("✅ All validations passed!");
-    console.log("\nDeployment is ready for use.");
+    if (options.dryRun) {
+      console.log("\nDry run complete. No transactions were sent.");
+    } else {
+      console.log("\nDeployment is ready for use.");
+    }
   } else {
     console.log("\n❌ Validation failed. Fix errors before deploying.");
     process.exit(1);

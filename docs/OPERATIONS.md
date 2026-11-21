@@ -4,6 +4,8 @@ This document provides operational guidance for deploying, monitoring, and troub
 
 For a rollback-first, step-by-step procedure specific to redeploying the coordinator and relayer (config changes, restart verification, secret rotation, rollback triggers), see [docs/DEPLOYMENT_ROLLBACK_RUNBOOK.md](DEPLOYMENT_ROLLBACK_RUNBOOK.md), which builds on the Rollback Procedures and Monitoring Guide sections below.
 
+For replacing the escrow (whose registry reference is immutable), including the values that change, how new order intake is gated while in-flight orders remain claimable or refundable on the old contract, the rollback point, and the dry-run validator, see [Escrow Replacement Migration](#escrow-replacement-migration).
+
 ---
 
 ## Table of Contents
@@ -14,6 +16,7 @@ For a rollback-first, step-by-step procedure specific to redeploying the coordin
 - [Incident Response](#incident-response)
 - [Postmortem Process](#postmortem-process)
 - [Rollback Procedures](#rollback-procedures)
+- [Escrow Replacement Migration](#escrow-replacement-migration)
 - [Monitoring Guide](#monitoring-guide)
 - [Soroban Admin Key Rotation](#soroban-admin-key-rotation)
 - [Soroban TTL Monitoring and Renewal](#soroban-ttl-monitoring-and-renewal)
@@ -605,6 +608,99 @@ export EMERGENCY_SHUTDOWN=true
 # Or for relayer
 export MAINTENANCE_MODE=true
 ```
+
+---
+
+## Escrow Replacement Migration
+
+The escrow's registry reference is **immutable**: it is set once in the
+constructor and cannot be updated in place. Migrating to a new
+`ResolverRegistry` therefore requires deploying a **replacement escrow** and
+coordinating configuration changes across the coordinator, relayer, resolver,
+and frontend. This section is the operator runbook for that migration.
+
+> **Key constraint:** in-flight orders cannot be migrated. Orders already
+> locked in the old escrow must be claimed or refunded **through the old
+> contract** until they settle. The migration must never strand them.
+
+### Values that change on escrow replacement
+
+When a replacement escrow is deployed, every one of the following must be
+updated and verified. Missing any one of them routes new orders to the wrong
+registry or leaves services pointed at a dead contract.
+
+| Value | Where it lives | Notes |
+|---|---|---|
+| `ResolverRegistry` address | Deployment manifest, `.env` (`RESOLVER_REGISTRY_ADDRESS`) | New registry (or the existing one, if only the escrow is being replaced) |
+| Escrow address | Deployment manifest, `.env` (`ETH_HTLC_ESCROW_MAINNET` / `ETH_HTLC_ESCROW_TESTNET`) | New escrow; the old address stays valid for in-flight orders |
+| Chain ID | Deployment manifest, validation config | Must match the target network; a mismatch aborts the dry run |
+| Deployment manifest entry | `deployments/<network>.json` | New escrow + registry addresses, deploy block, and bytecode hash |
+| Coordinator config | Coordinator `.env` / config | Escrow + registry addresses used for order intake and event indexing |
+| Relayer config | Relayer `.env` / config | Escrow address used for chain monitoring |
+| Resolver config | Resolver `.env` / config | Escrow + registry addresses used for fills and stake checks |
+| Frontend config | Frontend build-time env | Escrow + registry addresses shown to users |
+| Event indexer start block | Coordinator/relayer config | Set to the new escrow's deploy block; old escrow events must still be indexed until in-flight orders settle |
+
+### Gating new order intake
+
+New orders must not be accepted against the new escrow until the migration is
+verified, and must not be accepted against the old escrow once the new one is
+live. Gate intake as follows:
+
+1. **Before cutover:** set `MAINTENANCE_MODE=true` on the relayer and stop the
+   coordinator from announcing new orders (pause the order-intake worker or
+   set `EMERGENCY_SHUTDOWN=true`). Existing orders continue to be processed.
+2. **During cutover:** deploy the replacement escrow, update all values in the
+   table above, and run the dry-run validator (below). No new orders are
+   accepted during this window.
+3. **After cutover:** restart services with the new configuration, verify the
+   dry run passes, then clear `MAINTENANCE_MODE` / `EMERGENCY_SHUTDOWN` to
+   resume intake against the new escrow.
+4. **In-flight orders:** keep the old escrow address configured for event
+   indexing and settlement until every order locked in it has been claimed or
+   refunded. Users can always refund permissionlessly after the timelock
+   expires, so no manual intervention is required to unblock them.
+
+### Rollback point
+
+The rollback point is **immediately before step 2 (cutover)**. At that point
+the old escrow and registry are still live and all services still point at
+them. To roll back:
+
+1. Revert the coordinator, relayer, resolver, and frontend configuration to
+   the previous escrow and registry addresses (keep the previous `.env` and
+   deployment manifest under version control so this is a single revert).
+2. Restart services and clear `MAINTENANCE_MODE` / `EMERGENCY_SHUTDOWN`.
+3. Confirm the dry-run validator passes against the restored configuration.
+
+Because the replacement escrow is a new contract, rolling back does not
+require any on-chain action — the old escrow was never modified. If the
+replacement escrow has already accepted orders, those orders must be settled
+through the replacement contract before it is abandoned.
+
+### Dry-run validator
+
+The dry-run validator checks the migration without sending any transaction.
+It verifies:
+
+- **Network:** the RPC endpoint's chain ID matches the expected network.
+- **Bytecode:** the escrow and registry addresses have deployed code and the
+  escrow's bytecode hash matches the deployment manifest.
+- **Registry linkage:** the escrow's immutable registry reference equals the
+  configured `ResolverRegistry` address.
+- **Manifest consistency:** the deployment manifest's escrow, registry, chain
+  ID, and deploy block match the configured values.
+
+Run it before cutover and again after restarting services:
+
+```bash
+pnpm --filter @wafflefinance/contracts exec hardhat run scripts/validate-escrow-migration.ts \
+  --network <network> -- --dry-run
+```
+
+The validator performs **no transaction** in dry-run mode and exits non-zero
+if the chain ID or registry configuration does not match. Do not proceed with
+cutover until it exits zero.
 
 ---
 
