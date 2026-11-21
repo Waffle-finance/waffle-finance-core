@@ -33,13 +33,24 @@ import {IResolverRegistry} from "./interfaces/IResolverRegistry.sol";
 ///            ability of users to claim or refund: those paths are
 ///            always permissionless.
 ///
-/// @dev The contract verifies preimages using BOTH sha256 (interop with
-///      Stellar/Soroban which uses sha256) and keccak256 (matching
-///      classic Ethereum HTLC convention). Callers commit to a single
-///      `hashlock` and the preimage is accepted iff *either* digest
-///      matches it. This lets a single Soroban / Ethereum cross-chain
-///      swap use one hashlock end-to-end while keeping the contract
-///      compatible with EVM tooling that expects keccak.
+/// @dev Hashlock schemes. The canonical scheme is **sha256**: it is the
+///      digest produced by the Soroban-side HTLC and by the SDK secret
+///      helpers, and it is the only scheme new orders should commit to.
+///      **keccak256** is a retained *compatibility* scheme for classic
+///      Ethereum HTLC tooling; it is accepted on the claim path but is not
+///      used for new cross-chain orders.
+///
+///      Callers commit to a single `hashlock` and the preimage is accepted
+///      iff *either* digest matches it. This lets a single Soroban /
+///      Ethereum cross-chain swap use one hashlock end-to-end while keeping
+///      the contract compatible with EVM tooling that expects keccak.
+///
+///      Migration policy: new orders MUST use sha256 hashlocks. The keccak
+///      branch is kept only for in-flight/legacy orders and may be removed
+///      in a future major version; clients must not rely on it for new
+///      orders. Preimages must be exactly 32 bytes — any other length is
+///      rejected with {InvalidPreimage} before hashing, so a malformed
+///      preimage can never match either scheme.
 contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -277,6 +288,15 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     ///
     ///      Finality: once this returns successfully the order status is
     ///      irrevocably `Claimed` and `preimageKeccak` is stored on-chain.
+    ///
+    ///      Timelock boundary (#1023): claim is permitted only while
+    ///      `block.timestamp < order.timelock` (strict inequality). At the
+    ///      exact deadline timestamp the order is already refund-only
+    ///      territory: `claimOrder` reverts with {Expired} while
+    ///      `refundOrder` still reverts with {NotExpired} until the clock
+    ///      advances past the deadline. Because the two comparisons are
+    ///      strict and complementary, a claim and a refund can never both
+    ///      settle the same order at the same timestamp.
     function claimOrder(uint256 orderId, bytes memory preimage) external nonReentrant {
         Order storage order = _orders[orderId];
         if (order.status != OrderStatus.Funded) {
@@ -319,6 +339,14 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     ///      users can always recover their funds without relying on the
     ///      resolver, coordinator, or any other trusted party. The safety
     ///      deposit rewards whoever submits the refund transaction.
+    ///
+    ///      Timelock boundary (#1023): refund is permitted only once
+    ///      `block.timestamp > order.timelock` (strict inequality). One
+    ///      second before the deadline and at the deadline itself the call
+    ///      reverts with {NotExpired}; one second after it succeeds. The
+    ///      deadline timestamp is therefore refund-only territory — claim
+    ///      has already been disabled there — so exactly one of claim or
+    ///      refund can settle an order at any given timestamp.
     function refundOrder(uint256 orderId) external nonReentrant {
         Order storage order = _orders[orderId];
         if (order.status != OrderStatus.Funded) {
@@ -355,6 +383,13 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     ///      legitimate receive logic can collect its funds and pay for that
     ///      cost itself. If the transfer still fails the credit is restored
     ///      and the call reverts, leaving funds recoverable on a later retry.
+    ///
+    ///      A deferred credit is withdrawable exactly once, and only by the
+    ///      credited address: the balance is keyed by `msg.sender`, zeroed
+    ///      before the outbound call, and the `nonReentrant` guard blocks a
+    ///      nested `withdraw` (or any other lifecycle call) from observing
+    ///      or spending the same credit twice. A second withdrawal reverts
+    ///      with {NoPendingWithdrawal}.
     function withdraw() external nonReentrant returns (uint256 amount) {
         amount = _pendingWithdrawals[msg.sender];
         if (amount == 0) revert NoPendingWithdrawal();
@@ -423,8 +458,12 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard, Ownable2Step {
     ///      moves funds ({claimOrder}, {refundOrder}, {withdraw}) is
     ///      `nonReentrant` and all order state is finalised before this call,
     ///      so the bounded stipend cannot be leveraged to re-enter and double
-    ///      spend. The contract holds the ETH throughout — a deferred payout
-    ///      is a bookkeeping credit, not an outbound transfer.
+    ///      spend. Even a recipient that burns its entire stipend in a
+    ///      callback cannot settle the order a second time (status is already
+    ///      terminal) nor withdraw a balance it has not been credited. The
+    ///      contract holds the ETH throughout — a deferred payout is a
+    ///      bookkeeping credit, not an outbound transfer — and that credit is
+    ///      withdrawable exactly once by the credited address via {withdraw}.
     function _payoutNative(address to, uint256 amount, uint256 orderId) private {
         (bool ok, ) = payable(to).call{value: amount, gas: PAYOUT_GAS_STIPEND}("");
         if (!ok) {

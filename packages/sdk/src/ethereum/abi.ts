@@ -33,6 +33,23 @@ export const HTLC_ESCROW_ABI = [
   },
   {
     type: "function",
+    name: "withdraw",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "pendingWithdrawals",
+    stateMutability: "view",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "token", type: "address" }
+    ],
+    outputs: [{ name: "", type: "uint256" }]
+  },
+  {
+    type: "function",
     name: "getOrder",
     stateMutability: "view",
     inputs: [{ name: "orderId", type: "uint256" }],
@@ -89,6 +106,24 @@ export const HTLC_ESCROW_ABI = [
       { name: "caller", type: "address", indexed: true },
       { name: "amount", type: "uint256", indexed: false },
       { name: "safetyDeposit", type: "uint256", indexed: false }
+    ]
+  },
+  {
+    type: "event",
+    name: "PayoutDeferred",
+    inputs: [
+      { name: "recipient", type: "address", indexed: true },
+      { name: "token", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false }
+    ]
+  },
+  {
+    type: "event",
+    name: "Withdrawn",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "token", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false }
     ]
   },
   // Custom errors — included so viem can decode targeted createOrder revert

@@ -146,6 +146,13 @@ const config: HardhatUserConfig = {
     cache: "./cache",
     artifacts: "./artifacts",
   },
+
+  // #1022: shared hashlock/preimage vectors live in a JSON fixture consumed by
+  // both the Hardhat contract tests and the SDK vitest tests.  It is not a
+  // test file, so it is excluded from the `test` task glob.
+  mocha: {
+    spec: ["./test/**/*.ts"],
+  },
 };
 
 export default config;
