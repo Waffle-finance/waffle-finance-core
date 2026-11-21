@@ -1881,6 +1881,277 @@ describe("HTLCEscrow v2", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Issue #1020 — explicit ERC-20 behavior tests for non-standard tokens
+  //
+  // Documented support boundaries:
+  //   SUPPORTED   — standard (returns true) and no-return (void) tokens.
+  //                 SafeERC20 accepts both; the escrow records the order
+  //                 amount and moves exactly that amount on claim/refund.
+  //   EXCLUDED    — false-returning tokens. SafeERC20 reverts with
+  //                 SafeERC20FailedOperation; no order is recorded.
+  //   EXCLUDED    — fee-on-transfer tokens. The escrow records the requested
+  //                 amount, not the received balance, so a fee would leave the
+  //                 order under-collateralised. The escrow therefore rejects
+  //                 any deposit where the received balance is less than the
+  //                 requested amount (InsufficientBalance).
+  //   EXCLUDED    — rebasing tokens. A positive rebase inflates the escrow's
+  //                 balance beyond recorded liabilities (surplus is not
+  //                 credited to any order); a negative rebase would leave
+  //                 liabilities greater than the balance, so rebasing tokens
+  //                 are not supported. The invariant asserted below is that
+  //                 recorded liabilities never exceed the received balance.
+  // ---------------------------------------------------------------------------
+  describe("non-standard ERC20 behavior boundaries (#1020)", () => {
+    const TOKEN_SUPPLY = ethers.parseEther("1000000");
+
+    async function deployFeeOnTransferToken(feeBps: bigint) {
+      const F = await ethers.getContractFactory("FeeOnTransferERC20");
+      return F.deploy(TOKEN_SUPPLY, feeBps);
+    }
+
+    async function deployRebasingToken() {
+      const F = await ethers.getContractFactory("RebasingERC20");
+      return F.deploy(TOKEN_SUPPLY);
+    }
+
+    // ── false-returning token: excluded, fails with SafeERC20 error ─────────
+
+    it("false-return: createOrder reverts with SafeERC20FailedOperation and records no order", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const F = await ethers.getContractFactory("ReturnsFalseERC20");
+      const token = await F.deploy(TOKEN_SUPPLY);
+      const escrowAddr = await escrow.getAddress();
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: SAFETY_DEPOSIT }
+        )
+      ).to.be.revertedWithCustomError(escrow, "SafeERC20FailedOperation");
+
+      // No order recorded and no token liability.
+      expect(await escrow.nextOrderId()).to.equal(1n);
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+
+    // ── no-return token: supported on create, claim and refund ──────────────
+
+    it("no-return: create → claim moves exactly the recorded amount", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const F = await ethers.getContractFactory("NoReturnERC20");
+      const token = await F.deploy(TOKEN_SUPPLY);
+      const escrowAddr = await escrow.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      // Received balance covers the recorded liability exactly.
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT);
+      expect((await escrow.getOrder(1)).amount).to.equal(AMOUNT);
+
+      const beneficiaryBefore = await token.balanceOf(beneficiary.address);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        beneficiaryBefore + AMOUNT
+      );
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+
+    it("no-return: create → refund returns exactly the recorded amount to the refund address", async () => {
+      const [sender, beneficiary, caller] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const F = await ethers.getContractFactory("NoReturnERC20");
+      const token = await F.deploy(TOKEN_SUPPLY);
+      const escrowAddr = await escrow.getAddress();
+      const hashlock = ethers.sha256(randomBytes32());
+      const refundAddr = ethers.Wallet.createRandom().address;
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        refundAddr,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      await time.increase(TIMELOCK + 1);
+      await escrow.connect(caller).refundOrder(1);
+
+      expect(await token.balanceOf(refundAddr)).to.equal(AMOUNT);
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+      expect((await escrow.getOrder(1)).status).to.equal(2); // Refunded
+    });
+
+    // ── fee-on-transfer token: excluded, rejected on create ─────────────────
+
+    it("fee-on-transfer: createOrder reverts with InsufficientBalance when the received amount is below the requested amount", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      // 1% fee on every transfer.
+      const token = await deployFeeOnTransferToken(100n);
+      const escrowAddr = await escrow.getAddress();
+      const hashlock = ethers.sha256(randomBytes32());
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+
+      // The escrow would receive AMOUNT - 1%, so it must reject the order
+      // rather than record a liability it cannot honour.
+      await expect(
+        escrow.connect(sender).createOrder(
+          beneficiary.address,
+          sender.address,
+          await token.getAddress(),
+          AMOUNT,
+          SAFETY_DEPOSIT,
+          hashlock,
+          TIMELOCK,
+          { value: SAFETY_DEPOSIT }
+        )
+      ).to.be.revertedWithCustomError(escrow, "InsufficientBalance");
+
+      // No order recorded; the escrow holds no token liability.
+      expect(await escrow.nextOrderId()).to.equal(1n);
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+
+    it("fee-on-transfer: no order can be recorded with liabilities greater than the received balance", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployFeeOnTransferToken(100n);
+      const escrowAddr = await escrow.getAddress();
+
+      // Attempt several orders; each must fail before any state is written.
+      for (let i = 0; i < 3; i++) {
+        await token.connect(sender).approve(escrowAddr, AMOUNT);
+        await expect(
+          escrow.connect(sender).createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            ethers.sha256(randomBytes32()),
+            TIMELOCK,
+            { value: SAFETY_DEPOSIT }
+          )
+        ).to.be.revertedWithCustomError(escrow, "InsufficientBalance");
+      }
+
+      expect(await escrow.nextOrderId()).to.equal(1n);
+      // Invariant: received balance (0) >= recorded liabilities (0).
+      expect(await token.balanceOf(escrowAddr)).to.equal(0n);
+    });
+
+    // ── rebasing token: excluded, documented invariant ──────────────────────
+
+    it("rebasing: positive rebase inflates the escrow balance but never creates liabilities beyond the received amount", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployRebasingToken();
+      const escrowAddr = await escrow.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      // Recorded liability equals the amount received at creation time.
+      expect((await escrow.getOrder(1)).amount).to.equal(AMOUNT);
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT);
+
+      // A positive rebase doubles every balance. The escrow's balance grows
+      // but the recorded liability does not — surplus is not credited to any
+      // order, so liabilities remain <= received balance.
+      await token.rebase(2n);
+      const inflated = await token.balanceOf(escrowAddr);
+      expect(inflated).to.equal(AMOUNT * 2n);
+      expect((await escrow.getOrder(1)).amount).to.equal(AMOUNT);
+      expect(inflated).to.be.gte((await escrow.getOrder(1)).amount);
+
+      // Claim pays exactly the recorded amount; the surplus stays in escrow
+      // (rebasing tokens are excluded — surplus is not recoverable by design).
+      const beneficiaryBefore = await token.balanceOf(beneficiary.address);
+      await escrow.connect(beneficiary).claimOrder(1, preimage);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        beneficiaryBefore + AMOUNT
+      );
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT); // surplus
+    });
+
+    it("rebasing: negative rebase leaves liabilities greater than the balance — claim reverts, documenting exclusion", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const token = await deployRebasingToken();
+      const escrowAddr = await escrow.getAddress();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await token.connect(sender).approve(escrowAddr, AMOUNT);
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        await token.getAddress(),
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: SAFETY_DEPOSIT }
+      );
+
+      // A negative rebase halves every balance: the escrow now holds less
+      // than the recorded liability. This is exactly why rebasing tokens are
+      // excluded — the escrow cannot honour the order.
+      await token.rebase(1n, 2n); // multiply by 1/2
+      expect(await token.balanceOf(escrowAddr)).to.equal(AMOUNT / 2n);
+      expect((await escrow.getOrder(1)).amount).to.equal(AMOUNT);
+
+      // The claim cannot be settled: the token transfer underflows/reverts.
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, preimage)
+      ).to.be.reverted;
+
+      // Order remains Funded — no partial payout occurred.
+      expect((await escrow.getOrder(1)).status).to.equal(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Hostile receiver — gas-stipend exhaustion on claim and refund paths
   //
   // These tests exercise the two payout paths (_payoutNative via claimOrder and
