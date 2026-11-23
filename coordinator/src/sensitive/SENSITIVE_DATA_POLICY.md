@@ -91,6 +91,29 @@ Key management:
 
 ---
 
+## Retention Classes and Cleanup Verification (#1134)
+
+`coordinator/src/retention/retention-policy.ts` is the authoritative mapping
+between a sensitive-data category and its documented retention setting.
+Cleanup is executed by `runRetentionCleanup(db, nowSeconds)` and returns an
+auditable report (`inspected`, `removed`, `retained`, `cutoff`, `reason`) for
+every category. Tests live in `coordinator/test/retention-policy.test.ts`.
+
+| Category | Retention class | Retention | Cleanup action |
+|----------|-----------------|-----------|----------------|
+| Active settlement orders | `active_settlement` | until terminal + archived | never deleted or cleared |
+| Audit records | `legal_audit` | 7 years (legal hold) | append-only; never updated or deleted |
+| Secret ciphertext (`orders.preimage`) | `secret_ciphertext` | 30 days after terminal + archived | clear ciphertext columns in place, keep order/audit rows |
+| Order history (`order_events`) | `order_history` | 10 years | retained for dispute resolution and exports |
+| Request/replay metadata (`processed_events`) | `request_metadata` | 7 days | physical delete when expired |
+
+The cleanup honors two hard constraints: an order that is still active (or
+terminal but not archived) keeps its secret for recovery, and audit/order
+history rows are never deleted. Removed values are excluded from subsequent
+exports and must not appear in logs.
+
+---
+
 ## Adding a New Sensitive Field
 
 1. Add the field name to `SENSITIVE_FIELD_NAMES` in
