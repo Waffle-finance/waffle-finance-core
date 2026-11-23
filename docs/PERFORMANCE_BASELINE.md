@@ -146,11 +146,42 @@ suite, applied to performance work specifically:
 
 ---
 
+## Full event replay benchmark (issue #1128)
+
+`coordinator/test/replay-benchmark.test.ts` adds the missing replay baseline.
+It generates events from a fixed seed (`mulberry32`, default `20261123`) at two
+documented scales — **small: 200 orders / 600 events** and **large: 2,000
+orders / 6,000 events** — and replays them through the real
+`OrdersRepository` on a fresh SQLite database. Optional Postgres runs use
+`COORDINATOR_DATABASE_URL`.
+
+```bash
+# All scales, SQLite (the documented reproducible command)
+pnpm --filter @wafflefinance/coordinator exec vitest run test/replay-benchmark.test.ts
+
+# One scale / a different fixed seed / Postgres
+REPLAY_BENCH_SCALE=small REPLAY_BENCH_SEED=20261123 \
+  pnpm --filter @wafflefinance/coordinator exec vitest run test/replay-benchmark.test.ts
+REPLAY_BENCH_DB=postgres COORDINATOR_DATABASE_URL=postgres://... \
+  pnpm --filter @wafflefinance/coordinator exec vitest run test/replay-benchmark.test.ts
+```
+
+Each run emits one `[replay-benchmark]` JSON line containing the seed, scale,
+event count, duration, events/second, database write count, cursor start/end,
+heap delta, database engine and machine metadata (Node version, OS, arch, CPU
+count, total memory). Save that line as the baseline when intentionally
+updating performance; a drop below **20 events/s** or a duration above
+**120 s (large) / 30 s (small)** fails the test. Write count and cursor
+movement are exact, so a partial or corrupted replay fails independently of
+timing. These are regression guards, not an SLA — see "Measured baseline"
+above.
+
 ## How to regenerate these numbers
 
 ```bash
 pnpm --filter @wafflefinance/sdk build   # required before any coordinator command
 pnpm --filter @wafflefinance/coordinator exec vitest run test/performance.test.ts
+pnpm --filter @wafflefinance/coordinator exec vitest run test/replay-benchmark.test.ts
 ```
 
 Once the target scenarios above are added, the same command (or a
