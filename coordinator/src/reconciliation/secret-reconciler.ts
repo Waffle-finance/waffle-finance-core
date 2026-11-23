@@ -3,6 +3,11 @@ import { keccak256, toHex, parseAbiItem, type PublicClient, type Log } from "vie
 import type { Logger } from "pino";
 import type { OrderService } from "../services/order-service.js";
 import { secretRecoveryOutcomeTotal } from "../metrics.js";
+import {
+  redactedRecoveryContext,
+  verifyRecoveryRecord,
+  type RecoveryRecord,
+} from "./recovery-authorization.js";
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -75,6 +80,7 @@ export type RecoveryOutcome =
   | "already_known"
   | "invalid_preimage"
   | "state_conflict"
+  | "unauthorized_recovery"
   | "error";
 
 export interface StaleRevelation {
@@ -120,6 +126,8 @@ export interface StaleRevelation {
  */
 export class SecretReconciler {
   private readonly log: Logger;
+  /** Explicit recovery record ids already processed — blocks substituted replays. */
+  private readonly processedRecoveryRecordIds = new Set<string>();
 
   constructor(
     private readonly ethClient: PublicClient,
@@ -141,6 +149,7 @@ export class SecretReconciler {
     orderId: string,
     preimage: string,
     txHash: string,
+    record?: RecoveryRecord,
   ): Promise<RecoveryOutcome> {
     const order = await this.orders.findBySrcOrderId("ethereum", orderId);
     if (!order) {
@@ -148,12 +157,47 @@ export class SecretReconciler {
       return "error";
     }
 
+    const orderSnapshot = {
+      publicId: order.publicId,
+      srcOrderId: order.srcOrderId ?? null,
+      hashlock: order.hashlock,
+      preimage: order.preimage,
+      status: order.status,
+    };
+
+    let algo: "sha256" | "keccak256" | null = null;
+    if (record) {
+      const verification = verifyRecoveryRecord(record, orderSnapshot, validatePreimage);
+      const mismatch = record.preimage !== preimage || record.txHash !== txHash;
+      if (!verification.ok || mismatch) {
+        secretRecoveryOutcomeTotal.inc({ outcome: "unauthorized_recovery" });
+        this.log.warn(
+          {
+            ...redactedRecoveryContext(record, orderSnapshot),
+            reason: verification.ok ? "mismatched_record" : verification.reason,
+          },
+          "SecretReconciler: recovery record rejected before persistence",
+        );
+        return "unauthorized_recovery";
+      }
+      algo = verification.algorithm;
+    }
+
     if (order.preimage) {
       secretRecoveryOutcomeTotal.inc({ outcome: "already_known" });
       return "already_known";
     }
 
-    const algo = validatePreimage(preimage, order.hashlock);
+    if (record && this.processedRecoveryRecordIds.has(record.recordId)) {
+      secretRecoveryOutcomeTotal.inc({ outcome: "unauthorized_recovery" });
+      this.log.warn(
+        { ...redactedRecoveryContext(record, orderSnapshot), reason: "duplicate_recovery" },
+        "SecretReconciler: duplicate recovery record rejected",
+      );
+      return "unauthorized_recovery";
+    }
+
+    algo ??= validatePreimage(preimage, order.hashlock);
     if (!algo) {
       secretRecoveryOutcomeTotal.inc({ outcome: "invalid_preimage" });
       this.log.warn(
@@ -179,6 +223,7 @@ export class SecretReconciler {
       return "error";
     }
 
+    if (record) this.processedRecoveryRecordIds.add(record.recordId);
     secretRecoveryOutcomeTotal.inc({ outcome: "recovered" });
     this.log.info(
       { orderId, publicId: order.publicId, algo, txHash },
@@ -233,19 +278,31 @@ export class SecretReconciler {
       const args = (log as any).args as {
         orderId?: bigint;
         preimage?: `0x${string}`;
+        claimer?: string;
       };
       if (!args?.orderId || !args?.preimage) continue;
 
       const orderId = args.orderId.toString();
       const preimage = args.preimage;
       const txHash = log.transactionHash ?? "0x";
+      const record: RecoveryRecord = {
+        recordId: `${txHash}:${log.logIndex ?? 0}`,
+        srcOrderId: orderId,
+        preimage,
+        txHash,
+        source: "ethereum_log",
+        claimer: args.claimer ?? null,
+      };
 
-      const outcome = await this._recoverOneOrder(orderId, preimage, txHash);
+      const outcome = await this._recoverOneOrder(orderId, preimage, txHash, record);
       switch (outcome) {
         case "recovered":      result.recovered++;      break;
         case "already_known":  result.alreadyKnown++;   break;
         case "invalid_preimage": result.invalidPreimages++; break;
         case "state_conflict": result.stateConflict++;  break;
+        // Rejected/unauthorised material is counted with errors without adding
+        // a new field to the public result contract.
+        case "unauthorized_recovery":
         case "error":          result.errors++;         break;
       }
     }
