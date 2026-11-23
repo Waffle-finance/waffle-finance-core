@@ -29,6 +29,7 @@ import { SecretRevealError } from "../services/secret-errors.js";
 import type { AuditRepository } from "../audit/audit-repo.js";
 import type { OrdersRepository } from "../persistence/orders-repo.js";
 import { AuditExporter } from "../audit/audit-exporter.js";
+import { assertRouteAuthorizationCoverage } from "./authorization-policy.js";
 
 export interface AppDeps {
   log: Logger;
@@ -180,6 +181,9 @@ export function createApp(deps: AppDeps): Express {
       res.status(500).json({ error: "internal_error", message: safeErr.message });
     }
   );
+
+  // A route mounted without an explicit policy entry must never ship.
+  assertRouteAuthorizationCoverage(app);
 
   return app;
 }
