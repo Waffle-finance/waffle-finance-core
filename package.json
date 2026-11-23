@@ -20,6 +20,8 @@
     "build:prod": "NODE_ENV=production pnpm -r build",
     "test": "pnpm -r test",
     "test:e2e": "pnpm --filter @wafflefinance/e2e test",
+    "test:smoke:deployment": "node --test scripts/test/deployment-health-smoke.test.mjs",
+    "smoke:deployment": "node scripts/deployment-health-smoke.mjs",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\" --ignore-path .gitignore",
