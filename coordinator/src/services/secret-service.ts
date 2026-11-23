@@ -4,6 +4,8 @@ import { keccak256, toHex } from "viem";
 import { OrderValidationError, type OrderService } from "./order-service.js";
 
 export interface SecretStorageKeyConfig {
+  /** Stable identifier written into new ciphertext for rotation tracking. */
+  currentKeyId?: string;
   current?: string;
   primary?: string;
   previous?: string | string[];
@@ -38,6 +40,21 @@ function keccak256Hex(buf: Buffer): string {
 }
 
 /**
+ * Environment-aware storage encryption policy.
+ *
+ * Local development and unit tests may use plaintext for compatibility with
+ * existing fixtures. Any production deployment (`network=mainnet` or
+ * `NODE_ENV=production`, including a production testnet coordinator) must
+ * have an encryption key configured — there is no plaintext fallback.
+ */
+export function requiresEncryptedStorage(
+  network: "testnet" | "mainnet",
+  nodeEnv: string = process.env.NODE_ENV ?? "development"
+): boolean {
+  return network === "mainnet" || nodeEnv.trim().toLowerCase() === "production";
+}
+
+/**
  * Coordinates secret reveal between the two chains.
  *
  * The coordinator never holds funds, so revealing a secret to it cannot
@@ -65,6 +82,7 @@ export class SecretService {
   /** Ordered key ring used for decryption and writes. */
   private readonly encKeys: Buffer[];
   private readonly writeKey: Buffer | undefined;
+  private readonly writeKeyId: string | undefined;
 
   constructor(
     private readonly orders: OrderService,
@@ -77,9 +95,18 @@ export class SecretService {
      * Defaults to `"testnet"` so existing local/dev callers and test
      * fixtures that omit this argument keep working unchanged.
      */
-    private readonly network: "testnet" | "mainnet" = "testnet"
+    private readonly network: "testnet" | "mainnet" = "testnet",
+    private readonly nodeEnv: string = process.env.NODE_ENV ?? "development"
   ) {
     const configuredKeys = SecretService.normalizeKeys(secretStorageKey);
+    const keyId =
+      typeof secretStorageKey === "string"
+        ? undefined
+        : secretStorageKey?.currentKeyId?.trim();
+    if (keyId && (keyId.length === 0 || Buffer.byteLength(keyId) > 64)) {
+      throw new Error("SecretService: currentKeyId must be 1-64 bytes");
+    }
+    this.writeKeyId = keyId || undefined;
 
     if (configuredKeys.length > 0) {
       try {
@@ -97,15 +124,16 @@ export class SecretService {
         );
       }
     } else {
-      if (this.network === "mainnet") {
-        // Production guard: a mainnet coordinator must never silently
-        // persist preimages in plaintext. Fail startup loudly instead.
-        // (No key material or preimages are included in this message.)
+      if (requiresEncryptedStorage(this.network, this.nodeEnv)) {
+        // Fail closed: production/testnet-in-production must never persist
+        // preimages in plaintext. No key material is included in this message.
         throw new Error(
-          "SecretService: SECRET_STORAGE_KEY is required when network=mainnet. " +
-          "Refusing to start in plaintext mode in production. " +
-          "Set SECRET_STORAGE_KEY (or use an explicit documented test config " +
-          "with network=testnet for local/dev)."
+          "SecretService: SECRET_STORAGE_KEY is required in production " +
+          `(network=${this.network}, NODE_ENV=${this.nodeEnv}). ` +
+          "Refusing to start in plaintext mode. Generate a key with " +
+          "`pnpm --filter @wafflefinance/coordinator generate-key`, store it in " +
+          "your secrets manager, and set SECRET_STORAGE_KEY in the coordinator " +
+          "environment. Never log or commit the key."
         );
       }
 
@@ -187,7 +215,7 @@ export class SecretService {
 
     // Encrypt before persistence if a key is configured.
     const valueToStore = this.writeKey
-      ? encryptSecret(preimage, this.writeKey)
+      ? encryptSecret(preimage, this.writeKey, this.writeKeyId)
       : preimage;
 
     // encVersion=1 means AES-256-GCM; null means plaintext.
@@ -310,7 +338,7 @@ export class SecretService {
     }
 
     try {
-      const reencrypted = encryptSecret(plaintext, this.writeKey);
+      const reencrypted = encryptSecret(plaintext, this.writeKey, this.writeKeyId);
       await this.orders.recordSecret(
         publicId,
         reencrypted,
