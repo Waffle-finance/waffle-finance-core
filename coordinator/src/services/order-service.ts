@@ -440,7 +440,9 @@ export class OrderService {
     this.historyCache.invalidateAddress(order.dstAddress);
 
     if (input.resolver) {
-      resolverLockActionsTotal.inc({ resolver_address: input.resolver, action: "dst_lock" });
+      // Resolver addresses are identifiers: keep them in redacted audit
+      // records, never in a Prometheus label (unbounded cardinality + privacy).
+      resolverLockActionsTotal.inc({ action: "dst_lock" });
     }
 
     this.audit(

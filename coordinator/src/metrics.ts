@@ -558,11 +558,11 @@ export const staleOrdersArchivedAgeSeconds = new Histogram({
   registers: [registry],
 });
 
-/** Resolver participation per operation */
+/** Resolver participation per operation (bounded dimensions only) */
 export const resolverLockActionsTotal = new Counter({
   name: 'coordinator_resolver_lock_actions_total',
-  help: 'Total resolver lock actions by resolver address and action type',
-  labelNames: ['resolver_address', 'action'] as const,
+  help: 'Total resolver lock actions by action type (no resolver identifier labels)',
+  labelNames: ['action'] as const,
   registers: [registry],
 });
 
