@@ -14,7 +14,8 @@ Production observability guide for the WaffleFinance coordinator service.
 3. [Production Monitoring Checklist](#production-monitoring-checklist)
 4. [Alert Rules](#alert-rules)
 5. [Grafana Dashboard Setup](#grafana-dashboard-setup)
-6. [Troubleshooting](#troubleshooting)
+6. [Database Restore Drills](#database-restore-drills)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -402,6 +403,76 @@ histogram_quantile(0.95,
 ```
 coordinator_active_orders
 ```
+
+---
+
+## Database Restore Drills
+
+Disaster recovery procedures must be validated regularly to ensure operators can restore service within acceptable recovery time objectives (RTO) and identify metadata that cannot be reconstructed from chain events alone.
+
+### Quick Drill Execution
+
+```bash
+# From repository root
+./coordinator/ops/run-restore-drill.sh
+```
+
+This automated script:
+1. Generates a sanitized fixture database with representative active, terminal, audit, and encrypted-secret records
+2. Executes backup and restore following the documented runbook in an isolated environment
+3. Verifies database integrity, schema, and data quality
+4. Produces a timestamped JSON report with recovery time and findings
+
+### Manual Drill (for understanding the process)
+
+```bash
+# Step 1: Generate fixture database
+pnpm --filter @wafflefinance/coordinator drill:generate-fixture \
+  --out coordinator/drill-fixtures/fixture-$(date -u +%Y%m%d).db \
+  --active-orders 50 \
+  --terminal-orders 200 \
+  --with-secrets
+
+# Step 2: Execute restore drill
+pnpm --filter @wafflefinance/coordinator drill:restore \
+  --backup coordinator/drill-fixtures/fixture-$(date -u +%Y%m%d).db \
+  --isolated coordinator/drill-restore/restored-$(date -u +%Y%m%d).db \
+  --report coordinator/ops/drills/restore-$(date -u +%Y-%m-%dT%H-%M-%SZ).json
+
+# Step 3: Review report
+cat coordinator/ops/drills/restore-*.json | jq '.summary'
+```
+
+### Drill Report Contents
+
+- **Recovery time**: Total duration and per-phase breakdown (restore, verification, service)
+- **Integrity checks**: PRAGMA integrity_check, foreign key validation, migration history
+- **Data quality**: Duplicate IDs, orphan events, invalid timestamps
+- **Counts**: Orders (active/terminal), events, audit entries, secrets
+- **Warnings**: Non-reconstructible metadata (e.g., active order secrets)
+
+### Non-Reconstructible Metadata
+
+The drill report identifies order metadata that **cannot** be reconstructed from on-chain events alone:
+
+1. **Active order secrets**: Encrypted preimages in `order_secrets` table are not published on-chain until claim
+2. **Audit log**: Operational log entries in `audit_log` table are local only
+3. **Chain cursor positions**: Listener positions in `chain_cursors` require rescan after restore
+4. **Order event timestamps**: `recorded_at` reflects observation time, not block time
+
+**Mitigation**: Backup frequency must be < average order completion time. Consider external secret storage for critical production deployments.
+
+### Drill Frequency
+
+| Environment | Frequency | Trigger |
+|-------------|-----------|---------|
+| Development | Weekly | Automated CI job |
+| Staging | Monthly | Manual execution by ops team |
+| Production | Quarterly | Scheduled maintenance window |
+
+After any database schema change (new migration), execute a drill to validate backward compatibility.
+
+**Reference**: See [RESTORE_DRILL.md](./RESTORE_DRILL.md) for detailed drill procedures and troubleshooting.
 
 ---
 

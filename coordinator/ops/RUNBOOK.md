@@ -742,3 +742,4 @@ Check on-call runbook
 - [Alert Rules](./coordinator-alerts.yml) - Prometheus alert definitions
 - [Metrics Handbook](../../README.md#metrics) - All coordinator metrics
 - [Soroban Admin Key Rotation](#soroban-admin-key-rotation) - Admin authority rotation procedure (also required in release and mainnet readiness checklists)
+- [Database Restore Drill](./RESTORE_DRILL.md) - Disaster recovery validation procedure

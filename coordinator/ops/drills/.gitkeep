@@ -1,0 +1,7 @@
+# Drill reports directory
+#
+# This directory stores timestamped restore drill reports.
+# Reports are JSON files with the naming pattern:
+#   restore-<ISO8601-timestamp>.json
+#
+# Keep the last 12 months of reports for audit and trend analysis.
