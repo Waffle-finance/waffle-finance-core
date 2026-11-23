@@ -784,3 +784,36 @@ curl "$COORDINATOR_URL/orders/history?address=0x742d35cF0b7bbF6E175239d74a0e0a3d
 # Get specific order
 curl "$COORDINATOR_URL/orders/demo-xxx" | jq
 ```
+
+---
+
+## Database encryption-at-rest verification
+
+Application-level encryption (`SECRET_STORAGE_KEY`) protects preimages only.
+The database file/volume, Postgres cluster and every backup copy must also be
+protected by infrastructure encryption at rest. Production deployments must
+record the following checklist fields in their deployment metadata before the
+deployment can be marked verified:
+
+- `DB_ENCRYPTION_AT_REST_MODE` — one of `sqlite`, `postgres`, `backup`
+  (record one entry per mode in use).
+- `DB_ENCRYPTION_AT_REST_CONTROL` — the provider/volume control, e.g.
+  `encrypted-volume`, `luks`, `cloud-managed-disk` (SQLite),
+  `provider-managed-tde`, `cloud-hsm-backed` (Postgres), or
+  `provider-managed-encryption`, `kms-encrypted-object-store` (backups).
+- `DB_ENCRYPTION_AT_REST_EVIDENCE` — reference ID/screenshot/console link
+  proving the control is enabled (required when `verified: true`).
+- `DB_ENCRYPTION_AT_REST_VERIFIED_AT` — timestamp of verification.
+- `DB_ENCRYPTION_AT_REST_VERIFIED_BY` — verifier identity.
+
+Validation hook:
+
+```bash
+node scripts/verify-encryption-at-rest.mjs --record path/to/deployment.json
+node scripts/verify-encryption-at-rest.mjs   # documentation/CI fallback
+```
+
+The hook fails when a supported mode has no entry, when a deployment is marked
+`verified` without evidence, or when the documentation omits a required field.
+See `coordinator/src/sensitive/SENSITIVE_DATA_POLICY.md` for residual risks and
+incident procedures.

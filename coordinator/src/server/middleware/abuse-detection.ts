@@ -226,14 +226,7 @@ export class AbuseDetector {
 
     // Decay invalid-announce history with the same clock. A client is only
     // penalised while repeated invalid requests stay inside the window.
-    const invalidCutoff = now - this.invalidWindowMs;
-    for (const [clientKey, rec] of this.invalidAttempts) {
-      if (rec.updatedAt < invalidCutoff) {
-        if (rec.flagged) this.invalidFlaggedCount--;
-        this.invalidAttempts.delete(clientKey);
-      }
-    }
-
+    this.pruneInvalidAttempts(now);
     this.refreshGauges();
   }
 
@@ -271,8 +264,20 @@ export class AbuseDetector {
     return this.flaggedCount;
   }
 
+  /** Decay invalid attempts so flags cannot persist past the window. */
+  private pruneInvalidAttempts(now: number): void {
+    const cutoff = now - this.invalidWindowMs;
+    for (const [clientKey, rec] of this.invalidAttempts) {
+      if (rec.updatedAt < cutoff) {
+        if (rec.flagged) this.invalidFlaggedCount--;
+        this.invalidAttempts.delete(clientKey);
+      }
+    }
+  }
+
   /** Aggregate invalid-announce counters — no raw addresses or request bodies. */
   get invalidAnnounceCounters() {
+    this.pruneInvalidAttempts(Date.now());
     return {
       counted: this.countedInvalid,
       transientSkipped: this.transientSkipped,

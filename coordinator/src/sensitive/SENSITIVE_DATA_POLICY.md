@@ -91,6 +91,37 @@ Key management:
 
 ---
 
+## Database and Backup Encryption at Rest (#1138)
+
+Application encryption protects preimages in `orders.preimage`; it does **not**
+protect other metadata stored in the SQLite file, a Postgres cluster, or
+backup copies. Every production deployment must record infrastructure evidence
+for each applicable mode:
+
+| Mode | Required control | Evidence |
+|------|------------------|----------|
+| SQLite volume | `encrypted-volume`, `luks`, or `cloud-managed-disk` | volume/provider encryption setting |
+| Postgres | `provider-managed-tde` or `cloud-hsm-backed` | cluster encryption setting / KMS key |
+| Backup storage | `provider-managed-encryption` or `kms-encrypted-object-store` | bucket/vault encryption policy |
+
+The deployment metadata fields and validation hook are documented in
+`docs/OPERATIONS.md`; `scripts/verify-encryption-at-rest.mjs` refuses to mark a
+deployment verified without applicable control evidence.
+
+**Residual risk:** infrastructure encryption does not protect data while
+decrypted in memory, application logs, operator exports, or lost credentials.
+Treat `SECRET_STORAGE_KEY` and volume/KMS keys as separate controls; rotating
+one does not rotate the other. Backups remain encrypted only while their
+provider policy and KMS key are intact.
+
+**Incident procedure:** if at-rest evidence is missing or a volume/backup is
+exposed, mark the deployment unverified, stop new reveals, rotate
+`SECRET_STORAGE_KEY` and the affected storage key, re-encrypt/restore from a
+known-good encrypted backup, and record the findings in the audit log. Never
+log raw preimages or raw client addresses during the response.
+
+---
+
 ## Retention Classes and Cleanup Verification (#1134)
 
 `coordinator/src/retention/retention-policy.ts` is the authoritative mapping

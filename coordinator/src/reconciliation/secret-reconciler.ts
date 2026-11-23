@@ -170,12 +170,18 @@ export class SecretReconciler {
       const verification = verifyRecoveryRecord(record, orderSnapshot, validatePreimage);
       const mismatch = record.preimage !== preimage || record.txHash !== txHash;
       if (!verification.ok || mismatch) {
+        const reason = verification.ok ? "mismatched_record" : verification.reason;
+        if (reason === "invalid_preimage") {
+          secretRecoveryOutcomeTotal.inc({ outcome: "invalid_preimage" });
+          this.log.warn(
+            { publicId: order.publicId, orderId, hashlock: order.hashlock },
+            "SecretReconciler: recovered preimage does not match hashlock — rejected",
+          );
+          return "invalid_preimage";
+        }
         secretRecoveryOutcomeTotal.inc({ outcome: "unauthorized_recovery" });
         this.log.warn(
-          {
-            ...redactedRecoveryContext(record, orderSnapshot),
-            reason: verification.ok ? "mismatched_record" : verification.reason,
-          },
+          { ...redactedRecoveryContext(record, orderSnapshot), reason },
           "SecretReconciler: recovery record rejected before persistence",
         );
         return "unauthorized_recovery";

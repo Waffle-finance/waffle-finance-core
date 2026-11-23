@@ -2,12 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import pino from "pino";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { resolve } from "node:path";
-import { openDatabase } from "../src/persistence/db.js";
-import { OrdersRepository } from "../src/persistence/orders-repo.js";
-import { OrderService } from "../src/services/order-service.js";
 import { SecretReconciler } from "../src/reconciliation/secret-reconciler.js";
 import { verifyRecoveryRecord } from "../src/reconciliation/recovery-authorization.js";
 
@@ -99,33 +93,15 @@ describe("secret recovery authorization and integrity (#1137)", () => {
   });
 
   it("persists a valid authorized recovery without leaking the preimage to logs", async () => {
-    const dir = mkdtempSync(resolve(tmpdir(), "wf-recovery-auth-"));
-    const db = await openDatabase(`file:${dir}/test.db`);
-    const orders = new OrderService(new OrdersRepository(db), pino({ level: "silent" }));
-    const publicId = (await orders.announce({
-      direction: "eth_to_xlm",
-      hashlock: HASHLOCK,
-      srcChain: "ethereum",
-      srcAddress: "0x1111111111111111111111111111111111111111",
-      srcAsset: "native",
-      srcAmount: "1000000000000000000",
-      srcSafetyDeposit: "1000000000000000",
-      dstChain: "stellar",
-      dstAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422",
-      dstAsset: "native",
-      dstAmount: "100000000",
-    })).publicId;
-    await orders.recordSrcLock({ publicId, orderId: "10", txHash: TX, blockNumber: 100, timelock: 9999 });
-
+    const orders = makeOrderStub();
     const { log, lines } = makeLogger();
-    const reconciler = new SecretReconciler({} as any, orders, log);
+    const reconciler = new SecretReconciler({} as any, orders as any, log);
     expect(await reconciler._recoverOneOrder("10", PREIMAGE, TX, makeRecord())).toBe("recovered");
-    expect((await orders.get(publicId))?.preimage).toBe(PREIMAGE);
+    expect(orders.recordSecret).toHaveBeenCalledWith("pub-1", PREIMAGE, TX, null, "secret_reconciler");
 
     const output = lines.join("");
     expect(output).not.toContain(PREIMAGE);
     expect(output).not.toContain(PREIMAGE.slice(2));
     expect(output).toContain(TX);
-    db.close();
   });
 });

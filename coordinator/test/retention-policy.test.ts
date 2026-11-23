@@ -1,9 +1,19 @@
 import { describe, it, expect } from "vitest";
-import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+// The coordinator uses Node's built-in SQLite driver (node:sqlite).
+const require = createRequire(import.meta.url);
+const { DatabaseSync: Database } = require("node:sqlite") as {
+  DatabaseSync: new (path: string) => import("../src/retention/retention-policy.js").RetentionDb & {
+    exec(sql: string): void;
+    close(): void;
+    prepare(sql: string): any;
+  };
+};
 import {
   RETENTION_POLICY,
   runRetentionCleanup,
@@ -13,7 +23,9 @@ import { redactSensitiveFields } from "../src/sensitive/sensitive-fields.js";
 
 const NOW = 1_800_000_000;
 
-function freshDb(): Database.Database {
+type TestDb = InstanceType<typeof Database>;
+
+function freshDb(): TestDb {
   const dir = mkdtempSync(resolve(tmpdir(), "wf-retention-"));
   const db = new Database(join(dir, "test.db"));
   db.exec(`
@@ -33,7 +45,7 @@ function freshDb(): Database.Database {
   return db;
 }
 
-function seed(db: Database.Database): void {
+function seed(db: TestDb): void {
   const insert = db.prepare(
     "INSERT INTO orders (id, public_id, status, preimage, preimage_enc_version, archived_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
@@ -54,7 +66,7 @@ function seed(db: Database.Database): void {
     .run("eth:OrderCreated:new:1", NOW - 1 * 86400);
 }
 
-function row(db: Database.Database, sql: string, ...params: unknown[]): any {
+function row(db: TestDb, sql: string, ...params: unknown[]): any {
   return db.prepare(sql).get(...params);
 }
 
@@ -117,7 +129,7 @@ describe("sensitive-data retention policy (#1134)", () => {
     expect(report.executedAt).toBe(NOW);
     expect(report.entries.every((e) => e.cutoff <= NOW && e.inspected >= 0 && e.retained >= 0)).toBe(true);
 
-    const remaining = db.prepare("SELECT public_id AS publicId, preimage, event_type FROM orders").all();
+    const remaining = db.prepare("SELECT public_id AS publicId, preimage FROM orders").all();
     const exportJson = JSON.stringify(redactSensitiveFields(remaining));
     expect(exportJson).not.toContain("deadbeef");
     expect(JSON.stringify(report)).not.toContain("deadbeef");
