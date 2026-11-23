@@ -742,3 +742,318 @@ Check on-call runbook
 - [Alert Rules](./coordinator-alerts.yml) - Prometheus alert definitions
 - [Metrics Handbook](../../README.md#metrics) - All coordinator metrics
 - [Soroban Admin Key Rotation](#soroban-admin-key-rotation) - Admin authority rotation procedure (also required in release and mainnet readiness checklists)
+
+
+---
+
+### Alert: ReconciliationProgressStale
+
+**Symptom**: Reconciliation has not completed successfully within operational limit (7 min)
+
+**Checklist**:
+
+- [ ] **Check reconciliation success timestamp**
+  ```
+  coordinator_reconciliation_last_success_timestamp_seconds
+  ```
+  Compare to current time to verify staleness
+
+- [ ] **Check RPC health for all chains**
+  ```bash
+  # Ethereum
+  curl -X POST $ETH_RPC_URL -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+  
+  # Soroban
+  curl $SOROBAN_RPC_URL/health
+  
+  # Solana
+  curl $SOLANA_RPC_URL -X POST \
+    -d '{"jsonrpc":"2.0","method":"getHealth","id":1}'
+  ```
+
+- [ ] **Check cursor age and backlog**
+  ```
+  coordinator_reconciliation_gap_blocks
+  increase(coordinator_reconciliation_events_replayed_total[1h])
+  ```
+
+- [ ] **Review coordinator logs for reconciliation errors**
+  ```bash
+  grep "reconciliation run" /var/log/coordinator.log | tail -20
+  grep "reconciler:" /var/log/coordinator.log | grep -i error | tail -10
+  ```
+
+- [ ] **Verify database connectivity**
+  ```bash
+  # For PostgreSQL
+  psql $DATABASE_URL -c "SELECT 1;"
+  
+  # Check for long-running transactions
+  psql $DATABASE_URL -c "SELECT pid, now() - query_start AS duration, query FROM pg_stat_activity WHERE state = 'active' ORDER BY duration DESC;"
+  ```
+
+**Resolution**:
+
+1. If RPC is unhealthy: Wait for RPC to recover or switch to backup endpoint
+2. If database is locked: Identify and kill blocking transaction
+3. If coordinator logs show errors: Address the specific error code (see error taxonomy)
+4. If persists > 10 min: Restart coordinator
+   ```bash
+   docker restart wafflefinance-coordinator
+   # or
+   kubectl rollout restart deployment/coordinator
+   ```
+5. Monitor reconciliation success metric after restart to confirm recovery
+
+---
+
+### Alert: DbPoolSaturation
+
+**Symptom**: Database connection pool near saturation (>90% utilization)
+
+**Checklist**:
+
+- [ ] **Check pool metrics**
+  ```
+  coordinator_db_pool_active_connections
+  coordinator_db_pool_idle_connections
+  coordinator_db_pool_total_connections
+  ```
+
+- [ ] **Check pool wait time**
+  ```
+  histogram_quantile(0.95, rate(coordinator_db_pool_wait_duration_seconds_bucket[5m]))
+  ```
+
+- [ ] **Identify slow queries**
+  ```
+  coordinator_db_query_category_duration_seconds
+  coordinator_db_named_query_duration_seconds
+  ```
+
+- [ ] **Check for long-running transactions**
+  ```bash
+  # PostgreSQL
+  psql $DATABASE_URL -c "
+    SELECT pid, usename, application_name, state, 
+           now() - query_start AS duration, query
+    FROM pg_stat_activity
+    WHERE state != 'idle'
+    ORDER BY duration DESC
+    LIMIT 10;
+  "
+  ```
+
+- [ ] **Review database resource usage**
+  ```bash
+  # CPU and memory
+  top -p $(pgrep postgres)
+  
+  # Disk I/O
+  iostat -x 1 5
+  ```
+
+**Resolution**:
+
+1. **If wait time is high but queries are fast** → Pool too small
+   - Increase pool size in DATABASE_URL connection string
+   - Example: `postgresql://user:pass@host/db?max_pool_size=20`
+   - Restart coordinator after config change
+
+2. **If queries are slow (>100ms p95)** → Query optimization needed
+   - Identify slow category from `coordinator_db_query_category_duration_seconds`
+   - Review query plans and add missing indexes
+   - Consider archival or partitioning for large tables
+
+3. **If long-running transactions exist** → Kill blocking queries
+   ```bash
+   # PostgreSQL
+   psql $DATABASE_URL -c "SELECT pg_terminate_backend(<pid>);"
+   ```
+
+4. **If database CPU/disk is saturated** → Scale database resources
+   - Vertical scaling: increase CPU/memory
+   - Consider read replicas for query load distribution
+
+---
+
+### Alert: DbPoolWaitTimeHigh
+
+**Symptom**: Queries waiting >100ms (p95) for available database connections
+
+**Checklist**:
+
+- [ ] **Distinguish pool saturation from slow queries**
+  ```
+  # If pool utilization is high → pool too small
+  coordinator_db_pool_active_connections / coordinator_db_pool_total_connections
+  
+  # If query duration is normal → pool saturation
+  coordinator_db_query_category_duration_seconds
+  ```
+
+- [ ] **Check for connection leaks**
+  ```bash
+  # Count connections by state (PostgreSQL)
+  psql $DATABASE_URL -c "
+    SELECT state, count(*) 
+    FROM pg_stat_activity 
+    WHERE datname = current_database()
+    GROUP BY state;
+  "
+  ```
+
+**Resolution**:
+
+- See DbPoolSaturation runbook above for detailed steps
+- If pool has idle connections but wait time is high → investigate coordinator connection handling logic
+
+---
+
+### Alert: DbQueryCategoryLatencyHigh
+
+**Symptom**: Specific query category experiencing high latency (p95 >250ms)
+
+**Checklist**:
+
+- [ ] **Identify slow category**
+  ```
+  topk(5, histogram_quantile(0.95, 
+    rate(coordinator_db_query_category_duration_seconds_bucket[5m])) 
+    by (category))
+  ```
+
+- [ ] **Review query plans for the category**
+  ```bash
+  # For PostgreSQL, enable auto_explain
+  psql $DATABASE_URL -c "
+    ALTER SYSTEM SET auto_explain.log_min_duration = 100;
+    ALTER SYSTEM SET auto_explain.log_analyze = true;
+    SELECT pg_reload_conf();
+  "
+  
+  # Check logs for EXPLAIN output
+  tail -f /var/log/postgresql/postgresql.log | grep EXPLAIN
+  ```
+
+- [ ] **Check table statistics**
+  ```bash
+  # PostgreSQL
+  psql $DATABASE_URL -c "
+    SELECT schemaname, tablename, last_analyze, last_autoanalyze
+    FROM pg_stat_user_tables
+    ORDER BY last_analyze NULLS FIRST;
+  "
+  ```
+
+**Resolution**:
+
+1. **For order_scan category** → Add indexes or optimize scan predicates
+2. **For maintenance category** → Review cleanup query batch sizes
+3. **If statistics are stale** → Run ANALYZE
+   ```bash
+   psql $DATABASE_URL -c "ANALYZE orders;"
+   ```
+4. **If table has grown large** → Consider partitioning or archival strategy
+
+---
+
+### Alert: ErrorRateHigh / RpcErrorRateHigh / DatabaseErrorRateHigh
+
+**Symptom**: Elevated error rate in a specific component or error code category
+
+**Checklist**:
+
+- [ ] **Review error breakdown by code**
+  ```
+  topk(10, rate(coordinator_errors_total[5m])) by (code, component)
+  ```
+
+- [ ] **Check error taxonomy reference** (see `coordinator/src/errors.ts`)
+  - **1xxx**: Database/persistence errors
+  - **2xxx**: RPC/chain connectivity errors
+  - **3xxx**: Validation errors
+  - **4xxx**: Workflow/order processing errors
+  - **5xxx**: External service errors
+  - **9xxx**: Internal errors
+
+- [ ] **Review recent error logs**
+  ```bash
+  # Errors with stable codes
+  grep '"code":' /var/log/coordinator.log | tail -50
+  
+  # By component
+  grep '"component":"reconciler"' /var/log/coordinator.log | grep error | tail -20
+  ```
+
+**Resolution by error category**:
+
+1. **RPC errors (2xxx)**
+   - Check RPC endpoint health (see ReconciliationProgressStale runbook)
+   - If RPC_RATE_LIMIT → reduce polling frequency or upgrade RPC plan
+   - If RPC_AUTH_FAILED → verify API keys are valid and not expired
+
+2. **Database errors (1xxx)**
+   - If DB_CONNECTION_FAILED → verify database is running and accessible
+   - If DB_DEADLOCK → review transaction patterns and reduce lock contention
+   - If DB_QUERY_TIMEOUT → see DbQueryCategoryLatencyHigh runbook
+
+3. **Validation errors (3xxx)**
+   - Review recent requests in application logs
+   - Identify common patterns in rejected inputs
+   - If rate is sustained → may indicate client bug or attack
+
+4. **Workflow errors (4xxx)**
+   - If ORDER_NOT_FOUND → expected for replayed events (normal)
+   - If RECONCILIATION_CONFLICT → review chain/DB state consistency
+   - If SECRET_MISSING_SRC_LOCK → check listener health and event processing
+
+5. **Internal errors (9xxx)**
+   - Review stack traces in logs
+   - Open incident ticket — indicates code bug
+   - Apply immediate mitigation (restart if needed), fix in next release
+
+---
+
+### Dashboard Interpretation Thresholds
+
+**Order Age by State** (Panel IDs 18-23):
+
+- **Announced state**
+  - Green: <50 orders
+  - Yellow: 50-200 orders
+  - Red: >200 orders
+  - *Action*: If red, check listener lag and reconciliation health
+
+- **Src Locked state**
+  - Green: <30 orders
+  - Yellow: 30-100 orders
+  - Red: >100 orders
+  - *Action*: If red, check secret reveal processing and RPC health
+
+- **Secret Revealed state**
+  - Green: <20 orders
+  - Yellow: 20-50 orders
+  - Red: >50 orders
+  - *Action*: If red, check destination chain listener and claim processing
+
+**DB Pool Utilization** (Panel ID 24):
+
+- Idle connections should remain >10% of total pool
+- If idle drops to 0 for >5 minutes → pool saturation
+- Action: Increase pool size or optimize slow queries
+
+**Reconciliation Progress** (Panel ID 27):
+
+- Time since last success should be <420s (7 minutes)
+- Yellow threshold: 300s (5 minutes)
+- Red threshold: 420s (7 minutes)
+- Action: See ReconciliationProgressStale runbook
+
+**Error Rate** (Panel ID 28):
+
+- Normal baseline: <0.1 errors/sec per component
+- Yellow threshold: 0.5 errors/sec
+- Red threshold: 1 error/sec
+- Action: See ErrorRateHigh runbook
