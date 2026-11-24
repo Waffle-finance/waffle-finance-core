@@ -66,6 +66,7 @@ import {
   reconciliationRuns,
   reconciliationErrors,
   reconciliationLastRun,
+  reconciliationLastSuccessTimestamp,
   reconciliationEventsReplayed,
   reconciliationEventsSkipped,
   reconciliationConflicts,
@@ -77,6 +78,7 @@ import {
   sorobanDecodeErrors,
   workflowDispatchDecisions,
 } from "../metrics.js";
+import { classifyError, recordError, ErrorCode } from "../errors.js";
 import { isTerminal } from "../state-machine/order-machine.js";
 import { validatePreimage } from "./secret-reconciler.js";
 import {
@@ -313,7 +315,9 @@ export class Reconciler {
     try {
       replayed += await this.reconcileEthereum();
     } catch (err) {
-      this.log.error({ err, chain: "ethereum" }, "reconciler: Ethereum chain run failed");
+      const code = classifyError(err);
+      recordError(code, 'reconciler');
+      this.log.error({ err, chain: "ethereum", code }, "reconciler: Ethereum chain run failed");
       reconciliationChainErrors.inc({ chain: "ethereum" });
       runOk = false;
     }
@@ -321,7 +325,9 @@ export class Reconciler {
     try {
       replayed += await this.reconcileSoroban();
     } catch (err) {
-      this.log.error({ err, chain: "soroban" }, "reconciler: Soroban chain run failed");
+      const code = classifyError(err);
+      recordError(code, 'reconciler');
+      this.log.error({ err, chain: "soroban", code }, "reconciler: Soroban chain run failed");
       reconciliationChainErrors.inc({ chain: "soroban" });
       runOk = false;
     }
@@ -329,7 +335,9 @@ export class Reconciler {
     try {
       replayed += await this.reconcileSolana();
     } catch (err) {
-      this.log.error({ err, chain: "solana" }, "reconciler: Solana chain run failed");
+      const code = classifyError(err);
+      recordError(code, 'reconciler');
+      this.log.error({ err, chain: "solana", code }, "reconciler: Solana chain run failed");
       reconciliationChainErrors.inc({ chain: "solana" });
       runOk = false;
     }
@@ -360,6 +368,7 @@ export class Reconciler {
 
     if (runOk) {
       reconciliationRuns.inc({ result: "success" });
+      reconciliationLastSuccessTimestamp.set(Date.now() / 1000);
     } else {
       reconciliationRuns.inc({ result: "failure" });
       reconciliationErrors.inc();
