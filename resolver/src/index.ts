@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { runCommand } from "./commands/run.js";
-import { configSummaryCommand } from "./commands/config-summary.js;
+import { configSummaryCommand } from "./commands/config-summary.js";
 import { registerCommand, statusCommand, unregisterCommand } from "./commands/register.js";
 
 const program = new Command();

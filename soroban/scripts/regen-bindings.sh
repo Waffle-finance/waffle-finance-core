@@ -9,12 +9,20 @@
 #
 # Usage:
 #   ./scripts/regen-bindings.sh [contract_id] [output_dir]
+#   ./scripts/regen-bindings.sh --spec <spec.json> [output_dir]
 #
 # Inputs (positional arguments take precedence over the environment):
 #   contract_id    Deployed HTLC contract ID (default: $SOROBAN_HTLC_TESTNET)
 #   output_dir     Bindings output directory
 #                  (default: $SOROBAN_BINDINGS_OUTPUT, then
 #                  ../packages/sdk/src/soroban/htlc-bindings)
+#
+# Offline / spec mode:
+#   --spec <spec.json>   Generate bindings from a committed contract spec
+#                        (JSON) instead of querying a live network. No
+#                        deployment credentials or RPC access are required.
+#                        This is the mode used by the drift check
+#                        (scripts/check-soroban-bindings-drift.mjs).
 #
 # Environment:
 #   SOROBAN_HTLC_TESTNET     HTLC contract ID, read from the repo-root .env
@@ -23,14 +31,28 @@
 #   SOROBAN_RPC_URL          Optional custom Soroban RPC endpoint. When set,
 #                            it is used instead of the CLI's --network preset.
 #   SOROBAN_BINDINGS_OUTPUT  Optional override for the output directory.
+#   SOROBAN_CONTRACT_SPEC    Optional path to a contract spec JSON used when
+#                            --spec is not passed on the command line.
 #
 # Requirements:
 #   - stellar-cli on PATH (`cargo install --locked stellar-cli`)
-#   - A deployed HTLC contract ID for the selected network
+#   - A deployed HTLC contract ID for the selected network, or a contract
+#     spec JSON when running in --spec mode
+#
+# Regeneration procedure (maintainers):
+#   1. After changing the contract interface, rebuild the wasm and export its
+#      spec (e.g. `stellar contract bindings typescript --wasm <wasm> ...` or
+#      `stellar contract spec ...`) into a committed spec file.
+#   2. Run `./scripts/regen-bindings.sh --spec <spec.json>` to rewrite the
+#      committed bindings under packages/sdk/src/soroban/htlc-bindings.
+#   3. Run `node scripts/check-soroban-bindings-drift.mjs` (also wired into
+#      preflight/CI) to confirm the committed bindings match the spec.
+#   4. Commit the spec and the regenerated bindings together.
 #
 # Exit codes:
 #   0  bindings regenerated
 #   1  a prerequisite is missing or the generator failed
+=======
 
 set -euo pipefail
 
@@ -62,8 +84,40 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 NETWORK=${SOROBAN_NETWORK:-testnet}
-CONTRACT_ID=${1:-${SOROBAN_HTLC_TESTNET:-}}
-OUTPUT_DIR=${2:-${SOROBAN_BINDINGS_OUTPUT:-$REPO_ROOT/packages/sdk/src/soroban/htlc-bindings}}
+SPEC_FILE=""
+POSITIONAL=()
+
+# Parse arguments: --spec <file> selects offline spec-based generation; all
+# other arguments are treated as the legacy positional contract_id/output_dir.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --spec)
+            [[ $# -ge 2 ]] || { echo "ERROR: --spec requires a file argument" >&2; exit 1; }
+            SPEC_FILE=$2
+            shift 2
+            ;;
+        --spec=*)
+            SPEC_FILE=${1#--spec=}
+            shift
+            ;;
+        --)
+            shift
+            POSITIONAL+=("$@")
+            break
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$SPEC_FILE" && -n "${SOROBAN_CONTRACT_SPEC:-}" ]]; then
+    SPEC_FILE=$SOROBAN_CONTRACT_SPEC
+fi
+
+CONTRACT_ID=${POSITIONAL[0]:-${SOROBAN_HTLC_TESTNET:-}}
+OUTPUT_DIR=${POSITIONAL[1]:-${SOROBAN_BINDINGS_OUTPUT:-$REPO_ROOT/packages/sdk/src/soroban/htlc-bindings}}
 
 fail() {
     echo "ERROR: $*" >&2
@@ -83,12 +137,16 @@ case "$NETWORK" in
     *) fail "SOROBAN_NETWORK must be 'testnet' or 'mainnet' (got '$NETWORK')." ;;
 esac
 
-if [[ -z "$CONTRACT_ID" ]]; then
-    fail "No HTLC contract ID supplied. Pass it as the first argument or set SOROBAN_HTLC_TESTNET in .env."
-fi
+if [[ -n "$SPEC_FILE" ]]; then
+    [[ -f "$SPEC_FILE" ]] || fail "Contract spec file '$SPEC_FILE' does not exist."
+else
+    if [[ -z "$CONTRACT_ID" ]]; then
+        fail "No HTLC contract ID supplied. Pass it as the first argument, use --spec <file>, or set SOROBAN_HTLC_TESTNET in .env."
+    fi
 
-if [[ ! "$CONTRACT_ID" =~ ^C[A-Z2-7]{55}$ ]]; then
-    fail "'$CONTRACT_ID' is not a valid Soroban contract ID (expected a 56-character C... address)."
+    if [[ ! "$CONTRACT_ID" =~ ^C[A-Z2-7]{55}$ ]]; then
+        fail "'$CONTRACT_ID' is not a valid Soroban contract ID (expected a 56-character C... address)."
+    fi
 fi
 
 OUTPUT_PARENT=$(dirname "$OUTPUT_DIR")
@@ -96,21 +154,36 @@ OUTPUT_PARENT=$(dirname "$OUTPUT_DIR")
     "Output parent directory '$OUTPUT_PARENT' does not exist. Run this script from a full repository checkout."
 
 # ── Generate ─────────────────────────────────────────────────────────────────
-ARGS=(contract bindings typescript \
-    --contract-id "$CONTRACT_ID" \
-    --output-dir "$OUTPUT_DIR")
+if [[ -n "$SPEC_FILE" ]]; then
+    # Offline mode: generate from a committed contract spec. No network access
+    # or deployment credentials are required.
+    ARGS=(contract bindings typescript \
+        --contract-id "${CONTRACT_ID:-$(basename "$SPEC_FILE" .json)}" \
+        --output-dir "$OUTPUT_DIR" \
+        --spec "$SPEC_FILE")
 
-if [[ -n "${SOROBAN_RPC_URL:-}" ]]; then
-    ARGS+=(--rpc-url "$SOROBAN_RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE")
+    echo "Regenerating TypeScript bindings (offline spec mode)"
+    echo "  spec:   $SPEC_FILE"
+    echo "  output: $OUTPUT_DIR"
+
+    stellar "${ARGS[@]}"
 else
-    ARGS+=(--network "$NETWORK")
+    ARGS=(contract bindings typescript \
+        --contract-id "$CONTRACT_ID" \
+        --output-dir "$OUTPUT_DIR")
+
+    if [[ -n "${SOROBAN_RPC_URL:-}" ]]; then
+        ARGS+=(--rpc-url "$SOROBAN_RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE")
+    else
+        ARGS+=(--network "$NETWORK")
+    fi
+
+    echo "Regenerating TypeScript bindings"
+    echo "  network:  $NETWORK"
+    echo "  contract: $CONTRACT_ID"
+    echo "  output:   $OUTPUT_DIR"
+
+    stellar "${ARGS[@]}"
 fi
-
-echo "Regenerating TypeScript bindings"
-echo "  network:  $NETWORK"
-echo "  contract: $CONTRACT_ID"
-echo "  output:   $OUTPUT_DIR"
-
-stellar "${ARGS[@]}"
 
 echo "Bindings regenerated in $OUTPUT_DIR"

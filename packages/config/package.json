@@ -22,7 +22,9 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "docs:config": "tsx scripts/generate-config-reference.ts",
+    "docs:config:check": "tsx scripts/generate-config-reference.ts --check"
   },
   "dependencies": {
     "zod": "^3.23.8"
@@ -36,6 +38,7 @@
     "@stellar/stellar-sdk": "^13.0.0",
     "@types/node": "^22.10.0",
     "dotenv": "^16.4.5",
+    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "viem": "^2.21.0",
     "vitest": "^2.1.0"

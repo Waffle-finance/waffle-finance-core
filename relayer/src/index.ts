@@ -39,6 +39,7 @@ import {
   orderQueueDepth,
 } from './metrics.js';
 import { validateRelayerStartup, formatStartupErrors } from './config-validator.js';
+import { validateEnvironment, formatValidationErrors } from '@wafflefinance/config';
 import { configureSitePresence } from './utils/site-presence.js';
 import { needsChainMonitoring } from './utils/order-poll-utils.js';
 import { metricsRouter } from './routes/metrics.js';
@@ -61,7 +62,6 @@ export const RELAYER_CONFIG = {
   },
 };
 
-import { validateRelayerStartup, formatStartupErrors } from './config-validator.js';
 import { assertStartupDependencies, logStartupTransition } from './startup-health-check.js';
 logger.info({ network: DEFAULT_NETWORK_MODE }, 'Default network mode');
 logger.info(
@@ -105,6 +105,24 @@ async function initializeRelayer() {
   
   // Validate configuration
   validateConfig();
+
+  // Cross-field environment validation (network mode vs chain ID, contract
+  // addresses, secret/address pairings, etc.). Runs before any listener binds
+  // a port so mismatches surface immediately with a redacted, structured list.
+  const envErrors = validateEnvironment({
+    ...process.env,
+    NETWORK: DEFAULT_NETWORK_MODE,
+    ETHEREUM_NETWORK: RELAYER_CONFIG.ethereum.network,
+    STELLAR_NETWORK: RELAYER_CONFIG.stellar.network,
+    ETHEREUM_CONTRACT_ADDRESS: RELAYER_CONFIG.ethereum.contractAddress,
+    ESCROW_FACTORY_ADDRESS: RELAYER_CONFIG.ethereum.escrowFactoryAddress,
+    ETHEREUM_PRIVATE_KEY: RELAYER_CONFIG.ethereum.privateKey,
+    STELLAR_SECRET_KEY: RELAYER_CONFIG.stellar.secretKey,
+  });
+  if (envErrors.length > 0) {
+    logger.error({ errors: envErrors }, 'Environment validation failed — refusing to start');
+    throw new Error(`Relayer environment validation failed:\n${formatValidationErrors(envErrors)}`);
+  }
   logStartupTransition('config_validated');
 
   // ── Startup dependency health checks ─────────────────────────────────────
@@ -137,7 +155,10 @@ async function initializeRelayer() {
     ethereumPrivateKey: RELAYER_CONFIG.ethereum.privateKey,
     stellarSecretKey: RELAYER_CONFIG.stellar.secretKey,
   });
-  if (errs.length > 0) throw new Error(`Relayer startup validation failed:\n${formatStartupErrors(errs)}`);
+  if (errs.length > 0) {
+    logger.error({ errors: errs }, 'Relayer startup validation failed — refusing to start');
+    throw new Error(`Relayer startup validation failed:\n${formatStartupErrors(errs)}`);
+  }
 
   const solanaProgram = process.env.SOLANA_HTLC_PROGRAM ?? process.env.SOLANA_HTLC_PROGRAM_TESTNET ?? process.env.SOLANA_HTLC_PROGRAM_MAINNET;
   solanaPlaceholderMode.set(logSolanaStatus(solanaProgram) === 'placeholder' ? 1 : 0);
@@ -228,6 +249,22 @@ async function initializeRelayer() {
 
   // Phase 6.5: EscrowFactory Event Listening (lazy — first swap order only)
   startChainMonitoring = async () => {
+  // Re-validate before binding the port / starting listeners so a config
+  // mutated after boot cannot slip past the startup gate.
+  const lateErrors = validateEnvironment({
+    ...process.env,
+    NETWORK: DEFAULT_NETWORK_MODE,
+    ETHEREUM_NETWORK: RELAYER_CONFIG.ethereum.network,
+    STELLAR_NETWORK: RELAYER_CONFIG.stellar.network,
+    ETHEREUM_CONTRACT_ADDRESS: RELAYER_CONFIG.ethereum.contractAddress,
+    ESCROW_FACTORY_ADDRESS: RELAYER_CONFIG.ethereum.escrowFactoryAddress,
+    ETHEREUM_PRIVATE_KEY: RELAYER_CONFIG.ethereum.privateKey,
+    STELLAR_SECRET_KEY: RELAYER_CONFIG.stellar.secretKey,
+  });
+  if (lateErrors.length > 0) {
+    logger.error({ errors: lateErrors }, 'Environment validation failed before listener startup');
+    throw new Error(`Relayer environment validation failed:\n${formatValidationErrors(lateErrors)}`);
+  }
   logStartupTransition('listeners_starting', { trigger: 'first_swap_order' });
   console.log('≡ƒöù Chain monitoring starting (swap order in flight)...');
   

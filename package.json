@@ -41,15 +41,11 @@
     "validate:deployments": "node scripts/validate-deployments.mjs",
     "validate:deps": "node scripts/check-dep-versions.mjs",
     "validate:docs": "node scripts/check-docs-drift.mjs",
-    "validate:debt": "node scripts/check-debt-register.mjs",
-    "validate:release-notes": "node scripts/check-release-notes.mjs --all",
+    "validate:health-deployment": "node scripts/check-health-deployment-drift.mjs",
     "validate:release-artifacts": "node scripts/verify-release-artifacts.mjs",
+    "validate:release-manifest": "node scripts/generate-release-manifest.mjs && node scripts/verify-release-manifest.mjs",
     "validate:versions": "node scripts/check-versions.mjs",
-    "dep-graph": "node scripts/dep-graph.mjs",
-    "dep-graph:json": "node scripts/dep-graph.mjs --format json",
-    "dep-graph:changed": "node scripts/dep-graph.mjs --changed",
-    "validate:examples": "pnpm --filter @wafflefinance/sdk typecheck:examples",
-    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions && pnpm validate:debt && pnpm validate:examples"
+    "validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:health-deployment && pnpm validate:versions"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

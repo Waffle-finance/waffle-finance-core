@@ -21,7 +21,18 @@ The invariant suite runs **1 024 fuzz sequences, each 50 operations deep** (conf
 | `warpTime`                 | Advance `block.timestamp` by 1 s – 7 days                |
 | `setReceiverMode`          | Toggle `HTLCReceiverMock` between Accept / Reject / Guzzle |
 
-After every sequence the six invariant functions below are evaluated by Foundry.
+Handlers are **multi-actor**: every action is executed on behalf of one of a
+fixed set of tracked actors (creator, beneficiary, refundAddress, and an
+unrelated third party). Each handler call is routed through a single
+`_callAs(actor, ...)` helper so that `msg.sender` is always one of the tracked
+actors and the ghost ledgers can be updated deterministically. Handlers also
+generate *invalid* lifecycle calls (wrong preimage, premature refund, claim
+after expiry, double claim, double refund, withdraw with zero credit) and
+assert that they revert with the expected custom error — unexpected reverts
+are never swallowed, so a masked failure surfaces as a test failure rather
+than silent accounting drift.
+
+After every sequence the invariant functions below are evaluated by Foundry.
 A single violation fails the entire campaign.
 
 ---
@@ -169,6 +180,62 @@ the combined push/defer payout path.
 
 ---
 
+### 7. Escrow Liability Coverage Invariant
+**Function:** `invariant_liabilitiesCoverLockedAndCredited`
+
+**Property:**
+
+```
+address(htlc).balance
+  >= Σ (order.amount + order.safetyDeposit)  for all Funded native-ETH orders
+   + Σ order.safetyDeposit                   for all Funded ERC20 orders
+   + Σ pendingWithdrawals[actor]              for all tracked actors
+```
+
+This is the *inequality* form of invariant #1 and is asserted after every
+randomized sequence, including sequences that interleave create / claim /
+refund / withdraw across multiple actors and both settlement paths (direct
+push to an EOA or accepting receiver, and pull-payment credit when the
+receiver rejects or guzzles).
+
+**Rationale:** Invariant #1 pins the exact balance; this invariant guarantees
+the weaker but always-required safety property that the contract can always
+honour every outstanding liability. It catches drift where the exact-balance
+check is temporarily masked by a compensating error (e.g. a stranded wei
+offsetting an over-credit) and is the property a deliberately broken
+accounting implementation is expected to violate first.
+
+**Threat model:** Under-collateralised escrow, liabilities credited without a
+matching deposit, payouts that debit the wrong ledger, rounding drift in the
+push/defer split.
+
+---
+
+### 8. Multi-Actor Settlement Path Invariant
+**Function:** `invariant_settlementPathsConsistent`
+
+**Property:**
+
+```
+∀ order with status ∈ {Claimed, Refunded}:
+  (payout was pushed directly to the recipient AND pendingWithdrawals unchanged)
+  ∨ (payout was deferred AND pendingWithdrawals[recipient] increased by exactly
+     the owed amount + safetyDeposit)
+```
+
+Every terminal order must have settled through exactly one path, and the
+chosen path must match the recipient's receiver mode at settlement time.
+
+**Rationale:** The escrow supports both direct push and pull-payment
+settlement. A sequence that mixes actors and receiver modes must never settle
+an order through both paths or through neither. This invariant ties the
+per-order outcome to the per-actor pending-withdrawal ledger.
+
+**Threat model:** Double settlement (push + credit), lost settlement (neither
+path taken), crediting the wrong actor's pending balance.
+
+---
+
 ## Stateful Bug-Finding Scenarios (Concrete Tests)
 
 ### `testStateful_concurrentClaims`
@@ -190,6 +257,41 @@ Validates all input-validation guards:
 - `hashlock == bytes32(0)` → `InvalidHashlock`
 - `timelockSeconds < MIN_TIMELOCK (300)` → `InvalidTimelock`
 - `safetyDeposit < minSafetyDeposit` → `SafetyDepositTooSmall`
+
+### `testStateful_multiActorLifecycleSequence`
+A deterministic replay of a randomized multi-actor sequence (create → claim →
+refund → withdraw across several orders and actors, mixing direct and
+pull-payment settlement). Asserts invariants #1, #7 and #8 hold at every step.
+This is the minimized regression case retained from the documented fuzz seed
+(see below).
+
+### `testBrokenAccounting_liabilityInvariantFails`
+A deliberately broken accounting implementation (a test-only subclass that
+skips crediting `pendingWithdrawals` on the deferred path) is driven through
+the same handler sequence. The test asserts that
+`invariant_liabilitiesCoverLockedAndCredited` (and/or invariant #1) **fails**,
+proving the harness actually detects accounting drift rather than passing
+vacuously. This is the local validation required by the acceptance criteria.
+
+---
+
+## Documented Fuzz Seed
+
+To make failures reproducible, the invariant campaign is run with a documented
+seed. The seed is set via `FOUNDRY_FUZZ_SEED` (and `FOUNDRY_INVARIANT_*` for
+runs/depth) and recorded here:
+
+```
+FOUNDRY_FUZZ_SEED=0x5ca1ab1e
+```
+
+Any minimized regression case discovered under this seed is committed as a
+concrete `testStateful_*` test so it runs on every CI invocation regardless of
+the random seed. To reproduce a specific failing sequence locally:
+
+```bash
+FOUNDRY_FUZZ_SEED=0x5ca1ab1e forge test --match-contract InvariantHTLCEscrowTest -vvv
+```
 
 ---
 
@@ -228,6 +330,12 @@ forge test --match-contract HTLCEscrowSecurityTest -v
 
 # Run with increased fuzz runs for deeper campaign
 FOUNDRY_INVARIANT_RUNS=5000 FOUNDRY_INVARIANT_DEPTH=100 forge test --match-contract InvariantHTLCEscrowTest -v
+
+# Reproduce the documented seed
+FOUNDRY_FUZZ_SEED=0x5ca1ab1e forge test --match-contract InvariantHTLCEscrowTest -vvv
+
+# Validate that the harness detects broken accounting
+forge test --match-test testBrokenAccounting_liabilityInvariantFails -vvv
 ```
 
 ## CI Integration
@@ -252,5 +360,7 @@ depth = 50
 - `runs`: Number of independent random sequences per invariant function.
 - `depth`: Maximum number of handler calls per sequence.
 - Total maximum calls per invariant: `1 024 × 50 = 51 200`.
+- `seed`: Documented as `0x5ca1ab1e` (see *Documented Fuzz Seed* above) so
+  failures are reproducible across machines and CI runs.
 
 Increase `runs` and `depth` locally for deeper pre-deployment security assurance.

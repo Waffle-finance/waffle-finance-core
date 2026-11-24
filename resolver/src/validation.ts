@@ -3,6 +3,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { Keypair, StrKey, rpc } from "@stellar/stellar-sdk";
 import type { Logger } from "pino";
 import type { ResolverConfig } from "./config.js";
+import {
+  validateCrossFieldConfig,
+  formatConfigIssues,
+  type ConfigIssue,
+} from "../../shared/configValidation.js";
 
 /**
  * Strict startup validation for the resolver daemon.
@@ -19,9 +24,13 @@ import type { ResolverConfig } from "./config.js";
 
 /** Thrown when the resolver environment / config is invalid. */
 export class ConfigValidationError extends Error {
-  constructor(message: string) {
+  /** Structured field/reason list. Never contains secret values. */
+  readonly issues: ConfigIssue[];
+
+  constructor(message: string, issues: ConfigIssue[] = []) {
     super(message);
     this.name = "ConfigValidationError";
+    this.issues = issues;
   }
 }
 
@@ -186,6 +195,29 @@ export async function validateResolverConfig(
   opts: ValidateOptions = {}
 ): Promise<void> {
   const { checkConnectivity = true, logger } = opts;
+
+  // 0. Cross-field constraints (network mode vs chain id, required addresses,
+  //    secret formats). Runs first, offline, and aggregates every problem so
+  //    operators can fix them in one pass. Secrets are never echoed.
+  const issues = validateCrossFieldConfig({
+    networkMode: cfg.networkMode,
+    ethereum: {
+      chainId: cfg.ethereum.chainId,
+      rpcUrl: cfg.ethereum.rpcUrl,
+      resolverPrivateKey: cfg.ethereum.resolverPrivateKey,
+      resolverAddress: cfg.ethereum.resolverAddress,
+      escrowAddress: cfg.ethereum.escrowAddress,
+    },
+    soroban: {
+      rpcUrl: cfg.soroban.rpcUrl,
+      networkPassphrase: cfg.soroban.networkPassphrase,
+      resolverSecret: cfg.soroban.resolverSecret,
+      resolverAddress: cfg.soroban.resolverAddress,
+    },
+  });
+  if (issues.length > 0) {
+    throw new ConfigValidationError(formatConfigIssues(issues), issues);
+  }
 
   // 1. Synchronous key-material validation. Always runs; never touches network.
   if (cfg.ethereum.resolverPrivateKey) {
