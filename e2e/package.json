@@ -7,6 +7,7 @@
   "scripts": {
     "test": "vitest run",
     "test:smoke": "vitest run cross-chain.test.ts solana-settlement.test.ts solana-timeout-refund.test.ts lifecycle-cases.test.ts",
+    "test:devnet": "RUN_DEVNET_E2E=true vitest run devnet.test.ts devnet-event-coordinator.test.ts",
     "test:health": "vitest run --config health/vitest.config.ts",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts"
