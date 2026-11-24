@@ -25,6 +25,7 @@ what already exists, and what's still a gap.
 - [Resolver — target coverage](#resolver--target-coverage)
 - [What "honest" means, precisely](#what-honest-means-precisely)
 - [Running the matrix](#running-the-matrix)
+- [Provider failover stub rehearsal](#provider-failover-stub-rehearsal)
 
 ---
 
@@ -213,3 +214,29 @@ chain nodes, no coordinator/relayer/resolver process needs to be running.
 That's a hard requirement, not an implementation convenience: a
 degradation test that itself depends on network conditions can't be a
 deterministic regression guardrail.
+
+---
+
+## Provider failover stub rehearsal
+
+The operator procedure in
+[`RPC_PROVIDER_FAILOVER_RUNBOOK.md`](RPC_PROVIDER_FAILOVER_RUNBOOK.md) must be
+rehearsed against local provider stubs before a real provider switch. Use the
+existing degradation fixtures as the stubs: `buildDegradedFetcher` for the
+coordinator and `global.fetch` stubs for the relayer (see the sections above).
+Add two extra stub responses per chain to the rehearsal:
+
+- **Wrong network:** a well-formed JSON-RPC response whose `eth_chainId`,
+  `getNetwork` passphrase, or `getGenesisHash` does not match the configured
+  chain. Expected result: abort before any config change; no service reports
+  healthy against it.
+- **Right network, degraded:** delayed, reset, and HTTP-200-error envelope
+  responses from the replacement endpoint. Expected result: `/readyz` flaps
+  or degrades for the affected chain, other chains stay isolated, and no
+  cursor reset is recorded.
+
+For each rehearsal record: pre-switch cursor values from `/metrics`, the
+identity-check output, post-switch `/readyz` / `/health` / `/telemetry`
+status, and whether progress resumed without resetting durable cursors. File
+the result with the change ticket. These stubs are local and hermetic; no
+public RPC endpoint is contacted.

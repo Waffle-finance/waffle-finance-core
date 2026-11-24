@@ -20,6 +20,8 @@
     "build:prod": "NODE_ENV=production pnpm -r build",
     "test": "pnpm -r test",
     "test:e2e": "pnpm --filter @wafflefinance/e2e test",
+    "test:smoke:deployment": "node --test scripts/test/deployment-health-smoke.test.mjs",
+    "smoke:deployment": "node scripts/deployment-health-smoke.mjs",
     "lint": "pnpm -r lint",
     "lint:security": "pnpm -r lint && eslint 'coordinator/src/**/*.ts' 'relayer/src/**/*.ts' 'resolver/src/**/*.ts' --rule 'wafflefinance-security/no-secret-logging: error' --no-eslintrc -c .eslintrc.json",
     "lint:security:rules": "pnpm --filter eslint-plugin-wafflefinance-security test",

@@ -112,6 +112,8 @@ the tables below pin down exactly which packages participate in each.
 | `pnpm dev` | `pnpm -r dev` | Long-running dev servers (coordinator, relayer, resolver, dashboard, frontend) |
 | `pnpm clean` | `pnpm -r clean` + removes root `node_modules` | Packages that define `clean` |
 | `pnpm format` / `pnpm format:check` | Prettier write / check across the repo | All TS/TSX/JSON/MD files |
+| `pnpm smoke:deployment` | Probes coordinator/relayer/resolver health after rollout, with redacted diagnostics | Local/stub or deployed service URLs |
+| `pnpm test:smoke:deployment` | Runs the hermetic Node test for the deployment smoke checker | `scripts/test/deployment-health-smoke.test.mjs` |
 | `pnpm validate:commands` | Enforces this command contract | All workspace manifests |
 | `pnpm validate:manifests` | Validates names, versions, and export paths | All workspace manifests |
 | `pnpm validate:deployments` | Validates `deployments.testnet.json` | Deployment records |

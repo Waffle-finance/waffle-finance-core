@@ -99,6 +99,22 @@ As with the other three documents in this set, config assumptions here
 bound port) must stay accurate — see [docs/QUALITY_GATE.md](QUALITY_GATE.md)
 for the contract that keeps documentation like this honest as the code moves.
 
+## Deployment health smoke check (implemented)
+
+`pnpm smoke:deployment` probes `/health` and `/readyz` on all three services
+after a rollout. Service URLs come from `SMOKE_CONFIG` (a JSON file with a
+`services` map) or `COORDINATOR_URL`, `RELAYER_URL`, and `RESOLVER_URL`;
+defaults are localhost ports 3001/3002/3003. `SMOKE_TIMEOUT_MS` bounds each
+probe and `SMOKE_REQUIRED_CHAINS` selects the chains that must be healthy.
+
+The checker validates each payload's `status`, `uptime`, and `checks` fields,
+summarises chain dependencies by check name, and exits nonzero with
+per-service diagnostics when any required dependency is unhealthy. Output only
+includes URL origins (no userinfo, paths, query strings, keys, or full URLs),
+so a failure cannot leak API keys. The hermetic test
+`pnpm test:smoke:deployment` runs the checker against local stubs for the
+all-healthy and failing-chain cases.
+
 ## Status
 
 This document specifies the four target entry points, their pass criteria,

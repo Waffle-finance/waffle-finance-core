@@ -722,6 +722,7 @@ cutover until it exits zero.
 | `coordinator_stale_cleanup_backlog`                 | > 50 for 30m    | Stale-order backlog size (see [`docs/ALERTING.md`](./ALERTING.md)) |
 | `coordinator_stale_cleanup_remaining`               | > 0 for 2h      | Stale orders left unarchived after a run |
 | `coordinator_expired_orders_backlog`               | > 20 for 30m    | Expired orders awaiting refund/failure |
+| `coordinator_event_to_api_freshness_seconds`        | p95 > 60s for 10m | Finalized-event observation to API visibility; see [`EVENT_TO_API_FRESHNESS_SLO.md`](./EVENT_TO_API_FRESHNESS_SLO.md) |
 
 ### Health Check Script
 
