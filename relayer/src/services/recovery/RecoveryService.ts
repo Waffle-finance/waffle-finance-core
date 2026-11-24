@@ -17,6 +17,8 @@ import type { RecoveryOrder as OrderRow, IRecoveryOrchestrator } from './IRecove
 import { getLogger } from '../../logger.js';
 
 import { calculateBackoff } from '../../utils/retry-engine.js';
+import type { RecoveryJobStore } from './RecoveryJobStore.js';
+import type { PersistedRecoveryJob } from './RecoveryJobStore.js';
 
 const log = getLogger().child({ service: 'recovery' });
 
@@ -33,6 +35,12 @@ interface RecoveryRequestRecord extends RecoveryRequest {
 
 export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
   private orchestrator: IRecoveryOrchestrator;
+  /**
+   * Optional durable store for recovery jobs. When set, every state change is
+   * persisted and eligible unfinished jobs are restored on construction so a
+   * restart resumes recovery work without duplicate settlement (#1083).
+   */
+  private readonly jobStore: RecoveryJobStore | null;
   private recoveryRequests: Map<string, RecoveryRequestRecord> = new Map();
   private monitoringInterval: NodeJS.Timeout | null = null;
   private stats: RecoveryStats = {
@@ -45,8 +53,12 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     lastRecoveryAt: 0,
   };
   
-  constructor(orchestrator?: IRecoveryOrchestrator) {
+  constructor(orchestrator?: IRecoveryOrchestrator, jobStore?: RecoveryJobStore | null) {
     this.orchestrator = orchestrator || new RecoveryOrchestrator();
+    this.jobStore = jobStore ?? null;
+    if (this.jobStore) {
+      this.restorePendingJobs();
+    }
   }
   
   /**
@@ -176,6 +188,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     
     this.recoveryRequests.set(requestId, request);
     this.stats.pendingRecoveries++;
+    this._persistJob(request);
     
     this.stats.totalRecoveries++;
     return this.attemptRecovery(request);
@@ -221,6 +234,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     this.stats.lastRecoveryAt = Date.now();
     this.stats.pendingRecoveries = Array.from(this.recoveryRequests.values())
       .filter(r => r.status === 'pending' || r.status === 'in_progress').length;
+    this._persistJob(request);
     this.logRequest(request, result.success ? 'completed' : request.nextAttemptAt !== null ? 'retry_scheduled' : 'stopped');
     return result;
   }
@@ -273,6 +287,7 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
         request.nextAttemptAt = null;
         request.updatedAt = Date.now();
         this.stats.pendingRecoveries = Math.max(0, this.stats.pendingRecoveries - 1);
+        this._persistJob(request);
         this.logRequest(request, 'order_terminal');
         continue;
       }
@@ -415,5 +430,92 @@ export class RecoveryService implements IRecoveryService, RecoverySafetyCheck {
     const current = BigInt(currentTotal);
     const amount = BigInt(newAmount || '0');
     return (current + amount).toString();
+  }
+
+  // -------------------------------------------------------------------------
+  // Durable recovery-job persistence (#1083)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Persist the current state of a recovery job so a restart can resume it.
+   * No-op when no durable store is configured. The order snapshot is redacted
+   * by {@link RecoveryJobStore.save} before it touches disk.
+   */
+  private _persistJob(record: RecoveryRequestRecord): void {
+    if (!this.jobStore) return;
+    this.jobStore.save(this._toPersisted(record));
+  }
+
+  /** Convert an in-memory record into the persisted job shape. */
+  private _toPersisted(record: RecoveryRequestRecord): PersistedRecoveryJob {
+    return {
+      id: record.id,
+      orderId: record.orderId,
+      orderHash: record.orderHash,
+      type: record.type,
+      status: record.status,
+      chain: record.chain,
+      initiator: record.initiator,
+      reason: record.reason,
+      metadata: record.metadata,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      attempts: record.attempts,
+      lastAttemptAt: record.lastAttemptAt,
+      nextAttemptAt: record.nextAttemptAt ?? null,
+      order: record.order,
+      savedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Reconstruct eligible unfinished recovery jobs from the durable store after
+   * a restart.
+   *
+   * An `in_progress` job is reset to `pending` (an interrupted submission must
+   * be retried, never assumed complete) so restart does not produce a second
+   * settlement. Completed / cancelled / requires-review jobs are not resumed.
+   */
+  private restorePendingJobs(): void {
+    if (!this.jobStore) return;
+    const eligible = this.jobStore.loadEligible();
+    if (eligible.length === 0) return;
+
+    for (const job of eligible) {
+      if (this.recoveryRequests.has(job.id)) continue; // already in memory
+      const record: RecoveryRequestRecord = {
+        id: job.id,
+        orderId: job.orderId,
+        orderHash: job.orderHash,
+        type: job.type,
+        status: job.status,
+        chain: job.chain,
+        initiator: job.initiator,
+        reason: job.reason,
+        metadata: job.metadata,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        attempts: job.attempts,
+        lastAttemptAt: job.lastAttemptAt,
+        nextAttemptAt: job.nextAttemptAt,
+        order: job.order,
+      };
+      // An in_progress action was interrupted by the restart. Mark it pending
+      // so it is retried rather than assumed complete — no double settlement.
+      if (record.status === 'in_progress') {
+        record.status = 'pending';
+        record.nextAttemptAt = record.nextAttemptAt ?? Date.now();
+        record.updatedAt = Date.now();
+      }
+      this.recoveryRequests.set(record.id, record);
+      log.info(
+        { requestId: record.id, orderId: record.orderId, status: record.status, attempts: record.attempts },
+        '[recovery] restored unfinished job after restart',
+      );
+    }
+
+    this.stats.pendingRecoveries = Array.from(this.recoveryRequests.values())
+      .filter((r) => r.status === 'pending' || r.status === 'in_progress')
+      .length;
   }
 }
