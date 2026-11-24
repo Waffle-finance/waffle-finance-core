@@ -92,6 +92,7 @@ const ROOT_REQUIRED = {
   'validate:commands': 'validate-commands.mjs',
   'validate:manifests': 'validate-workspace.mjs',
   'validate:deployments': 'validate-deployments.mjs',
+  'validate:release-checks': 'validate-release-checks.mjs',
 };
 
 function loadJson(p) {
@@ -192,6 +193,59 @@ function validateCommands() {
         errors.push(
           `root script "${script}": targets "${target}" script "${targetScript}", which does not exist.`
         );
+      }
+    }
+  }
+
+  // 6. The release-check manifest must stay in sync with the command contract:
+  //    every command it references must exist, and the local release
+  //    verification entry point must be wired into the root pipeline.
+  const releaseChecksPath = 'release-checks.json';
+  if (!fs.existsSync(releaseChecksPath)) {
+    errors.push(
+      `missing ${releaseChecksPath}; it is the single source of truth for release gates ` +
+        `(see docs/RELEASE.md).`
+    );
+  } else {
+    let manifest;
+    try {
+      manifest = loadJson(releaseChecksPath);
+    } catch (err) {
+      errors.push(`${releaseChecksPath} is not valid JSON: ${err.message}`);
+    }
+    if (manifest) {
+      for (const check of manifest.checks || []) {
+        if (!check.command) {
+          errors.push(`${releaseChecksPath}: check "${check.id}" has no command.`);
+          continue;
+        }
+        const [scope, script] = check.command.split(':');
+        if (scope === 'root') {
+          if (!rootScripts[script]) {
+            errors.push(
+              `${releaseChecksPath}: check "${check.id}" references root script ` +
+                `"${script}", which does not exist.`
+            );
+          }
+        } else if (scope === 'package') {
+          const pkg = pkgsByName.get(check.package);
+          if (!pkg) {
+            errors.push(
+              `${releaseChecksPath}: check "${check.id}" references unknown package ` +
+                `"${check.package}".`
+            );
+          } else if (!(pkg.scripts || {})[script]) {
+            errors.push(
+              `${releaseChecksPath}: check "${check.id}" references "${check.package}" ` +
+                `script "${script}", which does not exist.`
+            );
+          }
+        } else {
+          errors.push(
+            `${releaseChecksPath}: check "${check.id}" has unrecognized command scope ` +
+              `"${scope}" (expected "root" or "package").`
+          );
+        }
       }
     }
   }

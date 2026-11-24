@@ -16,6 +16,11 @@ import {
   formatConfigReport,
   type SorobanChainConfigInput,
 } from "./soroban-chain-config.js";
+import {
+  validateCrossFieldConfig,
+  formatCrossFieldReport,
+  type CrossFieldConfigInput,
+} from "./cross-field-validation.js";
 
 /**
  * Traverses up from the current directory to find the nearest .env file.
@@ -140,6 +145,41 @@ export function loadCoordinatorConfig(
   }
 
   const cfg = coordinatorConfigSchema.parse(mapped);
+
+  // ── Cross-field configuration validation ─────────────────────────────────
+  // Runs after schema parsing so that every field has a concrete type, and
+  // before listeners are created so that conflicting combinations (network
+  // mode vs chain ID, missing contract addresses, etc.) fail fast with an
+  // actionable, secret-redacted report.
+  const crossFieldInput: CrossFieldConfigInput = {
+    service: "coordinator",
+    network: cfg.network,
+    ethereum: {
+      chainId: cfg.ethereum.chainId,
+      rpcUrl: cfg.ethereum.rpcUrl,
+      htlcEscrow: cfg.ethereum.htlcEscrow,
+      resolverRegistry: cfg.ethereum.resolverRegistry,
+    },
+    soroban: {
+      rpcUrl: cfg.soroban.rpcUrl,
+      horizonUrl: cfg.soroban.horizonUrl,
+      networkPassphrase: cfg.soroban.networkPassphrase,
+      htlcContract: cfg.soroban.htlcContract,
+      resolverRegistry: cfg.soroban.resolverRegistry,
+    },
+    solana: {
+      rpcUrl: cfg.solana.rpcUrl,
+      programId: cfg.solana.programId,
+    },
+    secrets: {
+      SECRET_STORAGE_KEY: cfg.secretStorageKey,
+    },
+  };
+  const crossFieldResult = validateCrossFieldConfig(crossFieldInput);
+  if (!crossFieldResult.ok) {
+    throw new Error(formatCrossFieldReport(crossFieldResult, "Coordinator"));
+  }
+
   return cfg;
 }
 
@@ -270,6 +310,41 @@ export function loadRelayerConfig(
     );
   }
 
+  // ── Cross-field configuration validation ─────────────────────────────────
+  const relayerCrossFieldInput: CrossFieldConfigInput = {
+    service: "relayer",
+    network: relayCfg.network,
+    ethereum: {
+      chainId: isMainnet ? 1 : 11_155_111,
+      rpcUrl: relayCfg.ethereum.rpcUrl,
+      htlcEscrow: rawEnv[isMainnet ? "ETH_HTLC_ESCROW_MAINNET" : "ETH_HTLC_ESCROW_TESTNET"] ?? null,
+      resolverRegistry:
+        rawEnv[isMainnet ? "ETH_RESOLVER_REGISTRY_MAINNET" : "ETH_RESOLVER_REGISTRY_TESTNET"] ?? null,
+    },
+    soroban: {
+      rpcUrl: rawEnv.SOROBAN_RPC_URL ??
+        (isMainnet ? "https://mainnet.sorobanrpc.com" : "https://soroban-testnet.stellar.org"),
+      horizonUrl: relayCfg.stellar.horizonUrl,
+      networkPassphrase: relayCfg.stellar.networkPassphrase,
+      htlcContract: null,
+      resolverRegistry: null,
+    },
+    solana: {
+      rpcUrl: relayCfg.solana.rpcUrl,
+      programId: relayCfg.solana.programId,
+    },
+    secrets: {
+      RELAYER_PRIVATE_KEY: relayCfg.ethereum.privateKey,
+      RELAYER_STELLAR_SECRET: relayCfg.stellar.secretKey,
+      SOLANA_PRIVATE_KEY: relayCfg.solana.privateKey,
+      ONEINCH_API_KEY: relayCfg.ethereum.fusionApiKey,
+    },
+  };
+  const relayerCrossFieldResult = validateCrossFieldConfig(relayerCrossFieldInput);
+  if (!relayerCrossFieldResult.ok) {
+    throw new Error(formatCrossFieldReport(relayerCrossFieldResult, "Relayer"));
+  }
+
   return relayCfg;
 }
 
@@ -351,6 +426,34 @@ export function loadResolverConfig(
       `Resolver configuration rejected by Soroban/chain contract — ` +
       `${resolverChainResult.errors.length} error(s):\n${details}`
     );
+  }
+
+  // ── Cross-field configuration validation ─────────────────────────────────
+  const resolverCrossFieldInput: CrossFieldConfigInput = {
+    service: "resolver",
+    network: resolverCfg.network,
+    ethereum: {
+      chainId: resolverCfg.ethereum.chainId,
+      rpcUrl: resolverCfg.ethereum.rpcUrl,
+      htlcEscrow: resolverCfg.ethereum.htlcEscrow,
+      resolverRegistry: resolverCfg.ethereum.resolverRegistry,
+    },
+    soroban: {
+      rpcUrl: resolverCfg.soroban.rpcUrl,
+      horizonUrl: resolverCfg.soroban.horizonUrl,
+      networkPassphrase: resolverCfg.soroban.networkPassphrase,
+      htlcContract: resolverCfg.soroban.htlc,
+      resolverRegistry: resolverCfg.soroban.resolverRegistry,
+    },
+    solana: { programId: null },
+    secrets: {
+      RESOLVER_ETH_PRIVATE_KEY: resolverCfg.ethereum.resolverPrivateKey,
+      RESOLVER_STELLAR_SECRET: resolverCfg.soroban.resolverSecret,
+    },
+  };
+  const resolverCrossFieldResult = validateCrossFieldConfig(resolverCrossFieldInput);
+  if (!resolverCrossFieldResult.ok) {
+    throw new Error(formatCrossFieldReport(resolverCrossFieldResult, "Resolver"));
   }
 
   return resolverCfg;

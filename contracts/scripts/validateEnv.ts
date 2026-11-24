@@ -49,6 +49,26 @@ const LIVE_MIN_STAKE_FLOOR = BigInt("1000000000000000000"); // 1e18
 /** Known Hardhat/local network names that bypass live-network checks. */
 const LOCAL_NETWORKS = new Set(["hardhat", "localhost", "local"]);
 
+/**
+ * Networks treated as production for ownership-policy purposes.
+ * Production deployments must supply an explicit, approved owner source.
+ */
+const PRODUCTION_NETWORKS = new Set(["mainnet"]);
+
+/**
+ * Environment variable names checked (in order) for an explicit owner source.
+ * The first non-empty value wins.
+ */
+export const OWNER_ENV_KEYS = ["V2_OWNER", "RESOLVER_REGISTRY_OWNER", "REGISTRY_OWNER"] as const;
+
+/**
+ * Optional env var pointing at an approved governance/multisig configuration
+ * file (JSON). When set, the resolved owner must appear in that file's
+ * `approvedOwners` array.
+ */
+export const OWNER_POLICY_FILE_ENV = "V2_OWNER_POLICY_FILE";
+=======
+
 // ─── Address validation ───────────────────────────────────────────────────────
 
 /**
@@ -78,6 +98,124 @@ export function isZeroAddress(value: string): boolean {
 export function isValidPrivateKey(value: string | undefined): boolean {
   if (!value || value.trim() === "") return false;
   return PRIVATE_KEY_RE.test(value.trim());
+}
+
+// ─── Ownership policy validation ──────────────────────────────────────────────
+
+/**
+ * Returns true if `networkName` is treated as a production network for
+ * ownership-policy enforcement.
+ */
+export function isProductionNetwork(networkName: string): boolean {
+  return PRODUCTION_NETWORKS.has(networkName.toLowerCase());
+}
+
+/**
+ * Resolve the explicitly configured owner address from the environment.
+ * Returns `undefined` when no owner source is configured.
+ */
+export function resolveOwnerAddress(
+  env: Record<string, string | undefined> = process.env as Record<string, string | undefined>
+): string | undefined {
+  for (const key of OWNER_ENV_KEYS) {
+    const value = env[key]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Parse the approved-owner list from an owner policy file's JSON contents.
+ * Accepts either `{ "approvedOwners": [...] }` or a bare array of addresses.
+ * Returns `undefined` if the contents cannot be parsed.
+ */
+export function parseApprovedOwners(contents: string): string[] | undefined {
+  try {
+    const parsed = JSON.parse(contents);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v): v is string => typeof v === "string");
+    }
+    if (parsed && Array.isArray(parsed.approvedOwners)) {
+      return parsed.approvedOwners.filter((v: unknown): v is string => typeof v === "string");
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Validate the ResolverRegistry owner configuration for the target network.
+ *
+ * Production networks require an explicit, valid, non-zero owner address.
+ * When an owner policy file is configured, the owner must be listed as
+ * approved. Testnet/local networks remain permissive: a missing owner is a
+ * warning only, and an EOA owner is allowed.
+ *
+ * Note: EOA-vs-contract detection requires an on-chain `getCode` call and is
+ * performed post-deployment by the deploy script; this function only checks
+ * the static configuration.
+ */
+export function validateOwnerPolicy(
+  env: Record<string, string | undefined>,
+  networkName: string
+): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const isProd = isProductionNetwork(networkName);
+  const owner = resolveOwnerAddress(env);
+
+  if (!owner) {
+    if (isProd) {
+      errors.push(
+        `No explicit owner configured for production network "${networkName}". ` +
+          `Set one of ${OWNER_ENV_KEYS.join(", ")} to an approved multisig address. ` +
+          "Deploying with the deployer key as owner is not permitted on production."
+      );
+    } else {
+      warnings.push(
+        `No explicit owner configured for network "${networkName}"; ` +
+          "the deployer address will be used as owner. Set " +
+          `${OWNER_ENV_KEYS[0]} to override.`
+      );
+    }
+    return { valid: errors.length === 0, errors, warnings };
+  }
+
+  if (!isValidAddress(owner)) {
+    errors.push(
+      `Configured owner "${owner}" is not a valid Ethereum address. ` +
+        "Expected 0x followed by 40 hex characters."
+    );
+    return { valid: false, errors, warnings };
+  }
+
+  if (isZeroAddress(owner)) {
+    errors.push(
+      "Configured owner is the zero address (0x000...0). " +
+        "ResolverRegistry would be deployed with an unusable owner."
+    );
+    return { valid: false, errors, warnings };
+  }
+
+  const policyFile = env[OWNER_POLICY_FILE_ENV]?.trim();
+  if (policyFile) {
+    // The caller is responsible for reading the file; here we only check that
+    // the env var is set so deploy.ts knows to load and verify it.
+    warnings.push(
+      `Owner policy file configured (${OWNER_POLICY_FILE_ENV}=${policyFile}); ` +
+        "deploy.ts will verify the owner is listed in approvedOwners before broadcasting."
+    );
+  } else if (isProd) {
+    warnings.push(
+      `No owner policy file configured (${OWNER_POLICY_FILE_ENV}). ` +
+        "The owner address will be accepted as-is; confirm it is an approved multisig " +
+        "and that it is a contract (not an EOA) before broadcasting."
+    );
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 // ─── RPC URL validation ───────────────────────────────────────────────────────
@@ -262,7 +400,13 @@ export function validateDeployEnv(
     }
   }
 
-  // ── 6. Network / mainnet guard ──────────────────────────────────────────────
+  // ── 6. Owner policy ─────────────────────────────────────────────────────────
+
+  const ownerResult = validateOwnerPolicy(env, networkName);
+  errors.push(...ownerResult.errors);
+  warnings.push(...ownerResult.warnings);
+
+  // ── 7. Network / mainnet guard ──────────────────────────────────────────────
 
   if (networkName === "mainnet") {
     warnings.push(

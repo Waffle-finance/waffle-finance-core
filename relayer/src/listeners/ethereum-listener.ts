@@ -15,15 +15,9 @@ import {
   type NormalizedRelayEvent,
 } from '../events/relay-event.js';
 import { getLogger } from '../logger.js';
+import { HTLC_BRIDGE_ABI, HTLC_EVENT_TOPICS } from '../events/htlc-event-schema.js';
 
 const logger = getLogger().child({ component: 'ethereum-listener' });
-
-// HTLCBridge contract ABI (focusing on OrderCreated event)
-const HTLC_BRIDGE_ABI = [
-  "event OrderCreated(uint256 indexed orderId, address indexed sender, address indexed token, uint256 amount, bytes32 hashLock, uint256 timelock, uint256 feeRate, bool partialFillEnabled)",
-  "event OrderClaimed(uint256 indexed orderId, address indexed claimer, uint256 amount, uint256 totalFilled, bytes32 preimage)",
-  "event OrderRefunded(uint256 indexed orderId, address indexed sender, uint256 refundAmount)"
-];
 
 /** Relay event handler registered via `setRelayEventHandler`. */
 export type RelayEventHandler = (event: NormalizedRelayEvent) => void | Promise<void>;
@@ -212,7 +206,14 @@ export class EthereumEventListener {
       const fromBlock = this.lastProcessedBlock + 1;
       const toBlock = Math.min(head, fromBlock + MAX_BLOCK_WINDOW - 1);
 
-      const filter = this.contract.filters.OrderCreated();
+      // Use the canonical topic0 from the shared event schema so a
+      // signature drift between the deployed contract and this listener
+      // is caught by the compatibility tests rather than silently
+      // producing zero events.
+      const filter = {
+        address: RELAYER_CONFIG.ethereum.contractAddress,
+        topics: [HTLC_EVENT_TOPICS.OrderCreated],
+      };
       const events = await this.contract.queryFilter(filter, fromBlock, toBlock);
 
       for (const ev of events) {
@@ -222,11 +223,23 @@ export class EthereumEventListener {
         // on raw logs (e.g. from a contract that emits a colliding
         // anonymous event).
         if (!('args' in ev) || !ev.args) continue;
-        const args = ev.args as unknown as [
-          bigint, string, string, bigint, string, bigint, bigint, boolean
-        ];
+        // Decode by name rather than positional index so an indexed-field
+        // layout change surfaces as a missing/mismatched arg instead of
+        // silently shifting values into the wrong lifecycle field.
+        const decoded = this.contract.interface.decodeEventLog(
+          'OrderCreated',
+          ev.data,
+          ev.topics,
+        );
         await this.handleOrderCreatedEvent(
-          args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+          decoded.orderId as bigint,
+          decoded.sender as string,
+          decoded.token as string,
+          decoded.amount as bigint,
+          decoded.hashLock as string,
+          decoded.timelock as bigint,
+          decoded.feeRate as bigint,
+          decoded.partialFillEnabled as boolean,
           ev as EventLog
         );
       }

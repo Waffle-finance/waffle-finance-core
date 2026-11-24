@@ -3,6 +3,7 @@ import type { Database } from './persistence/db.js';
 import type { ReconciliationStatus } from './reconciliation/reconciler.js';
 import type { CacheVerificationStatus } from './reconciliation/cache-verifier.js';
 import type { ReadinessCheck } from './server/routes/health.js';
+import type { SorobanTtlReport } from './soroban/ttl-monitor.js';
 import { isSolanaPlaceholder } from './config.js';
 import { validateSchemaVersion, MigrationValidationError } from './persistence/db.js';
 import { FatalStartupError } from './retry.js';
@@ -61,6 +62,17 @@ export interface ReadinessDeps {
    * or a failed verifier run marks the check as ok=false.
    */
   getCacheVerificationStatus?: () => CacheVerificationStatus;
+  /**
+   * When provided, the readiness check will include a `soroban_ttl` entry
+   * derived from the most recent Soroban TTL diagnostic run.
+   *
+   * The check is non-blocking when the diagnostic has never run or when the
+   * RPC was unavailable: it is reported as ok=true with a descriptive detail
+   * so operators can see the state without failing the readiness gate.  Only
+   * state that has crossed the minimum safe TTL threshold marks the check as
+   * ok=false.
+   */
+  getSorobanTtlReport?: () => SorobanTtlReport;
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -161,6 +173,36 @@ function cacheAlignmentCheck(status: CacheVerificationStatus): ReadinessCheck {
 }
 
 /**
+ * Derive a `soroban_ttl` ReadinessCheck from the latest TTL diagnostic report.
+ *
+ * Semantics:
+ *  - Never run yet        → ok=true,  detail="not_run_yet"        (non-blocking)
+ *  - RPC unavailable      → ok=true,  detail="rpc_unavailable"    (non-blocking)
+ *  - Entries below thresh → ok=false, detail="expiring:<n>"       (actionable)
+ *  - All entries safe     → ok=true,  detail="ok"
+ *
+ * The detail string never contains secret material — only counts and a
+ * coarse status — so it is safe to expose on the unauthenticated /readyz
+ * endpoint.
+ */
+function sorobanTtlCheck(report: SorobanTtlReport): ReadinessCheck {
+  if (report.lastRunAt === null) {
+    return { name: 'soroban_ttl', ok: true, detail: 'not_run_yet' };
+  }
+  if (report.rpcUnavailable) {
+    return { name: 'soroban_ttl', ok: true, detail: 'rpc_unavailable' };
+  }
+  if (report.expiring.length > 0) {
+    return {
+      name: 'soroban_ttl',
+      ok: false,
+      detail: `expiring:${report.expiring.length}`,
+    };
+  }
+  return { name: 'soroban_ttl', ok: true, detail: 'ok' };
+}
+
+/**
  * Derive an overall StartupPhase from the list of individual checks.
  *
  * Rules (applied in priority order):
@@ -217,6 +259,7 @@ export function createReadinessChecks({
   timeoutMs = 750,
   getStartupPhase,
   getCacheVerificationStatus,
+  getSorobanTtlReport,
 }: ReadinessDeps): () => Promise<ReadinessCheck[]> {
   return async () => {
     // The Solana RPC probe is skipped when the program ID is a placeholder.
@@ -247,6 +290,13 @@ export function createReadinessChecks({
     // grouped with operational / sync state rather than infrastructure health.
     if (getCacheVerificationStatus) {
       checks.push(cacheAlignmentCheck(getCacheVerificationStatus()));
+    }
+
+    // Soroban TTL check — surfaces expiring contract / order state so
+    // operators can act before ledger-based TTLs lapse.  Non-blocking when
+    // the diagnostic has not run or the RPC is unavailable.
+    if (getSorobanTtlReport) {
+      checks.push(sorobanTtlCheck(getSorobanTtlReport()));
     }
 
     // Inject a synthetic startup_phase check when the caller provides a phase

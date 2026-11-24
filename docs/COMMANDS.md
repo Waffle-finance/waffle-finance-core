@@ -117,6 +117,8 @@ the tables below pin down exactly which packages participate in each.
 | `pnpm validate:deployments` | Validates `deployments.testnet.json` | Deployment records |
 | `pnpm validate:release-artifacts` | Verifies built artifacts exist for every declared export path in publishable packages (`@wafflefinance/sdk`, `@wafflefinance/config`); requires `pnpm build` first | Shared package release readiness |
 | `pnpm validate:versions` | Checks Node and pnpm version consistency across `.nvmrc`, `engines`, `packageManager`, CI workflows, and dev container | Platform tooling alignment |
+| `pnpm validate:config-reference` | Regenerates the configuration reference from the typed schemas and fails if the committed output is stale (check mode) | Configuration documentation |
+| `pnpm validate:release-checks` | Verifies every command in the release-check manifest exists and that CI workflows invoke the required local gates | Release gate manifest |
 | `pnpm health:check` | Smoke-tests a locally running coordinator (`GET /health`) | Coordinator runtime |
 
 `pnpm -r build` ordering is dependency-aware; `@wafflefinance/sdk` and
@@ -227,7 +229,18 @@ TypeScript-bindings generation.
   production bundle.
 - **Release:** `scripts/verify-release-locally.sh` (or `.ps1` on Windows) runs
   the full pre-release verification: Hardhat + Foundry compile/test parity,
-  SDK build/export checks, and checksums.
+  SDK build/export checks, and checksums. The authoritative list of required
+  release checks lives in the release-check manifest
+  ([`scripts/release-checks.json`](../scripts/release-checks.json)); do not
+  duplicate it here. `pnpm validate:release-checks` fails if a manifest
+  command is missing or a CI workflow stops invoking a required local gate.
+  Network-dependent checks are marked conditional in the manifest and report
+  when they are skipped.
+- **Configuration:** the runtime configuration reference
+  ([`docs/CONFIG_REFERENCE.md`](./CONFIG_REFERENCE.md)) is generated from the
+  typed schemas in `packages/config` and package-local parsers. Regenerate it
+  with `pnpm generate:config-reference`; `pnpm validate:config-reference`
+  fails when the committed output drifts from the schemas.
 
 ## How CI enforces this
 
@@ -276,7 +289,9 @@ still need to verify locally before opening one.
 | **Hardhat contract tests** (Node driver) | `pnpm --filter @wafflefinance/contracts test` | **Local only — no CI job** | — |
 | **Deployment manifest validation** | `pnpm validate:deployments` | **Local only — no CI job** | — |
 | **Doc-drift + stale links** | `pnpm validate:docs` | **Local only — no CI job** | — |
-| **Release verification** | `scripts/verify-release-locally.sh` | **Local only — no CI job** | — |
+| **Config reference drift** | `pnpm validate:config-reference` | **Local only — no CI job** | — |
+| **Release-check manifest** | `pnpm validate:release-checks` | **Local only — no CI job** | — |
+| **Release verification** | `scripts/verify-release-locally.sh` (gates defined by [`scripts/release-checks.json`](../scripts/release-checks.json)) | **Local only — no CI job** | — |
 | **E2E cross-chain suite** | `pnpm test:e2e` | **Local only — no CI job** | — |
 
 **Key takeaways:**
@@ -288,5 +303,7 @@ still need to verify locally before opening one.
   those packages.
 - Path filters mean CI is skipped entirely for a PR that only touches
   `coordinator/` or `relayer/` — those packages have no dedicated CI job.
-- `pnpm validate:deployments` and `pnpm validate:docs` must be run manually;
-  they catch manifest and doc drift that CI does not detect.
+- `pnpm validate:deployments`, `pnpm validate:docs`,
+  `pnpm validate:config-reference`, and `pnpm validate:release-checks` must be
+  run manually; they catch manifest, doc, configuration-reference, and
+  release-gate drift that CI does not detect.

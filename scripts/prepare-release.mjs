@@ -130,6 +130,17 @@ function buildPackages() {
   }
 }
 
+function generateProvenance() {
+  console.log('\n🧾 Generating release provenance manifest...');
+  try {
+    exec('node scripts/generate-provenance.mjs');
+    console.log('✅ Provenance manifest generated\n');
+  } catch (err) {
+    console.error('\n❌ Provenance manifest generation failed');
+    process.exit(1);
+  }
+}
+
 function validateRelease() {
   console.log('\n✅ Validating release...');
   try {
@@ -159,7 +170,10 @@ function main() {
   // Step 4: Build packages
   buildPackages();
   
-  // Step 5: Validate release
+  // Step 5: Generate provenance manifest (after production builds)
+  generateProvenance();
+  
+  // Step 6: Validate release
   validateRelease();
   
   console.log('✨ Release preparation complete!');
@@ -169,6 +183,8 @@ function main() {
   console.log(`  3. Tag: git tag -a v${newVersion} -m "Release v${newVersion}"`);
   console.log(`  4. Push: git push && git push --tags`);
   console.log(`  5. Publish: pnpm -r publish --access public`);
+  console.log(`  6. Attach provenance: gh release upload v${newVersion} release-provenance.json`);
+  console.log(`     (consumers can inspect it with: node scripts/verify-provenance.mjs release-provenance.json)`);
 }
 
 main();

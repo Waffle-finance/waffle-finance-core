@@ -1279,6 +1279,262 @@ fn admin_functions_locked_to_current_admin_during_transfer() {
     assert_eq!(registry.min_stake(), 7);
 }
 
+// ---------------------------------------------------------------------------
+// Admin rotation: new admin succeeds, old admin rejected (#1031)
+// ---------------------------------------------------------------------------
+
+/// Rotate authority from `admin` to `new_admin` and prove that every
+/// protected entrypoint accepts the new admin and rejects the old one.
+///
+/// Auth is mocked explicitly (no `mock_all_auths`) so that a call made by
+/// the wrong identity fails at the host auth layer, exactly as it would
+/// on-chain.
+#[test]
+fn admin_rotation_new_admin_succeeds_old_admin_rejected() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let cid = env.register(
+        ResolverRegistry,
+        (
+            admin.clone(),
+            Address::generate(&env),
+            100_0000000i128,
+            Address::generate(&env),
+            PERIOD,
+        ),
+    );
+    let registry = ResolverRegistryClient::new(&env, &cid);
+    let new_admin = Address::generate(&env);
+
+    // --- Step 1: propose the new authority (signed by the current admin).
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &cid,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.transfer_admin(&new_admin);
+
+    // --- Step 2: read back the pending state before accepting.
+    assert_eq!(registry.admin(), admin, "admin must not change on proposal");
+    assert_eq!(registry.pending_admin(), Some(new_admin.clone()));
+
+    // --- Step 3: the new authority accepts (signed by the new admin).
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &cid,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.accept_admin();
+
+    // --- Step 4: read back the final state.
+    assert_eq!(registry.admin(), new_admin);
+    assert_eq!(registry.pending_admin(), None);
+
+    // --- Step 5: the OLD admin is rejected on every protected entrypoint.
+    let old_admin_calls: [(&str, Val); 4] = [
+        ("set_min_stake", (1i128,).into_val(&env)),
+        ("set_unbonding_period", (PERIOD * 2,).into_val(&env)),
+        ("set_slash_beneficiary", (admin.clone(),).into_val(&env)),
+        ("transfer_admin", (admin.clone(),).into_val(&env)),
+    ];
+    for (fn_name, args) in old_admin_calls {
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &cid,
+                fn_name,
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        let res = match fn_name {
+            "set_min_stake" => registry.try_set_min_stake(&1i128).is_err(),
+            "set_unbonding_period" => {
+                registry.try_set_unbonding_period(&(PERIOD * 2)).is_err()
+            }
+            "set_slash_beneficiary" => {
+                registry.try_set_slash_beneficiary(&admin).is_err()
+            }
+            "transfer_admin" => registry.try_transfer_admin(&admin).is_err(),
+            _ => unreachable!(),
+        };
+        assert!(res, "old admin must be rejected by {fn_name} after rotation");
+    }
+
+    // State must be untouched by the rejected calls.
+    assert_eq!(registry.admin(), new_admin);
+    assert_eq!(registry.pending_admin(), None);
+    assert_eq!(registry.min_stake(), 100_0000000i128);
+    assert_eq!(registry.unbonding_period(), PERIOD);
+
+    // --- Step 6: the NEW admin succeeds on the same protected entrypoints.
+    let new_ben = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &cid,
+            fn_name: "set_min_stake",
+            args: (7i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.set_min_stake(&7);
+    assert_eq!(registry.min_stake(), 7);
+
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &cid,
+            fn_name: "set_unbonding_period",
+            args: (PERIOD * 2,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.set_unbonding_period(&(PERIOD * 2));
+    assert_eq!(registry.unbonding_period(), PERIOD * 2);
+
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &cid,
+            fn_name: "set_slash_beneficiary",
+            args: (new_ben.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.set_slash_beneficiary(&new_ben);
+}
+
+/// The old admin must also be rejected by `slash`, which is admin-gated
+/// but not a config setter.
+#[test]
+fn admin_rotation_old_admin_cannot_slash() {
+    let env = Env::default();
+    let min_stake = 100_0000000i128;
+    let (admin, _, _, sac, _, registry) = setup_full(&env, min_stake);
+    let new_admin = Address::generate(&env);
+
+    let r = Address::generate(&env);
+    sac.mint(&r, &min_stake);
+    registry.register(&r, &min_stake);
+
+    // Rotate authority (mock_all_auths is active from setup_full).
+    registry.transfer_admin(&new_admin);
+    registry.accept_admin();
+    assert_eq!(registry.admin(), new_admin);
+
+    // Old admin attempts a slash — must fail.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &registry.address,
+            fn_name: "slash",
+            args: (r.clone(), min_stake).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(
+        registry.try_slash(&r, &min_stake).is_err(),
+        "old admin must not be able to slash after rotation"
+    );
+    assert!(registry.is_active(&r), "rejected slash must not change state");
+
+    // New admin can slash.
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &registry.address,
+            fn_name: "slash",
+            args: (r.clone(), min_stake).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.slash(&r, &min_stake);
+    assert!(!registry.is_active(&r));
+}
+
+/// Failure recovery: if the wrong address was proposed, the current admin
+/// revokes the pending transfer and authority stays with the current admin.
+#[test]
+fn admin_rotation_revoke_pending_recovers_from_wrong_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, registry) = setup_gov(&env);
+    let wrong = Address::generate(&env);
+
+    // Propose the wrong key.
+    registry.transfer_admin(&wrong);
+    assert_eq!(registry.pending_admin(), Some(wrong.clone()));
+    assert_eq!(registry.admin(), admin);
+
+    // Recovery: revoke before the wrong key accepts.
+    registry.revoke_pending_admin();
+    assert_eq!(registry.pending_admin(), None);
+    assert_eq!(registry.admin(), admin, "authority must remain with the current admin");
+
+    // The revoked key can no longer accept.
+    assert_eq!(
+        registry.try_accept_admin().err().unwrap().unwrap(),
+        Error::NoPendingTransfer.into()
+    );
+
+    // The current admin still controls protected operations.
+    registry.set_min_stake(&42i128);
+    assert_eq!(registry.min_stake(), 42);
+
+    // A fresh, correct rotation still works after the recovery.
+    let correct = Address::generate(&env);
+    registry.transfer_admin(&correct);
+    assert_eq!(registry.pending_admin(), Some(correct.clone()));
+    registry.accept_admin();
+    assert_eq!(registry.admin(), correct);
+    assert_eq!(registry.pending_admin(), None);
+}
+
+/// Read-back verification: `admin()` and `pending_admin()` reflect each
+/// stage of the rotation, and a re-proposal overwrites the pending key.
+#[test]
+fn admin_rotation_read_back_verification() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, registry) = setup_gov(&env);
+
+    // Initial state.
+    assert_eq!(registry.admin(), admin);
+    assert_eq!(registry.pending_admin(), None);
+
+    // Proposal is visible but does not move authority.
+    let first = Address::generate(&env);
+    registry.transfer_admin(&first);
+    assert_eq!(registry.admin(), admin);
+    assert_eq!(registry.pending_admin(), Some(first.clone()));
+
+    // Re-proposing replaces the pending key (only the latest can accept).
+    let second = Address::generate(&env);
+    registry.transfer_admin(&second);
+    assert_eq!(registry.admin(), admin);
+    assert_eq!(registry.pending_admin(), Some(second.clone()));
+
+    // Acceptance moves authority and clears the pending slot.
+    registry.accept_admin();
+    assert_eq!(registry.admin(), second);
+    assert_eq!(registry.pending_admin(), None);
+
+    // The superseded key cannot accept.
+    assert_eq!(
+        registry.try_accept_admin().err().unwrap().unwrap(),
+        Error::NoPendingTransfer.into()
+    );
+}
+
 #[test]
 fn config_mutations_emit_events_with_old_and_new_values() {
     let env = Env::default();

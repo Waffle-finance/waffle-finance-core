@@ -1,6 +1,8 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { time } from '@nomicfoundation/hardhat-network-helpers';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { HTLCEscrow, ResolverRegistry, TestERC20 } from '../typechain-types';
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
@@ -8,6 +10,10 @@ const TIMELOCK = 600; // 10 minutes
 const SAFETY_DEPOSIT = ethers.parseEther('0.001');
 const AMOUNT = ethers.parseEther('0.5');
 const MIN_STAKE = ethers.parseEther('10');
+
+// Fixed fixtures keep snapshots reproducible across runs and machines.
+const FIXED_PREIMAGE = '0x1111111111111111111111111111111111111111111111111111111111111111';
+const FIXED_HASHLOCK = ethers.sha256(FIXED_PREIMAGE);
 
 // Gas thresholds for regression detection (wei of gas × 1)
 // These are designed to catch significant regressions while avoiding false positives
@@ -18,6 +24,7 @@ const GAS_THRESHOLDS = {
   claimOrder: 200_000n, // Claim with preimage reveal
   refundOrder: 150_000n, // Refund after timelock expiry
   withdraw: 100_000n, // Withdraw credited balance
+  withdrawFallback: 120_000n, // Pull-payment fallback when direct transfer fails
 
   // ResolverRegistry operations
   register: 200_000n, // Register as resolver with stake
@@ -25,6 +32,78 @@ const GAS_THRESHOLDS = {
   unregister: 150_000n, // Unregister and withdraw stake
   slash: 150_000n, // Slash a resolver
 };
+
+// Tolerance applied to the checked-in snapshot baseline. This is intentionally
+// tighter than the absolute thresholds above: it catches meaningful regressions
+// (e.g. extra storage writes) while ignoring insignificant compiler noise.
+const SNAPSHOT_TOLERANCE_BPS = 300n; // 3%
+const BPS_DENOMINATOR = 10_000n;
+
+const SNAPSHOT_PATH = path.join(__dirname, 'gas-snapshots', 'order-lifecycle.json');
+
+type SnapshotKey =
+  | 'createOrderNative'
+  | 'createOrderERC20'
+  | 'claimOrderNative'
+  | 'claimOrderERC20'
+  | 'refundOrderNative'
+  | 'refundOrderERC20'
+  | 'withdrawFallback';
+
+type GasSnapshot = Partial<Record<SnapshotKey, string>>;
+
+function loadSnapshot(): GasSnapshot {
+  if (!fs.existsSync(SNAPSHOT_PATH)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(SNAPSHOT_PATH, 'utf8')) as GasSnapshot;
+  } catch {
+    return {};
+  }
+}
+
+const SNAPSHOT = loadSnapshot();
+const OBSERVED: GasSnapshot = {};
+
+/**
+ * Compare an observed gas value against the checked-in snapshot baseline.
+ * - When no baseline exists, the value is recorded (first run establishes it).
+ * - When a baseline exists, a regression beyond SNAPSHOT_TOLERANCE_BPS fails.
+ * - Improvements are reported but do not fail, so reviewers can refresh.
+ */
+function assertSnapshot(key: SnapshotKey, actual: bigint) {
+  OBSERVED[key] = actual.toString();
+  const baselineStr = SNAPSHOT[key];
+
+  if (!baselineStr) {
+    console.log(`  ├─ ${key}: ${actual.toString()} gas (no baseline yet)`);
+    return;
+  }
+
+  const baseline = BigInt(baselineStr);
+  const tolerance = (baseline * SNAPSHOT_TOLERANCE_BPS) / BPS_DENOMINATOR;
+  const limit = baseline + tolerance;
+  const delta = actual - baseline;
+  const deltaPct = baseline === 0n ? 0n : (delta * BPS_DENOMINATOR) / baseline;
+
+  console.log(
+    `  ├─ ${key}: ${actual.toString()} gas ` +
+      `(baseline: ${baseline.toString()}, delta: ${delta.toString()}, ` +
+      `${(Number(deltaPct) / 100).toFixed(2)}%)`
+  );
+
+  if (actual > limit) {
+    console.error(
+      `  └─ ⚠️  GAS SNAPSHOT REGRESSION: ${key} used ${actual.toString()} gas, ` +
+        `exceeding baseline ${baseline.toString()} + ${SNAPSHOT_TOLERANCE_BPS / 100n}% ` +
+        `(limit: ${limit.toString()}). Refresh the snapshot only after review.`
+    );
+  }
+
+  expect(actual).to.be.lte(
+    limit,
+    `${key} gas usage (${actual}) exceeds snapshot baseline (${baseline}) + tolerance`
+  );
+}
 
 async function deployEscrow(
   resolverRegistry: string = ZERO_ADDR,
@@ -41,6 +120,11 @@ async function deployToken() {
     'MOCK',
     ethers.parseEther('1000000')
   )) as unknown as TestERC20;
+}
+
+async function deployReceiverMock(mode: 'Reject' | 'Guzzle') {
+  const Receiver = await ethers.getContractFactory('HTLCReceiverMock');
+  return await Receiver.deploy(mode === 'Reject' ? 0 : 1);
 }
 
 async function deployResolverRegistry() {
@@ -336,6 +420,208 @@ describe('Gas Regression Suite', () => {
         }
       });
     });
+
+    describe('snapshots', () => {
+      it('createOrder(native) snapshot', async () => {
+        const [sender, beneficiary] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        const tx = await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.createOrderNative, 'createOrder(native)');
+        assertSnapshot('createOrderNative', gas);
+      });
+
+      it('createOrder(ERC20) snapshot', async () => {
+        const [sender, beneficiary] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        const tx = await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            TIMELOCK,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.createOrderERC20, 'createOrder(ERC20)');
+        assertSnapshot('createOrderERC20', gas);
+      });
+
+      it('claimOrder(native) snapshot', async () => {
+        const [sender, beneficiary, claimer] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        const tx = await escrow.connect(claimer).claimOrder(1n, FIXED_PREIMAGE);
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.claimOrder, 'claimOrder(native)');
+        assertSnapshot('claimOrderNative', gas);
+      });
+
+      it('claimOrder(ERC20) snapshot', async () => {
+        const [sender, beneficiary, claimer] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            TIMELOCK,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        const tx = await escrow.connect(claimer).claimOrder(1n, FIXED_PREIMAGE);
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.claimOrder, 'claimOrder(ERC20)');
+        assertSnapshot('claimOrderERC20', gas);
+      });
+
+      it('refundOrder(native) snapshot', async () => {
+        const [sender, beneficiary, refunder] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const shortTimelock = 300;
+
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            shortTimelock,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        await time.increase(shortTimelock + 1);
+
+        const tx = await escrow.connect(refunder).refundOrder(1n);
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.refundOrder, 'refundOrder(native)');
+        assertSnapshot('refundOrderNative', gas);
+      });
+
+      it('refundOrder(ERC20) snapshot', async () => {
+        const [sender, beneficiary, refunder] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const token = await deployToken();
+        const shortTimelock = 300;
+
+        await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
+
+        await escrow
+          .connect(sender)
+          .createOrder(
+            beneficiary.address,
+            sender.address,
+            await token.getAddress(),
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            shortTimelock,
+            { value: SAFETY_DEPOSIT }
+          );
+
+        await time.increase(shortTimelock + 1);
+
+        const tx = await escrow.connect(refunder).refundOrder(1n);
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.refundOrder, 'refundOrder(ERC20)');
+        assertSnapshot('refundOrderERC20', gas);
+      });
+
+      it('withdraw fallback snapshot (rejecting receiver)', async () => {
+        const [sender, beneficiary] = await ethers.getSigners();
+        const escrow = await deployEscrow();
+        const receiver = await deployReceiverMock('Reject');
+
+        // Beneficiary is a contract that rejects ETH, forcing the pull-payment path.
+        await escrow
+          .connect(sender)
+          .createOrder(
+            await receiver.getAddress(),
+            sender.address,
+            ZERO_ADDR,
+            AMOUNT,
+            SAFETY_DEPOSIT,
+            FIXED_HASHLOCK,
+            TIMELOCK,
+            { value: AMOUNT + SAFETY_DEPOSIT }
+          );
+
+        await escrow.connect(sender).claimOrder(1n, FIXED_PREIMAGE);
+
+        const pending = await escrow.pendingWithdrawals(await receiver.getAddress());
+        expect(pending).to.be.gt(0n, 'expected fallback to credit pending balance');
+
+        const tx = await receiver.withdrawFrom(await escrow.getAddress());
+        const gas = await measureGas(tx);
+        assertGasBelow(gas, GAS_THRESHOLDS.withdrawFallback, 'withdraw(fallback)');
+        assertSnapshot('withdrawFallback', gas);
+      });
+
+      it('reports snapshot deltas for CI review', async () => {
+        const keys = Object.keys(OBSERVED) as SnapshotKey[];
+        if (keys.length === 0) return;
+
+        console.log('\n  Gas snapshot deltas vs checked-in baseline:');
+        for (const key of keys) {
+          const actual = BigInt(OBSERVED[key]!);
+          const baselineStr = SNAPSHOT[key];
+          if (!baselineStr) {
+            console.log(`  ├─ ${key}: NEW baseline ${actual.toString()}`);
+            continue;
+          }
+          const baseline = BigInt(baselineStr);
+          const delta = actual - baseline;
+          const sign = delta >= 0n ? '+' : '';
+          console.log(`  ├─ ${key}: ${sign}${delta.toString()} gas`);
+        }
+      });
+    });
   });
 
   describe('ResolverRegistry Gas Benchmarks', () => {
@@ -448,6 +734,9 @@ describe('Gas Regression Suite', () => {
       console.log(
         `║ • withdraw:                   ${String(GAS_THRESHOLDS.withdraw).padEnd(7)} gas (base)  ║`
       );
+      console.log(
+        `║ • withdraw(fallback):         ${String(GAS_THRESHOLDS.withdrawFallback).padEnd(7)} gas (base)  ║`
+      );
       console.log('╟────────────────────────────────────────────────────────────╢');
       console.log('║ ResolverRegistry Operations                                 ║');
       console.log('╟────────────────────────────────────────────────────────────╢');
@@ -465,6 +754,8 @@ describe('Gas Regression Suite', () => {
       );
       console.log('╠════════════════════════════════════════════════════════════╣');
       console.log('║ Note: All values allow +10% variance for minor fluctuations ║');
+      console.log(`║ Snapshots: ${SNAPSHOT_PATH.replace(process.cwd() + '/', '').padEnd(47)}║`);
+      console.log(`║ Snapshot tolerance: ${(SNAPSHOT_TOLERANCE_BPS / 100n).toString()}% vs checked-in baseline${' '.repeat(18)}║`);
       console.log("║ Run with: npx hardhat test --grep 'Gas Regression'         ║");
       console.log('╚════════════════════════════════════════════════════════════╝\n');
     });

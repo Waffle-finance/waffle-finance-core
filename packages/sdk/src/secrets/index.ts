@@ -5,17 +5,32 @@ const HEX_BYTES32_LENGTH = BYTES32_LENGTH * 2;
 const HEX_BYTES32_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /**
- * A secret + its two-digest commitments. The Stellar/Soroban HTLC
- * verifies sha256, the Ethereum HTLCEscrow verifies both sha256 AND
- * keccak256. Storing both digests lets cross-chain code pick whichever
- * matches its target chain.
+ * A secret + its two-digest commitments.
+ *
+ * Hashlock scheme boundary (see issue #1022):
+ * - `sha256` is the CANONICAL hashlock scheme. It is the only scheme
+ *   accepted by the Stellar/Soroban HTLC and the scheme new orders must
+ *   use across every chain.
+ * - `keccak256` is a RETAINED EVM COMPATIBILITY scheme. The Ethereum
+ *   HTLCEscrow still accepts it so pre-existing orders and vanilla EVM
+ *   HTLC integrations keep working. It is not used by Soroban and must
+ *   not be selected for new orders.
+ *
+ * Migration policy for new orders: always commit to `sha256`. The
+ * keccak256 branch is frozen - it may be removed only after all live
+ * orders using it have settled, and never broadened to new orders.
+ * Storing both digests lets cross-chain code pick whichever matches its
+ * target chain while the compatibility window is open.
  */
 export interface Secret {
   /** 32-byte preimage, hex-encoded with 0x prefix. */
   preimage: `0x${string}`;
-  /** sha256(preimage) - used by Soroban + EVM. */
+  /** sha256(preimage) - canonical scheme, used by Soroban + EVM. */
   sha256: `0x${string}`;
-  /** keccak256(preimage) - convention for vanilla EVM HTLCs. */
+  /**
+   * keccak256(preimage) - retained EVM compatibility scheme for legacy
+   * orders only. Do not use for new orders; prefer `sha256`.
+   */
   keccak256: `0x${string}`;
 }
 
@@ -101,6 +116,20 @@ export function hashSecret(preimage: `0x${string}` | Uint8Array): Secret {
 /**
  * Decide whether `preimage` matches one of the digests in `expected`.
  * Returns the matched digest type, or null if neither matches.
+ *
+ * Scheme semantics (issue #1022):
+ * - `"sha256"` is the canonical match and the only result new orders
+ *   should rely on.
+ * - `"keccak256"` is a retained EVM compatibility match for legacy
+ *   orders; it is checked only after sha256 so the canonical scheme
+ *   always wins if both somehow collide.
+ *
+ * Input validation mirrors the Solidity escrow: `preimage` must be a
+ * 0x-prefixed, exactly 32-byte hex string and `expected` must be a
+ * 0x-prefixed, exactly 32-byte hex digest. Wrong-length or non-hex
+ * inputs throw (they are never silently truncated or padded), so the
+ * shared differential vectors for valid, wrong-length, wrong-preimage
+ * and cross-scheme cases behave identically on-chain and in the SDK.
  */
 export function verifyPreimage(
   preimage: `0x${string}`,

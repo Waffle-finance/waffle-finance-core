@@ -22,11 +22,16 @@ interface IHTLCEscrow {
         address token;          // address(0) == native ETH
         uint256 amount;
         uint256 safetyDeposit;
-        bytes32 hashlock;       // sha256(preimage) when interoperating
-                                // with the Soroban side; the contract
-                                // verifies both sha256 AND keccak256 so
-                                // resolver implementations can choose.
-        uint64  timelock;       // unix seconds; refund allowed after.
+        bytes32 hashlock;       // Preimage digest. sha256(preimage) is the
+                                // canonical scheme (required for Soroban
+                                // interop); keccak256(preimage) is the
+                                // retained EVM compatibility scheme. The
+                                // contract accepts either digest for a
+                                // single committed hashlock; new orders
+                                // should prefer sha256.
+        uint64  timelock;       // unix seconds; claim requires
+                                // block.timestamp < timelock, refund
+                                // requires block.timestamp > timelock.
         uint64  createdAt;
         uint64  finalisedAt;    // 0 while Funded
         OrderStatus status;
@@ -88,7 +93,24 @@ interface IHTLCEscrow {
         uint64  timelockSeconds
     ) external payable returns (uint256 orderId);
 
+    /// @notice Claim a funded order by revealing its preimage.
+    /// @dev Timelock boundary: claim is permitted strictly before the
+    ///      deadline, i.e. it requires `block.timestamp < order.timelock`.
+    ///      At and after the deadline the claim reverts, so a claim and a
+    ///      refund can never both settle the same order at the same
+    ///      timestamp.
+    ///      Hashlock boundary: the preimage must hash to the committed
+    ///      `hashlock` under either the canonical sha256 scheme (Soroban
+    ///      interop) or the retained keccak256 EVM compatibility scheme.
+    ///      New orders should prefer sha256.
     function claimOrder(uint256 orderId, bytes memory preimage) external;
+
+    /// @notice Refund a funded order to its refund address once expired.
+    /// @dev Timelock boundary: refund is permitted strictly after the
+    ///      deadline, i.e. it requires `block.timestamp > order.timelock`.
+    ///      At and before the deadline the refund reverts, so a claim and a
+    ///      refund can never both settle the same order at the same
+    ///      timestamp.
     function refundOrder(uint256 orderId) external;
     function getOrder(uint256 orderId) external view returns (Order memory);
 

@@ -19,6 +19,127 @@ interface ContractCompatibility {
   issues: string[];
 }
 
+interface MigrationCheckResult {
+  name: string;
+  ok: boolean;
+  issues: string[];
+  details: Record<string, string>;
+}
+
+/**
+ * Dry-run migration gate. Performs read-only checks only (no transactions):
+ *  - network / chain ID matches the deployment manifest
+ *  - deployed bytecode hash matches the compiled artifact
+ *  - escrow -> registry linkage matches the manifest
+ *  - manifest entries are internally consistent
+ */
+async function runMigrationDryRun(artifact: any): Promise<MigrationCheckResult[]> {
+  const results: MigrationCheckResult[] = [];
+
+  const manifestChainId = Number(artifact.chainId);
+  const onChainId = Number((await ethers.provider.getNetwork()).chainId);
+
+  const networkCheck: MigrationCheckResult = {
+    name: "network",
+    ok: manifestChainId === onChainId,
+    issues: [],
+    details: {
+      manifestChainId: String(manifestChainId),
+      onChainChainId: String(onChainId),
+      network: String(artifact.network),
+    },
+  };
+  if (manifestChainId !== onChainId) {
+    networkCheck.issues.push(
+      `Chain ID mismatch: manifest=${manifestChainId} on-chain=${onChainId}`
+    );
+  }
+  results.push(networkCheck);
+
+  const escrowAddress: string | undefined = artifact.ethereum?.htlcEscrow;
+  const registryAddress: string | undefined = artifact.ethereum?.resolverRegistry;
+
+  // Bytecode hash checks against compiled artifacts
+  const bytecodeTargets: Array<[string, string | undefined]> = [
+    ["HTLCEscrow", escrowAddress],
+    ["ResolverRegistry", registryAddress],
+  ];
+
+  for (const [contractName, address] of bytecodeTargets) {
+    const check: MigrationCheckResult = {
+      name: `${contractName}.bytecode`,
+      ok: false,
+      issues: [],
+      details: { address: address ?? "<missing>" },
+    };
+
+    if (!address) {
+      check.issues.push(`${contractName} address missing from manifest`);
+      results.push(check);
+      continue;
+    }
+
+    try {
+      const code = await ethers.provider.getCode(address);
+      if (code === "0x") {
+        check.issues.push(`No bytecode deployed at ${address}`);
+        results.push(check);
+        continue;
+      }
+
+      const deployedHash = ethers.keccak256(code);
+      const compiled = await ethers.getContractFactory(contractName);
+      const compiledHash = ethers.keccak256(compiled.bytecode);
+      check.details.deployedHash = deployedHash;
+      check.details.compiledHash = compiledHash;
+
+      if (deployedHash !== compiledHash) {
+        check.issues.push(
+          `Bytecode hash mismatch for ${contractName}: deployed=${deployedHash.substring(
+            0,
+            10
+          )}... compiled=${compiledHash.substring(0, 10)}...`
+        );
+      } else {
+        check.ok = true;
+      }
+    } catch (err: any) {
+      check.issues.push(`Bytecode check failed: ${err?.message ?? String(err)}`);
+    }
+    results.push(check);
+  }
+
+  // Registry linkage check: the escrow's immutable registry must match the manifest
+  const linkageCheck: MigrationCheckResult = {
+    name: "registryLinkage",
+    ok: false,
+    issues: [],
+    details: { escrow: escrowAddress ?? "<missing>", registry: registryAddress ?? "<missing>" },
+  };
+
+  if (!escrowAddress || !registryAddress) {
+    linkageCheck.issues.push("Escrow or registry address missing from manifest");
+  } else {
+    try {
+      const escrow = await ethers.getContractAt("HTLCEscrow", escrowAddress);
+      const linkedRegistry: string = await (escrow as any).registry();
+      linkageCheck.details.linkedRegistry = linkedRegistry;
+      if (linkedRegistry.toLowerCase() !== registryAddress.toLowerCase()) {
+        linkageCheck.issues.push(
+          `Escrow registry linkage mismatch: escrow points to ${linkedRegistry}, manifest says ${registryAddress}`
+        );
+      } else {
+        linkageCheck.ok = true;
+      }
+    } catch (err: any) {
+      linkageCheck.issues.push(`Registry linkage check failed: ${err?.message ?? String(err)}`);
+    }
+  }
+  results.push(linkageCheck);
+
+  return results;
+}
+
 async function getDeployedContractInfo(contractName: string, address: string): Promise<ContractCompatibility["deployed"]> {
   const code = await ethers.provider.getCode(address);
   if (code === "0x") {
@@ -148,12 +269,34 @@ async function main(): Promise<void> {
   console.log(`  HTLCEscrow bytecode hash: ${ethers.keccak256(htlcCode).substring(0, 10)}...`);
   console.log(`  ResolverRegistry bytecode hash: ${ethers.keccak256(registryCode).substring(0, 10)}...`);
 
+  // Dry-run migration gate (read-only, no transactions)
+  console.log("\n=== Migration Dry-Run (no transactions) ===");
+  const dryRunResults = await runMigrationDryRun(artifact);
+  let dryRunOk = true;
+  for (const result of dryRunResults) {
+    if (result.ok) {
+      console.log(`  ✅ ${result.name}`);
+    } else {
+      dryRunOk = false;
+      console.log(`  ❌ ${result.name}`);
+      for (const issue of result.issues) {
+        console.log(`     - ${issue}`);
+      }
+    }
+  }
+
   console.log("\n=== Summary ===");
   console.log("Before upgrading, ensure:");
   console.log("  1. Existing on-chain state is preserved (storage layout)");
   console.log("  2. Constructor arguments match the deployment artifact");
   console.log("  3. No functions called by the coordinator are removed");
   console.log("  4. New functions are additive only (proxy pattern if needed)");
+  console.log("  5. Migration dry-run passed (network, bytecode, registry linkage)");
+
+  if (!dryRunOk) {
+    console.error("\nMigration dry-run failed. Do not proceed with cutover.");
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
