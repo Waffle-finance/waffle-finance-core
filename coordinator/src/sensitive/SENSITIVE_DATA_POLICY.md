@@ -91,6 +91,60 @@ Key management:
 
 ---
 
+## Database and Backup Encryption at Rest (#1138)
+
+Application encryption protects preimages in `orders.preimage`; it does **not**
+protect other metadata stored in the SQLite file, a Postgres cluster, or
+backup copies. Every production deployment must record infrastructure evidence
+for each applicable mode:
+
+| Mode | Required control | Evidence |
+|------|------------------|----------|
+| SQLite volume | `encrypted-volume`, `luks`, or `cloud-managed-disk` | volume/provider encryption setting |
+| Postgres | `provider-managed-tde` or `cloud-hsm-backed` | cluster encryption setting / KMS key |
+| Backup storage | `provider-managed-encryption` or `kms-encrypted-object-store` | bucket/vault encryption policy |
+
+The deployment metadata fields and validation hook are documented in
+`docs/OPERATIONS.md`; `scripts/verify-encryption-at-rest.mjs` refuses to mark a
+deployment verified without applicable control evidence.
+
+**Residual risk:** infrastructure encryption does not protect data while
+decrypted in memory, application logs, operator exports, or lost credentials.
+Treat `SECRET_STORAGE_KEY` and volume/KMS keys as separate controls; rotating
+one does not rotate the other. Backups remain encrypted only while their
+provider policy and KMS key are intact.
+
+**Incident procedure:** if at-rest evidence is missing or a volume/backup is
+exposed, mark the deployment unverified, stop new reveals, rotate
+`SECRET_STORAGE_KEY` and the affected storage key, re-encrypt/restore from a
+known-good encrypted backup, and record the findings in the audit log. Never
+log raw preimages or raw client addresses during the response.
+
+---
+
+## Retention Classes and Cleanup Verification (#1134)
+
+`coordinator/src/retention/retention-policy.ts` is the authoritative mapping
+between a sensitive-data category and its documented retention setting.
+Cleanup is executed by `runRetentionCleanup(db, nowSeconds)` and returns an
+auditable report (`inspected`, `removed`, `retained`, `cutoff`, `reason`) for
+every category. Tests live in `coordinator/test/retention-policy.test.ts`.
+
+| Category | Retention class | Retention | Cleanup action |
+|----------|-----------------|-----------|----------------|
+| Active settlement orders | `active_settlement` | until terminal + archived | never deleted or cleared |
+| Audit records | `legal_audit` | 7 years (legal hold) | append-only; never updated or deleted |
+| Secret ciphertext (`orders.preimage`) | `secret_ciphertext` | 30 days after terminal + archived | clear ciphertext columns in place, keep order/audit rows |
+| Order history (`order_events`) | `order_history` | 10 years | retained for dispute resolution and exports |
+| Request/replay metadata (`processed_events`) | `request_metadata` | 7 days | physical delete when expired |
+
+The cleanup honors two hard constraints: an order that is still active (or
+terminal but not archived) keeps its secret for recovery, and audit/order
+history rows are never deleted. Removed values are excluded from subsequent
+exports and must not appear in logs.
+
+---
+
 ## Adding a New Sensitive Field
 
 1. Add the field name to `SENSITIVE_FIELD_NAMES` in

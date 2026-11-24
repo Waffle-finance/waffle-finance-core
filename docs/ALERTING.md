@@ -187,6 +187,17 @@ criteria for issue #740 — track stale-order volume over time):
 
 ---
 
+## Event-to-API freshness SLO
+
+`coordinator_event_to_api_freshness_seconds` measures the delay from a trusted
+chain observation to the durable order transition that makes the event visible
+through the coordinator API. Alert with
+`histogram_quantile(0.95, sum by (le, chain) (rate(coordinator_event_to_api_freshness_seconds_bucket[5m]))) > 60`
+for 10 minutes per chain. See
+[`EVENT_TO_API_FRESHNESS_SLO.md`](./EVENT_TO_API_FRESHNESS_SLO.md) for burn-rate
+guidance and how to separate chain finality delay from coordinator processing
+delay using `coordinator_listener_lag_blocks`.
+
 ## Operational Thresholds Summary
 
 | Signal | Warning | Critical | Notes |

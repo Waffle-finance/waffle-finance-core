@@ -18,6 +18,7 @@
 
 import { rateLimitActiveBlocks, rateLimitMultiRouteAbusers } from "../../metrics.js";
 import type { Logger } from "pino";
+import { createHash } from "node:crypto";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,32 @@ interface IpRecord {
   flagged: boolean;
 }
 
+/**
+ * Only deterministic client mistakes count as abuse. Transient dependency
+ * failures (chain/quote lookups) are explicitly excluded so legitimate
+ * retries are never penalised.
+ */
+export const COUNTED_INVALID_REASONS = ["malformed", "policy_denied"] as const;
+export const TRANSIENT_INVALID_REASONS = ["chain_unavailable", "quote_unavailable"] as const;
+export type InvalidAnnounceReason =
+  | (typeof COUNTED_INVALID_REASONS)[number]
+  | (typeof TRANSIENT_INVALID_REASONS)[number];
+
+export interface InvalidAnnounceEvent {
+  /** Raw client identity — hashed before it is retained or logged. */
+  clientId: string;
+  reason: InvalidAnnounceReason;
+  timestamp: number;
+  /** Trusted clients (valid API key) are exempt from invalid-request counting. */
+  trusted?: boolean;
+}
+
+interface InvalidAttemptRecord {
+  count: number;
+  updatedAt: number;
+  flagged: boolean;
+}
+
 export interface AbuseDetectorOptions {
   /**
    * Sliding window in milliseconds for multi-route detection.
@@ -51,6 +78,10 @@ export interface AbuseDetectorOptions {
    * Pino logger for abuse alerts (optional).
    */
   log?: Logger;
+  /** Sliding window for repeated invalid announcements. Default: 5 minutes. */
+  invalidWindowMs?: number;
+  /** Invalid announcements from one client that trigger an alert. Default: 5. */
+  invalidThreshold?: number;
 }
 
 // ── Abuse detector ───────────────────────────────────────────────────────────
@@ -62,10 +93,20 @@ export class AbuseDetector {
   private readonly log?: Logger;
   private readonly purgeTimer: ReturnType<typeof setInterval>;
   private flaggedCount = 0;
+  private readonly invalidWindowMs: number;
+  private readonly invalidThreshold: number;
+  /** Opaque client hashes only — raw addresses are never retained. */
+  private readonly invalidAttempts = new Map<string, InvalidAttemptRecord>();
+  private invalidFlaggedCount = 0;
+  private countedInvalid = 0;
+  private transientSkipped = 0;
+  private trustedSkipped = 0;
 
   constructor(opts: AbuseDetectorOptions = {}) {
     this.windowMs = opts.multiRouteWindowMs ?? 5 * 60_000;
     this.threshold = opts.multiRouteThreshold ?? 2;
+    this.invalidWindowMs = opts.invalidWindowMs ?? 5 * 60_000;
+    this.invalidThreshold = opts.invalidThreshold ?? 5;
     this.log = opts.log;
     this.purgeTimer = setInterval(() => this.purgeExpired(), this.windowMs);
     if (this.purgeTimer.unref) this.purgeTimer.unref();
@@ -115,6 +156,48 @@ export class AbuseDetector {
   }
 
   /**
+   * Record a rejected announce request. Only malformed/policy-denied requests
+   * are counted; transient chain or quote failures are ignored so clients can
+   * retry legitimately. The client id is hashed before storage and alerts
+   * contain aggregate counters only — no raw address or request body.
+   */
+  recordInvalidAnnounce(event: InvalidAnnounceEvent): boolean {
+    if (TRANSIENT_INVALID_REASONS.includes(event.reason as any)) {
+      this.transientSkipped++;
+      return false;
+    }
+    if (event.trusted || !COUNTED_INVALID_REASONS.includes(event.reason as any)) {
+      this.trustedSkipped++;
+      return false;
+    }
+
+    const clientKey = createHash("sha256").update(event.clientId).digest("hex");
+    let rec = this.invalidAttempts.get(clientKey);
+    if (!rec) {
+      rec = { count: 0, updatedAt: event.timestamp, flagged: false };
+      this.invalidAttempts.set(clientKey, rec);
+    }
+    rec.count++;
+    rec.updatedAt = event.timestamp;
+    this.countedInvalid++;
+
+    if (!rec.flagged && rec.count >= this.invalidThreshold) {
+      rec.flagged = true;
+      this.invalidFlaggedCount++;
+      this.log?.warn(
+        {
+          reason: event.reason,
+          windowMs: this.invalidWindowMs,
+          threshold: this.invalidThreshold,
+          trackedClients: this.invalidAttempts.size,
+        },
+        `[abuse] repeated invalid announce requests detected (${event.reason})`,
+      );
+    }
+    return rec.flagged;
+  }
+
+  /**
    * Remove expired entries and recompute gauges.
    * Called periodically by the purge timer.
    */
@@ -141,6 +224,9 @@ export class AbuseDetector {
       }
     }
 
+    // Decay invalid-announce history with the same clock. A client is only
+    // penalised while repeated invalid requests stay inside the window.
+    this.pruneInvalidAttempts(now);
     this.refreshGauges();
   }
 
@@ -176,5 +262,30 @@ export class AbuseDetector {
   /** Number of IPs flagged for multi-route abuse. */
   get flaggedIpCount(): number {
     return this.flaggedCount;
+  }
+
+  /** Decay invalid attempts so flags cannot persist past the window. */
+  private pruneInvalidAttempts(now: number): void {
+    const cutoff = now - this.invalidWindowMs;
+    for (const [clientKey, rec] of this.invalidAttempts) {
+      if (rec.updatedAt < cutoff) {
+        if (rec.flagged) this.invalidFlaggedCount--;
+        this.invalidAttempts.delete(clientKey);
+      }
+    }
+  }
+
+  /** Aggregate invalid-announce counters — no raw addresses or request bodies. */
+  get invalidAnnounceCounters() {
+    this.pruneInvalidAttempts(Date.now());
+    return {
+      counted: this.countedInvalid,
+      transientSkipped: this.transientSkipped,
+      trustedSkipped: this.trustedSkipped,
+      flaggedClients: this.invalidFlaggedCount,
+      trackedClients: this.invalidAttempts.size,
+      windowMs: this.invalidWindowMs,
+      threshold: this.invalidThreshold,
+    };
   }
 }

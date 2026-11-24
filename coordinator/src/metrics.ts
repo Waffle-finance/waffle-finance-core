@@ -206,6 +206,36 @@ export const listenerLagBlocks = new Gauge({
   registers: [registry],
 });
 
+/**
+ * Event-to-API freshness: time from a trusted chain observation timestamp to
+ * the durable order transition that makes the event visible via the API.
+ * Only `chain` is a label — never an order ID, wallet, or signature.
+ */
+export const eventToApiFreshnessSeconds = new Histogram({
+  name: 'coordinator_event_to_api_freshness_seconds',
+  help: 'Seconds from trusted chain event observation to durable coordinator API visibility, by chain',
+  labelNames: ['chain'] as const,
+  buckets: [1, 5, 15, 30, 60, 120, 300, 600, 1800],
+  registers: [registry],
+});
+
+/**
+ * Record freshness only when the caller supplies a trustworthy observation
+ * timestamp (e.g. the listener's finalized-event observation). Missing,
+ * future, or implausibly old timestamps are skipped rather than guessed.
+ */
+export function observeEventToApiFreshness(
+  chain: string,
+  observedAtMs: number | undefined,
+  nowMs = Date.now()
+): void {
+  if (!Number.isFinite(observedAtMs) || observedAtMs === undefined) return;
+  const ageMs = nowMs - observedAtMs;
+  // Skew guard: reject future timestamps and observations older than 24 h.
+  if (ageMs < 0 || ageMs > 86_400_000) return;
+  eventToApiFreshnessSeconds.observe({ chain }, ageMs / 1000);
+}
+
 /** Event processing duration per chain and event type */
 export const listenerEventProcessingDuration = new Histogram({
   name: 'coordinator_listener_event_processing_duration_seconds',
@@ -658,11 +688,11 @@ export const staleOrdersArchivedAgeSeconds = new Histogram({
   registers: [registry],
 });
 
-/** Resolver participation per operation */
+/** Resolver participation per operation (bounded dimensions only) */
 export const resolverLockActionsTotal = new Counter({
   name: 'coordinator_resolver_lock_actions_total',
-  help: 'Total resolver lock actions by resolver address and action type',
-  labelNames: ['resolver_address', 'action'] as const,
+  help: 'Total resolver lock actions by action type (no resolver identifier labels)',
+  labelNames: ['action'] as const,
   registers: [registry],
 });
 

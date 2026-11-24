@@ -18,6 +18,7 @@ import type { Logger } from "pino";
 import { OrderExportService, UnsupportedExportFilterError, type OrderLifecycleExport } from "../../services/order-export.js";
 import { validationError, notFoundError, orderValidationError } from "../errors.js";
 import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
+import { classifiedExpensiveRouteLimiter } from "../middleware/expensive-route-limits.js";
 
 /** Supported download formats for the user-facing export endpoint. */
 export type ExportFormat = "json" | "csv";
@@ -227,6 +228,9 @@ export function exportRoutes(exportService: OrderExportService, log?: Logger): R
   const router = Router();
   const authorize = requireRole("operator", { operatorKeys: loadOperatorKeys(), log });
   router.use(["/export/orders", "/orders/export"], authorize);
+  // Export builds complete order lifecycles: separate anonymous/authenticated
+  // policies with an audited bypass for configured identities.
+  router.use(["/export/orders", "/orders/export"], classifiedExpensiveRouteLimiter("export", { log }));
 
   /**
    * GET /export/orders/:orderId

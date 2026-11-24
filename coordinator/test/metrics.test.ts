@@ -3,12 +3,27 @@ import {
   observeListenerEventProcessing,
   recordListenerProgress,
   workflowDispatchDecisions,
+  eventToApiFreshnessSeconds,
+  observeEventToApiFreshness,
   registry
 } from "../src/metrics.js";
 
 describe("listener metrics", () => {
   beforeEach(() => {
     registry.resetMetrics();
+  });
+
+  it("records event-to-API freshness only for trusted timestamps", async () => {
+    const now = 1_700_000_000_000;
+    observeEventToApiFreshness("ethereum", now - 30_000, now);
+    observeEventToApiFreshness("soroban", undefined, now);
+    observeEventToApiFreshness("soroban", now + 1_000, now);
+    observeEventToApiFreshness("soroban", now - 86_400_001, now);
+
+    const metrics = await registry.metrics();
+    expect(metrics).toContain('coordinator_event_to_api_freshness_seconds_count{chain="ethereum"} 1');
+    expect(metrics).not.toContain('coordinator_event_to_api_freshness_seconds_count{chain="soroban"}');
+    expect(eventToApiFreshnessSeconds).toBeDefined();
   });
 
   it("records processed block, head block, and listener lag", async () => {

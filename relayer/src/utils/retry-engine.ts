@@ -249,6 +249,17 @@ export interface RunOptions {
    * Useful for distinguishing two different `run('rpc', ...)` calls.
    */
   note?: string;
+
+  /**
+   * Optional AbortSignal. When the signal is aborted the retry loop stops
+   * promptly: no further attempts are scheduled and the caller receives a
+   * `RetryCancelledError` (distinguishable from a retryable RPC failure and
+   * from `RetryExhaustedError`).
+   *
+   * If the signal is already aborted when `run()` is called the method
+   * rejects immediately without executing `fn` even once.
+   */
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +293,18 @@ export class CircuitOpenError extends Error {
     super(`[retry-engine] Circuit for '${action}' is open — fast-failing`);
     this.name = 'CircuitOpenError';
     this.action = action;
+  }
+}
+
+/**
+ * Thrown when a retry loop is cancelled via an AbortSignal.
+ * Distinguishable from both `RetryExhaustedError` (exhausted attempts) and
+ * the original transient error (retryable RPC failure).
+ */
+export class RetryCancelledError extends Error {
+  constructor(message = '[retry-engine] Retry cancelled via AbortSignal') {
+    super(message);
+    this.name = 'RetryCancelledError';
   }
 }
 
@@ -334,6 +357,10 @@ export class RetryEngine {
     const maxAttempts = opts.maxAttempts ?? this.cfg.defaultMaxAttempts;
     const baseDelayMs = Math.max(0, opts.baseDelayMs ?? this.cfg.defaultBaseDelayMs);
     const maxDelayMs  = Math.max(0, opts.maxDelayMs  ?? this.cfg.defaultMaxDelayMs);
+    const signal = opts.signal;
+
+    // Reject immediately if the signal is already aborted — don't execute fn.
+    if (signal?.aborted) throw new RetryCancelledError();
 
     // Circuit-breaker pre-check
     this._checkCircuit(action);
@@ -358,6 +385,12 @@ export class RetryEngine {
         const ctx = getCorrelation();
         if (ctx && attempt > 1) {
           ctx.incrementRetry(`${action}:${lastClass}`);
+        }
+
+        // Abort check: if the signal fired while fn was executing, stop now.
+        if (signal?.aborted) {
+          _log('info', `[retry-engine] aborted during attempt`, { action, attempt });
+          throw new RetryCancelledError();
         }
 
         _log('warn', `[retry-engine] attempt ${attempt}/${maxAttempts} failed`, {
@@ -401,7 +434,13 @@ export class RetryEngine {
           note: opts.note,
         });
 
-        await _sleep(delayMs);
+        await _sleepCancellable(delayMs, signal);
+
+        // Check abort after the sleep resolves normally.
+        if (signal?.aborted) {
+          _log('info', `[retry-engine] aborted after backoff`, { action });
+          throw new RetryCancelledError();
+        }
 
         // Re-check circuit after backoff (it may have opened during the delay)
         this._checkCircuit(action);
@@ -618,6 +657,32 @@ export function calculateBackoff(
 
 function _sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Sleep for `ms` milliseconds, but resolve early (by rejecting with
+ * `RetryCancelledError`) when `signal` is aborted.  The timer is always
+ * cleared so no dangling handle remains after cancellation.
+ */
+function _sleepCancellable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return _sleep(ms);
+  if (signal.aborted) return Promise.reject(new RetryCancelledError());
+
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new RetryCancelledError());
+    };
+
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function _log(

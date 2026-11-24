@@ -23,6 +23,7 @@ import {
   recordSwapCompletion,
   refreshPhaseRatios,
   expiredOrdersBacklog,
+  observeEventToApiFreshness,
 } from "../metrics.js";
 import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
@@ -302,6 +303,8 @@ export class OrderService {
     blockNumber: number;
     timelock: number;
     actor?: MutationActor;
+    /** Trusted chain-observation timestamp from the listener, in milliseconds. */
+    observedAtMs?: number;
   }): Promise<void> {
     const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
@@ -333,6 +336,9 @@ export class OrderService {
       throw new OrderValidationError(`cannot record src lock from status ${order.status}`);
     }
     await this.repo.recordSrcLock(input);
+    // The durable write above is the API-visibility boundary. Only listeners
+    // that supply a trusted observation timestamp are measured.
+    observeEventToApiFreshness(order.srcChain, input.observedAtMs);
     if (input.blockNumber > 0) {
       await this.repo.updateOrderCursor(input.publicId, order.srcChain, input.blockNumber);
     }
@@ -440,7 +446,9 @@ export class OrderService {
     this.historyCache.invalidateAddress(order.dstAddress);
 
     if (input.resolver) {
-      resolverLockActionsTotal.inc({ resolver_address: input.resolver, action: "dst_lock" });
+      // Resolver addresses are identifiers: keep them in redacted audit
+      // records, never in a Prometheus label (unbounded cardinality + privacy).
+      resolverLockActionsTotal.inc({ action: "dst_lock" });
     }
 
     this.audit(

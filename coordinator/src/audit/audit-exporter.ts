@@ -16,6 +16,7 @@
  */
 
 import type { Writable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import type { AuditRepository, AuditCursor, AuditQueryOptions } from './audit-repo.js';
 import type { AuditEntry, AuditEventType } from './audit-log.js';
 import { parseAuditPayload } from './audit-log.js';
@@ -286,4 +287,111 @@ export class AuditExporter {
 
     return discrepancies;
   }
+}
+
+// ─── Export manifest (issue #1135) ────────────────────────────────────────────
+
+/** Manifest schema version. Bump when the canonicalization rules change. */
+export const EXPORT_MANIFEST_VERSION = 1;
+
+export interface ExportManifest {
+  manifestVersion: typeof EXPORT_MANIFEST_VERSION;
+  /** ISO-8601 generation time. No secret values or personal identifiers. */
+  generatedAt: string;
+  /** Covered record range. Empty exports have a null range. */
+  recordRange: { firstId: number | null; lastId: number | null; count: number };
+  /** Digest of the canonicalized exported records (not of the NDJSON bytes). */
+  digest: {
+    algorithm: "sha256";
+    canonicalization: "ndjson-record-v1";
+    value: string;
+  };
+}
+
+/** Thrown when a manifest is requested for an export that was not authorized. */
+export class UnauthorizedExportError extends Error {
+  constructor() {
+    super('audit export manifest requires an authorized export');
+    this.name = 'UnauthorizedExportError';
+  }
+}
+
+/**
+ * Canonical form of exported records: one JSON object per line with keys in
+ * lexicographic order, independent of the serializer's insertion order.
+ */
+export function canonicalizeExportRecords(records: readonly NdjsonRecord[]): string {
+  return records
+    .map((record) => {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(record).sort()) {
+        sorted[key] = (record as unknown as Record<string, unknown>)[key];
+      }
+      return JSON.stringify(sorted);
+    })
+    .join('\n') + (records.length > 0 ? '\n' : '');
+}
+
+/**
+ * Build a manifest for an export. Manifests are only produced for authorized
+ * exports; callers must enforce the operator authorization check before
+ * invoking this function. No payload, orderId or requestId is stored in the
+ * manifest itself — only the digest and record range.
+ */
+export function createExportManifest(
+  records: readonly NdjsonRecord[],
+  opts: { authorized: boolean; generatedAt?: string },
+): ExportManifest {
+  if (!opts.authorized) throw new UnauthorizedExportError();
+  const ids = records.map((r) => r.id);
+  return {
+    manifestVersion: EXPORT_MANIFEST_VERSION,
+    generatedAt: opts.generatedAt ?? new Date().toISOString(),
+    recordRange: {
+      firstId: ids.length > 0 ? Math.min(...ids) : null,
+      lastId: ids.length > 0 ? Math.max(...ids) : null,
+      count: ids.length,
+    },
+    digest: {
+      algorithm: 'sha256',
+      canonicalization: 'ndjson-record-v1',
+      value: createHash('sha256').update(canonicalizeExportRecords(records)).digest('hex'),
+    },
+  };
+}
+
+export interface ManifestVerification {
+  ok: boolean;
+  reason?: string;
+  records: number;
+}
+
+/**
+ * Verify that an NDJSON export is complete and unchanged. The optional
+ * end-of-stream sentinel emitted by the HTTP route is ignored, so exports
+ * with and without a sentinel verify identically.
+ */
+export function verifyExportManifest(
+  ndjson: string,
+  manifest: ExportManifest,
+): ManifestVerification {
+  const records = ndjson
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as NdjsonRecord & { _sentinel?: boolean })
+    .filter((r) => r._sentinel !== true);
+  const actual = createHash('sha256').update(canonicalizeExportRecords(records)).digest('hex');
+  if (actual !== manifest.digest.value) {
+    return { ok: false, reason: 'digest mismatch — export changed or is incomplete', records: records.length };
+  }
+  const ids = records.map((r) => r.id);
+  const first = ids.length > 0 ? Math.min(...ids) : null;
+  const last = ids.length > 0 ? Math.max(...ids) : null;
+  if (
+    first !== manifest.recordRange.firstId || last !== manifest.recordRange.lastId ||
+    records.length !== manifest.recordRange.count
+  ) {
+    return { ok: false, reason: 'record range mismatch', records: records.length };
+  }
+  return { ok: true, records: records.length };
 }
