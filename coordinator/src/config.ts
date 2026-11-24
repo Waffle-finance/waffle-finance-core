@@ -1,5 +1,6 @@
 import { loadCoordinatorConfig } from "@wafflefinance/config/node";
 import type { CoordinatorConfig } from "@wafflefinance/config";
+import { parseTrustedProxies } from "./server/middleware/ratelimit.js";
 import {
   isSolanaPlaceholder,
   checkSolanaConfig,
@@ -101,7 +102,20 @@ function normalizeIssues(error: unknown): ConfigValidationIssue[] {
  */
 export function loadConfig(): CoordinatorConfig {
   try {
-    return loadCoordinatorConfig();
+    const cfg = loadCoordinatorConfig();
+    // Trusted proxy entries are security-critical: reject malformed values at
+    // startup instead of silently trusting a spoofable X-Forwarded-For header.
+    try {
+      parseTrustedProxies(cfg.trustedProxies);
+    } catch (error) {
+      throw new CoordinatorConfigError([
+        {
+          field: "trustedProxies",
+          reason: (error as Error).message + " (COORDINATOR_TRUSTED_PROXIES)"
+        }
+      ]);
+    }
+    return cfg;
   } catch (error) {
     throw new CoordinatorConfigError(normalizeIssues(error));
   }

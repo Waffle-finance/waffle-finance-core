@@ -35,6 +35,9 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 /** Only version in use today: AES-256-GCM. */
 const VERSION_AES256GCM = 0x01;
+/** AES-256-GCM blob carrying an explicit key identifier (key rotation). */
+const VERSION_AES256GCM_KEY_ID = 0x02;
+const MAX_KEY_ID_BYTES = 64;
 
 const IV_BYTES = 12;        // 96-bit IV — GCM standard
 const TAG_BYTES = 16;       // 128-bit auth tag — GCM maximum
@@ -75,12 +78,20 @@ export function deriveKey(rawKey: string): Buffer {
  *
  * @param plaintext  The raw preimage hex string (e.g. "0xabc123…").
  * @param key        32-byte key buffer produced by {@link deriveKey}.
+ * @param keyId      Optional versioned key identifier (e.g. `"k-2026-01"`).
+ *                   When supplied the blob uses format 0x02 so operators can
+ *                   verify which storage key encrypted each record.
  * @returns          Base64url-encoded encrypted blob. Store this in place
  *                   of the plaintext `preimage` column.
  */
-export function encryptSecret(plaintext: string, key: Buffer): string {
+export function encryptSecret(plaintext: string, key: Buffer, keyId?: string): string {
   if (key.length !== KEY_BYTES) {
     throw new Error(`Key must be exactly ${KEY_BYTES} bytes`);
+  }
+
+  const keyIdBytes = keyId ? Buffer.from(keyId, "utf8") : Buffer.alloc(0);
+  if (keyIdBytes.length > MAX_KEY_ID_BYTES) {
+    throw new Error(`Key identifier must be at most ${MAX_KEY_ID_BYTES} bytes`);
   }
 
   const iv = randomBytes(IV_BYTES);
@@ -92,13 +103,17 @@ export function encryptSecret(plaintext: string, key: Buffer): string {
   ]);
   const authTag = cipher.getAuthTag();
 
-  // Layout: [version(1)] [iv(12)] [authTag(16)] [ciphertext(N)]
-  const blob = Buffer.concat([
-    Buffer.from([VERSION_AES256GCM]),
-    iv,
-    authTag,
-    encrypted
-  ]);
+  // Legacy layout:  [version(1)] [iv(12)] [authTag(16)] [ciphertext(N)]
+  // Versioned layout: [version(2)] [keyIdLen(1)] [keyId] [iv] [tag] [ciphertext]
+  const blob = keyIdBytes.length
+    ? Buffer.concat([
+        Buffer.from([VERSION_AES256GCM_KEY_ID, keyIdBytes.length]),
+        keyIdBytes,
+        iv,
+        authTag,
+        encrypted
+      ])
+    : Buffer.concat([Buffer.from([VERSION_AES256GCM]), iv, authTag, encrypted]);
 
   return blob.toString("base64url");
 }
@@ -126,14 +141,20 @@ export function decryptSecret(blob: string, key: Buffer): string {
   }
 
   const version = buf[0] as number;
-  if (version !== VERSION_AES256GCM) {
+  let offset = 1;
+  if (version === VERSION_AES256GCM_KEY_ID) {
+    const keyIdLength = buf[1] as number;
+    if (keyIdLength === 0 || keyIdLength > MAX_KEY_ID_BYTES || buf.length < 2 + keyIdLength + IV_BYTES + TAG_BYTES + 1) {
+      throw new Error("Encrypted blob has a malformed key identifier");
+    }
+    offset = 2 + keyIdLength;
+  } else if (version !== VERSION_AES256GCM) {
     throw new Error(
       `Unknown encryption version 0x${version.toString(16).padStart(2, "0")}. ` +
-      `Only AES-256-GCM (version 0x01) is supported.`
+      `Only AES-256-GCM (version 0x01/0x02) is supported.`
     );
   }
 
-  let offset = 1;
   const iv = buf.subarray(offset, offset + IV_BYTES);
   offset += IV_BYTES;
   const authTag = buf.subarray(offset, offset + TAG_BYTES);
@@ -153,6 +174,22 @@ export function decryptSecret(blob: string, key: Buffer): string {
       "or the stored blob has been tampered with."
     );
   }
+}
+
+/**
+ * Return the key identifier recorded in a versioned ciphertext blob, or
+ * `undefined` for legacy (0x01) blobs. Used by the rotation tool to verify
+ * which records still need re-encryption before an old key is retired.
+ * Never returns plaintext or key material.
+ */
+export function readKeyId(blob: string): string | undefined {
+  const buf = Buffer.from(blob, "base64url");
+  if (buf[0] !== VERSION_AES256GCM_KEY_ID) return undefined;
+  const length = buf[1] as number;
+  if (length === 0 || length > MAX_KEY_ID_BYTES || buf.length < 2 + length) {
+    throw new Error("Encrypted blob has a malformed key identifier");
+  }
+  return buf.subarray(2, 2 + length).toString("utf8");
 }
 
 /**
