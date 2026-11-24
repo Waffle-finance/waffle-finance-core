@@ -36,6 +36,10 @@ If deploying the coordinator publicly, it is recommended to place it behind an A
 
 # API Endpoints
 
+> A machine-generated catalog of all routes with method, path, authorization class, and health
+> semantics is available at [`docs/ROUTE_CATALOG.md`](../../docs/ROUTE_CATALOG.md).
+> The sections below document the coordinator's public endpoints with full request/response schemas.
+
 ---
 
 ## Announce an Order
