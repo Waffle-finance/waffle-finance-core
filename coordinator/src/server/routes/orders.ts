@@ -6,7 +6,13 @@ import type { OrderService } from "../../services/order-service.js";
 import { OrderValidationError } from "../../services/order-service.js";
 import { announceSchema } from "../../validation/announce.js";
 import { historyAddressSchema, orderIdSchema } from "../../validation/address.js";
-import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
+import {
+  makeRateLimiter,
+  loadApiKeys,
+  loadTrustedProxies,
+  resolveClientIp,
+  extractBearerToken,
+} from "../middleware/ratelimit.js";
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, conflictError, notFoundError, invalidCursorError } from "../errors.js";
@@ -125,6 +131,18 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
       const order = await orders.announce(parsed);
       res.status(201).json(serialiseOrder(order, getRequestId()));
     } catch (err) {
+      // Malformed/policy-denied announces count towards abuse detection;
+      // transient service failures fall through to the error handler and are
+      // deliberately not counted. Trusted API-key clients are exempt.
+      if (abuseDetector && (err instanceof z.ZodError || err instanceof OrderValidationError)) {
+        const token = extractBearerToken(req);
+        abuseDetector.recordInvalidAnnounce({
+          clientId: resolveClientIp(req, trustedProxies),
+          reason: err instanceof z.ZodError ? "malformed" : "policy_denied",
+          timestamp: Date.now(),
+          trusted: token !== null && apiKeys.has(token),
+        });
+      }
       if (err instanceof z.ZodError) {
         res.status(400).json(validationError(err.errors));
         return;
