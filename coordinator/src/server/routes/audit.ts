@@ -32,6 +32,7 @@ import type { AuditExporter } from "../../audit/audit-exporter.js";
 import type { OrdersRepository } from "../../persistence/orders-repo.js";
 import { AUDIT_EVENT_TYPES, type AuditEventType } from "../../audit/audit-log.js";
 import { validationError } from "../errors.js";
+import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -120,6 +121,12 @@ export function auditRoutes(
   ordersRepo?: OrdersRepository,
 ): Router {
   const router = Router();
+  // The streaming audit export contains the full, unredacted event payloads;
+  // only operators may access it. Other audit reads are redacted views.
+  router.use(
+    "/audit/export",
+    requireRole("operator", { operatorKeys: loadOperatorKeys(), log })
+  );
 
   /**
    * GET /api/audit

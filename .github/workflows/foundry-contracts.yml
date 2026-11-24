@@ -86,3 +86,58 @@ jobs:
           echo "::group::Foundry failure details"
           forge test -vvvv --match-contract "InvariantHTLCEscrowTest" 2>&1 | tail -200 || true
           echo "::endgroup::"
+
+  # ── Slither static analysis ─────────────────────────────────────────────────
+  # Runs Slither against first-party contracts only (vendored libraries and
+  # forge-std are excluded via .slither.config.json filter_paths).
+  #
+  # Gate: new HIGH-confidence findings fail the step.  Any finding that has
+  # been reviewed and accepted can be suppressed by adding an entry to
+  # contracts/.slither-baseline.json with an owner and rationale.
+  slither:
+    name: Slither static analysis
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Slither
+        run: pip install slither-analyzer==0.10.4
+
+      - name: Install solc 0.8.24
+        run: pip install solc-select && solc-select install 0.8.24 && solc-select use 0.8.24
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - name: Install npm dependencies (OpenZeppelin remappings)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Slither (scoped to first-party contracts)
+        run: pnpm run analyze:ci
+
+      - name: Upload Slither report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-report
+          path: contracts/slither-report.json
+          if-no-files-found: ignore

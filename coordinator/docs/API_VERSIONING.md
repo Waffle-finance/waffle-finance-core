@@ -340,8 +340,36 @@ Track version adoption rates and identify clients still on deprecated versions.
 - **ApiVersionMismatch:** A client is using an unsupported version
 - **DeprecatedVersionUsage:** v1 usage remains high after deprecation announcement
 
+## Route reference
+
+A generated catalog of every public route across all three services (coordinator,
+relayer, resolver) is maintained at [`docs/ROUTE_CATALOG.md`](../../docs/ROUTE_CATALOG.md).
+It lists the HTTP method, path pattern, authorization class, and health semantics
+for each endpoint.
+
+The catalog is generated from `scripts/route-catalog-meta.mjs`. To regenerate it:
+
+```bash
+node scripts/generate-route-catalog.mjs
+```
+
+To validate that the metadata is consistent without writing the file (useful in CI):
+
+```bash
+node scripts/generate-route-catalog.mjs --check
+# or via the root validate script:
+pnpm validate:routes
+```
+
+Adding a route without a corresponding entry in `route-catalog-meta.mjs` will
+cause `pnpm validate:routes` to fail with a `sourceRef` existence error on the
+next CI run.
+
+---
+
 ## References
 
 - Versioning inspiration: [Stripe API Versioning](https://stripe.com/docs/api/versioning)
 - Semantic Versioning: [semver.org](https://semver.org/)
 - HTTP Accept header: [RFC 7231](https://tools.ietf.org/html/rfc7231#section-5.3.2)
+- Route catalog: [docs/ROUTE_CATALOG.md](../../docs/ROUTE_CATALOG.md)

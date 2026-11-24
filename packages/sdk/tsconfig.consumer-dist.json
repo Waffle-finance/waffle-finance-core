@@ -1,0 +1,35 @@
+{
+  // Type-check consumer fixtures against the BUILT dist/ output.
+  // Run after: pnpm --filter @wafflefinance/sdk build
+  //
+  // This matches the resolution mode used by coordinator, relayer, and
+  // resolver — they import the compiled package, not the source.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "noEmit": true,
+    "types": ["node"],
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@wafflefinance/sdk":               ["./dist/index.d.ts"],
+      "@wafflefinance/sdk/types":         ["./dist/types/index.d.ts"],
+      "@wafflefinance/sdk/state-machine": ["./dist/state-machine/index.d.ts"],
+      "@wafflefinance/sdk/secrets":       ["./dist/secrets/index.d.ts"],
+      "@wafflefinance/sdk/htlc-client":   ["./dist/htlc-client.d.ts"],
+      "@wafflefinance/sdk/coordinator":   ["./dist/coordinator/index.d.ts"],
+      "@wafflefinance/sdk/assets":        ["./dist/assets/index.d.ts"],
+      "@wafflefinance/sdk/routes":        ["./dist/routes/index.d.ts"],
+      "@wafflefinance/sdk/routes/fee-policy": ["./dist/routes/fee-policy.d.ts"],
+      "@wafflefinance/sdk/config-validation": ["./dist/config-validation.d.ts"],
+      "@wafflefinance/sdk/ethereum":      ["./dist/ethereum/index.d.ts"],
+      "@wafflefinance/sdk/soroban":       ["./dist/soroban/index.d.ts"],
+      "@wafflefinance/sdk/solana":        ["./dist/solana/index.d.ts"],
+      "@wafflefinance/sdk/approval":      ["./dist/approval.d.ts"]
+    }
+  },
+  "include": [
+    "consumer-fixtures/built-dist.consumer.ts",
+    "consumer-fixtures/deep-import.consumer.ts"
+  ]
+}

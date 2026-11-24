@@ -278,6 +278,34 @@ in `docs/TECHNICAL_DEBT.md`.
 
 3. Release engineer fills in all required sections
 
+3a. **Run the format check** before opening the notes PR:
+
+   ```bash
+   node scripts/check-release-notes.mjs releases/vX.Y.Z.md
+   ```
+
+   This validates all eight required sections, the risk level, the validation
+   table, and the rollback plan without parsing prose. A violation fails the
+   check and prints the specific rule that was not met.
+
+   For a release that only touches coordinator or config internals (no changes
+   to relayer, resolver, or frontend), pass `--internal-only` to skip sections
+   3–5:
+
+   ```bash
+   node scripts/check-release-notes.mjs releases/vX.Y.Z.md --internal-only
+   ```
+
+   To validate every file in `releases/` at once (useful before tagging):
+
+   ```bash
+   pnpm validate:release-notes
+   ```
+
+   The check **does not require fixed wording** — it only requires that
+   template placeholder comments (`<!-- ... -->`) are replaced with real
+   content and that required headings are present. Prose style is unconstrained.
+
 4. PR reviewed (1 reviewer for minor, 2 for major)
    └─ Reviewers confirm: accuracy of changes, risk level, validation record,
       deployment/rollback guidance
@@ -314,3 +342,53 @@ See [releases/vX.Y.Z.md](releases/vX.Y.Z.md) for full release notes.
 
 Keep `CHANGES.md` as a running index. Full notes live in `releases/`. This
 keeps the changelog scannable and the detailed notes navigable.
+
+---
+
+## Release note format check
+
+`scripts/check-release-notes.mjs` validates the structural completeness of a
+release note file.  It checks for required headings, a filled risk level, a
+non-placeholder validation table, and a rollback plan.
+
+### What passes without fixed wording
+
+The check is structural — it does not require specific phrases, checkbox syntax,
+or any particular prose style.  Valid notes only need to:
+
+- Replace every `<!-- … -->` template placeholder with real content, or change
+  the section to `None`.
+- Include the eight change-category sections.
+- Set `**Overall risk level:**` to `LOW`, `MEDIUM`, or `HIGH`.
+- Include `## Validation`, `## Rollback plan`, and `## Known limitations`.
+
+### Internal-only change exception
+
+If a release contains **only** changes to coordinator internals, config, or
+documentation — with no changes to relayer, resolver, or frontend — the
+release engineer may pass `--internal-only` when running the check.  This
+skips the requirement for sections 3 (Relayer), 4 (Resolver), and 5 (Frontend).
+All other checks still run.
+
+Acceptable internal-only changes:
+
+- Database migration with no API shape change.
+- Config schema addition where the new field has a safe default.
+- Documentation-only PRs.
+- SDK patch that does not change any exported type or function signature.
+
+The release engineer must confirm the scope is genuinely internal and note it in
+the release notes' Known limitations section if the release omits any service.
+
+### Integrating into release preparation
+
+Add the format check to the notes-PR CI step once a CI workflow exists.  Until
+then, run it locally as step 3a in the release notes workflow above.
+
+```bash
+# Check a specific file
+node scripts/check-release-notes.mjs releases/v1.2.3.md
+
+# Check all files (pre-tag sweep)
+pnpm validate:release-notes
+```

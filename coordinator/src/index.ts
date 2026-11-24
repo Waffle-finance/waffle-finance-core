@@ -244,7 +244,13 @@ async function main(): Promise<void> {
   }
 
   const orders = new OrderService(repo, log, { auditRepo, sseBroker });
-  const secrets = new SecretService(orders, log, cfg.secretStorageKey ?? undefined, cfg.network);
+  const secrets = new SecretService(
+    orders,
+    log,
+    cfg.secretStorageKey ?? undefined,
+    cfg.network,
+    process.env.NODE_ENV ?? "development"
+  );
   const quotes = new QuoteService(log);
 
   auditRepo
