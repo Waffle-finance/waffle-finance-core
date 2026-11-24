@@ -12,11 +12,19 @@
  *  - setMode('testnet') from testnet is a no-op (returns ok: true)
  *  - expectedEthChainIdHex is Sepolia for testnet mode
  *  - freighterConnected / metamaskConnected flags follow address presence
- *  - refreshWalletNetworks is callable without error
+ *  - Ethereum chain state and switching are sourced from wagmi
  */
 
 import { renderHook, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+const mockUseChainId = vi.fn(() => 11155111);
+const mockSwitchChainAsync = vi.fn().mockResolvedValue(11155111);
+
+vi.mock('wagmi', () => ({
+  useChainId: () => mockUseChainId(),
+  useSwitchChain: () => ({ switchChainAsync: mockSwitchChainAsync }),
+}));
 
 // Keep freighter silent — Freighter API is not available in jsdom.
 vi.mock('@stellar/freighter-api', () => ({
@@ -43,6 +51,8 @@ const ETH_ADDR = '0x1111111111111111111111111111111111111111';
 const XLM_ADDR = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB422';
 
 beforeEach(() => {
+  mockUseChainId.mockReturnValue(11155111);
+  mockSwitchChainAsync.mockReset().mockResolvedValue(11155111);
   // No injected wallet by default.
   Object.defineProperty(window, 'ethereum', {
     value: undefined,
@@ -171,19 +181,6 @@ describe('useNetworkMode — setMode mainnet gating', () => {
 });
 
 // ---------------------------------------------------------------------------
-// refreshWalletNetworks
-// ---------------------------------------------------------------------------
-
-describe('useNetworkMode — refreshWalletNetworks', () => {
-  it('is callable without throwing', () => {
-    const { result } = renderHook(() =>
-      useNetworkMode({ ethAddress: undefined, stellarAddress: undefined })
-    );
-    expect(() => result.current.refreshWalletNetworks()).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Wallet matching: no wallet = match by convention
 // ---------------------------------------------------------------------------
 
@@ -200,5 +197,51 @@ describe('useNetworkMode — wallet match logic with no wallets', () => {
       useNetworkMode({ ethAddress: undefined, stellarAddress: undefined })
     );
     expect(result.current.freighterMatches).toBe(true);
+  });
+});
+
+describe('useNetworkMode — wagmi Ethereum integration', () => {
+  it('switches the connected wallet through wagmi when syncing to app mode', async () => {
+    const { result } = renderHook(() =>
+      useNetworkMode({ ethAddress: ETH_ADDR, stellarAddress: undefined })
+    );
+
+    await act(async () => {
+      await result.current.syncWalletsToAppMode();
+    });
+
+    expect(mockSwitchChainAsync).toHaveBeenCalledWith({ chainId: 11155111 });
+  });
+
+  it('reports a rejected chain switch without changing network mode', async () => {
+    mockSwitchChainAsync.mockRejectedValueOnce(
+      Object.assign(new Error('User rejected the request'), { code: 4001 }),
+    );
+    const { result } = renderHook(() =>
+      useNetworkMode({ ethAddress: ETH_ADDR, stellarAddress: undefined })
+    );
+
+    let response: { ok: boolean; reason?: string } = { ok: true };
+    await act(async () => {
+      response = await result.current.syncWalletsToAppMode();
+    });
+
+    expect(response).toEqual({ ok: false, reason: 'user-rejected' });
+    expect(result.current.mode).toBe('testnet');
+  });
+
+  it('reflects chain changes from wagmi account state', () => {
+    mockUseChainId.mockReturnValue(1);
+    const { result, rerender } = renderHook(() =>
+      useNetworkMode({ ethAddress: ETH_ADDR, stellarAddress: undefined })
+    );
+    expect(result.current.metamaskChainId).toBe('0x1');
+    expect(result.current.metamaskMatches).toBe(false);
+
+    mockUseChainId.mockReturnValue(11155111);
+    rerender();
+
+    expect(result.current.metamaskChainId).toBe('0xaa36a7');
+    expect(result.current.metamaskMatches).toBe(true);
   });
 });

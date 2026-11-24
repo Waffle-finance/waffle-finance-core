@@ -1,13 +1,14 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RefundDialog } from './RefundDialog';
-import { makeEthereumHTLCClient } from '../../lib/sdk-context';
+import { getEthereumWalletClient, makeEthereumHTLCClient } from '../../lib/sdk-context';
 import { useNetworkMode } from '../../lib/useNetworkMode';
 import type { Address } from 'viem';
 import { vi } from 'vitest';
 
 // Mock the makeEthereumHTLCClient function
 vi.mock('../../lib/sdk-context', () => ({
+  getEthereumWalletClient: vi.fn(),
   makeEthereumHTLCClient: vi.fn(),
 }));
 
