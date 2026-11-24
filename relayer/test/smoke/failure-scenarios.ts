@@ -16,14 +16,23 @@ import { SettlementService } from '../../src/services/settlement-service.js';
 import { RetryEngine } from '../../src/utils/retry-engine.js';
 import { TxStateStore } from '../../src/services/tx-state-store.js';
 
-// Mock metrics
-vi.mock('../../src/metrics.js', () => ({
-  settlementAttemptsTotal: { inc: vi.fn() },
-  settlementFailuresTotal: { inc: vi.fn() },
-  settlementRecoveryTotal: { inc: vi.fn() },
-  settlementStateGauge: { set: vi.fn() },
-  settlementDurationSeconds: { observe: vi.fn() },
-}));
+// Mock metrics using importOriginal to avoid missing export errors
+vi.mock('../../src/metrics.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/metrics.js')>();
+  return {
+    ...actual,
+    settlementAttemptsTotal: { inc: vi.fn() },
+    settlementFailuresTotal: { inc: vi.fn() },
+    settlementRecoveryTotal: { inc: vi.fn() },
+    settlementStateGauge: { set: vi.fn() },
+    settlementDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    settlementSuccessTotal: { inc: vi.fn() },
+    retryEngineAttemptsTotal: { inc: vi.fn() },
+    retryEngineCircuitState: { set: vi.fn() },
+    txStateReconciliationDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    txStateReconciliationsTotal: { inc: vi.fn() },
+  };
+});
 
 // ── Failure injection helpers ───────────────────────────────────────────────
 
@@ -70,11 +79,27 @@ export function makeFaultyService(injectFailure?: (attempt: number) => Error | n
     defaultMaxAttempts: 5,
     defaultBaseDelayMs: 1,
     defaultMaxDelayMs: 10,
-    circuitBreakerThreshold: 10,
+    circuitBreakerThreshold: 10, // High threshold so normal tests don't trip it
   });
   
   const svc = new SettlementService({ txStateStore, retryEngine });
   
+  return { svc, retryEngine };
+}
+
+/**
+ * Creates a service with a low circuit breaker threshold for circuit breaker tests.
+ */
+export function makeCircuitBreakerService() {
+  const txStateStore = new TxStateStore({ storageDir: null });
+  const retryEngine = new RetryEngine({
+    defaultMaxAttempts: 1, // Single attempt per order
+    defaultBaseDelayMs: 1,
+    defaultMaxDelayMs: 10,
+    circuitBreakerThreshold: 2, // Open after 2 failures
+    circuitBreakerResetMs: 10,  // Reset quickly for testability
+  });
+  const svc = new SettlementService({ txStateStore, retryEngine });
   return { svc, retryEngine };
 }
 
@@ -104,10 +129,10 @@ describe('Relayer smoke — failure scenarios', () => {
     });
 
     it('marks circuit as open after sustained timeouts', async () => {
-      const { svc, retryEngine } = makeFaultyService();
+      const { svc, retryEngine } = makeCircuitBreakerService();
       
-      // Create enough failures to open the circuit
-      for (let i = 0; i < 3; i++) {
+      // Create enough failures to open the circuit (threshold=2)
+      for (let i = 0; i < 2; i++) {
         try {
           await svc.settle({
             orderId: `order-timeout-${i}`,
@@ -128,9 +153,9 @@ describe('Relayer smoke — failure scenarios', () => {
     });
 
     it('recovers from timeout circuit after cooldown', async () => {
-      const { svc, retryEngine } = makeFaultyService();
+      const { svc, retryEngine } = makeCircuitBreakerService();
       
-      // Trip the circuit
+      // Trip the circuit (2 failures needed to open with threshold=2)
       for (let i = 0; i < 2; i++) {
         try {
           await svc.settle({
@@ -148,8 +173,8 @@ describe('Relayer smoke — failure scenarios', () => {
       
       expect(retryEngine.circuitState('settlement:xlm_to_eth')).toBe('open');
       
-      // Simulate cooldown passing
-      vi.advanceTimersByTime(100);
+      // Wait for circuit breaker reset (circuitBreakerResetMs=10ms)
+      await new Promise(resolve => setTimeout(resolve, 20));
       
       // Now a successful call should transition to half-open and close
       const result = await svc.settle({
@@ -289,9 +314,19 @@ describe('Relayer smoke — failure scenarios', () => {
       
       expect(result.txHash).toBe('0xtx_delay_coord');
       
-      // Simulate delay before coordinator acknowledgment
+      // Record is in submission_acked initially
       const record1 = svc.getStatus('order-delay-coord');
       expect(record1?.state).toBe('submission_acked');
+      
+      // Advance to chain_mined state before coordinator ack
+      svc.recordReceipt('order-delay-coord', {
+        hash: '0xtx_delay_coord',
+        blockNumber: 100,
+        blockHash: '0xblock',
+        status: 1,
+        gasUsed: 21000n,
+        confirmations: 12,
+      });
       
       // Coordinator ack comes in later
       svc.recordCoordinatorAck('order-delay-coord', 'coord-ref-123');
@@ -351,11 +386,11 @@ describe('Relayer smoke — failure scenarios', () => {
       const { svc } = makeFaultyService();
       let attempts = 0;
       
-      // Simulate latency increasing with each attempt
+      // Simulate a scenario that fails once then succeeds
       const action = async () => {
         attempts++;
-        if (attempts >= 3) throw timeoutError(); // Eventually timeout
-        return '0xtx_latency_success';
+        if (attempts === 1) throw timeoutError(); // First attempt times out
+        return '0xtx_latency_success'; // Second attempt succeeds
       };
       
       const result = await svc.settle({

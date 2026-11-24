@@ -11,20 +11,29 @@
  * Usage: pnpm test:smoke --filter backlog
  */
 
-import { describe, it, expect, vi, beforeEach, jest } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SettlementService } from '../../src/services/settlement-service.js';
 import { RetryEngine } from '../../src/utils/retry-engine.js';
 import { TxStateStore } from '../../src/services/tx-state-store.js';
 import { randomBytes } from 'crypto';
 
-// Mock metrics
-vi.mock('../../src/metrics.js', () => ({
-  settlementAttemptsTotal: { inc: vi.fn() },
-  settlementFailuresTotal: { inc: vi.fn() },
-  settlementRecoveryTotal: { inc: vi.fn() },
-  settlementStateGauge: { set: vi.fn() },
-  settlementDurationSeconds: { observe: vi.fn() },
-}));
+// Mock metrics using importOriginal to avoid missing export errors
+vi.mock('../../src/metrics.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/metrics.js')>();
+  return {
+    ...actual,
+    settlementAttemptsTotal: { inc: vi.fn() },
+    settlementFailuresTotal: { inc: vi.fn() },
+    settlementRecoveryTotal: { inc: vi.fn() },
+    settlementStateGauge: { set: vi.fn() },
+    settlementDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    settlementSuccessTotal: { inc: vi.fn() },
+    retryEngineAttemptsTotal: { inc: vi.fn() },
+    retryEngineCircuitState: { set: vi.fn() },
+    txStateReconciliationDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    txStateReconciliationsTotal: { inc: vi.fn() },
+  };
+});
 
 // ── Backlog helpers ─────────────────────────────────────────────────────────
 
