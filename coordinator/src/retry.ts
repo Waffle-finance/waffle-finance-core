@@ -28,6 +28,17 @@ export class FatalStartupError extends Error {
   }
 }
 
+/**
+ * Thrown when a `retryAsync` call is cancelled via `RetryOptions.signal`.
+ * Distinguishable from both `FatalStartupError` and ordinary exhaustion.
+ */
+export class RetryCancelledError extends Error {
+  constructor(message = "Retry cancelled via AbortSignal") {
+    super(message);
+    this.name = "RetryCancelledError";
+  }
+}
+
 // ── RetryOptions ─────────────────────────────────────────────────────────────
 
 export interface RetryOptions {
@@ -53,6 +64,13 @@ export interface RetryOptions {
    * Useful for emitting structured log entries with attempt / delay context.
    */
   onRetry?: (opts: { attempt: number; maxAttempts: number; delayMs: number; err: unknown }) => void;
+  /**
+   * Optional AbortSignal. When aborted, the retry loop stops promptly and
+   * rejects with a `RetryCancelledError` (distinguishable from a transient
+   * error and from exhaustion). An already-aborted signal causes an immediate
+   * rejection before the first attempt.
+   */
+  signal?: AbortSignal;
 }
 
 // ── retryAsync ───────────────────────────────────────────────────────────────
@@ -73,35 +91,40 @@ export async function retryAsync<T>(
   const {
     shouldRetry: userShouldRetry,
     onRetry,
-    ...restOpts
+    signal,
+    maxAttempts = 5,
+    baseDelayMs = 500,
+    maxDelayMs = 30_000,
+    jitterMs = 200,
   } = opts;
 
-  // Wrap shouldRetry to check for FatalStartupError first
-  const shouldRetry = (err: unknown, attempt: number): boolean => {
-    // FatalStartupError is never retried — propagate immediately.
-    if (err instanceof FatalStartupError) {
-      return false;
-    }
+  // Reject immediately if the caller provided an already-aborted signal.
+  if (signal?.aborted) throw new RetryCancelledError();
 
-    // Caller-supplied predicate can mark any error as non-retryable.
-    if (userShouldRetry && !userShouldRetry(err)) {
-      return false;
-    }
-
+  // Wrap shouldRetry to check for FatalStartupError and AbortSignal first.
+  const shouldRetry = (err: unknown, _attempt: number): boolean => {
+    if (err instanceof FatalStartupError) return false;
+    if (userShouldRetry && !userShouldRetry(err)) return false;
     return true;
   };
 
   return retryAsyncBase(fn, {
-    ...restOpts,
+    maxAttempts,
+    baseDelayMs,
+    maxDelayMs,
+    jitterMs,
     shouldRetry,
     onRetry: onRetry
-      ? ({ attempt, delayMs, err }) =>
-          onRetry({
-            attempt,
-            maxAttempts: opts.maxAttempts ?? 5,
-            delayMs,
-            err,
-          })
-      : undefined,
+      ? ({ attempt, delayMs, err }) => {
+          // Surface abort mid-retry: throw RetryCancelledError synchronously
+          // from inside onRetry so the base retryAsync propagates it.
+          if (signal?.aborted) throw new RetryCancelledError();
+          onRetry({ attempt, maxAttempts, delayMs, err });
+        }
+      : signal
+        ? ({ attempt, delayMs, err: _err }) => {
+            if (signal.aborted) throw new RetryCancelledError();
+          }
+        : undefined,
   });
 }

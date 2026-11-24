@@ -1,0 +1,4 @@
+{
+  "_comment": "Baseline of accepted/reviewed Slither findings. Add a new entry here (with rationale) to suppress a finding that has been reviewed and accepted. Never add entries without an owner and rationale.",
+  "baseline": []
+}

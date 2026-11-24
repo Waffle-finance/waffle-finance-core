@@ -6,7 +6,8 @@
     "sourceType": "module"
   },
   "plugins": [
-    "@typescript-eslint"
+    "@typescript-eslint",
+    "wafflefinance-security"
   ],
   "extends": [
     "eslint:recommended",
@@ -36,7 +37,8 @@
       {
         "prefer": "type-imports"
       }
-    ]
+    ],
+    "wafflefinance-security/no-secret-logging": "error"
   },
   "ignorePatterns": [
     "dist/",
@@ -78,6 +80,16 @@
             "max": 20
           }
         ]
+      }
+    },
+    {
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.ts"
+      ],
+      "rules": {
+        "wafflefinance-security/no-secret-logging": "warn"
       }
     }
   ]

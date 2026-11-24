@@ -22,6 +22,13 @@ import {
   listenerLastEventTimestampSeconds,
 } from "../metrics.js";
 
+/** Return the first 8 hex chars of a preimage for log correlation — never the full value. */
+function preimagePrefix(preimage: string | undefined): string | null {
+  if (!preimage) return null;
+  const hex = preimage.startsWith("0x") ? preimage.slice(2) : preimage;
+  return `0x${hex.slice(0, 8)}…`;
+}
+
 // Metric labels, derived from the support policy's canonical chain ids so the
 // label strings and the capability checks below cannot drift apart.
 const CHAIN_ETH = chainLabel("ethereum");
@@ -264,7 +271,7 @@ export async function runCommand(): Promise<void> {
             listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
           },
           onOrderClaimed: (e) => {
-            log.info({ orderId: e.orderId.toString(), preimage: e.preimage }, "ETH order claimed");
+            log.info({ orderId: e.orderId.toString(), preimagePrefix: preimagePrefix(e.preimage) }, "ETH order claimed");
             ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_claimed" });
             listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
           },

@@ -1,0 +1,17 @@
+{
+  "name": "eslint-plugin-wafflefinance-security",
+  "version": "1.0.0",
+  "description": "Local ESLint security rules for WaffleFinance service code",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node no-secret-logging.test.js"
+  },
+  "devDependencies": {
+    "eslint": "^8.56.0"
+  },
+  "peerDependencies": {
+    "eslint": ">=8.0.0"
+  },
+  "keywords": ["eslint", "eslint-plugin", "security"]
+}

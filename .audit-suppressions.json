@@ -1,0 +1,11 @@
+[
+  {
+    "_comment": "Suppress a reviewed finding by adding an entry here. All fields are required.",
+    "_format": {
+      "ghsa": "GHSA-xxxx-xxxx-xxxx  (GitHub Security Advisory ID)",
+      "owner": "@github-handle of the reviewer who accepted the risk",
+      "rationale": "Why this finding is accepted or is a false-positive",
+      "expires": "ISO-8601 date string (e.g. 2026-06-01) OR 'permanent' for structural false-positives"
+    }
+  }
+]
