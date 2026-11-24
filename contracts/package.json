@@ -17,7 +17,10 @@
     "verify": "hardhat verify",
     "clean": "hardhat clean && rm -rf artifacts cache",
     "lint": "solhint 'contracts/**/*.sol'",
-    "coverage": "hardhat coverage"
+    "coverage": "hardhat coverage",
+    "analyze": "slither contracts/ --config-file .slither.config.json",
+    "analyze:json": "slither contracts/ --config-file .slither.config.json --json slither-report.json",
+    "analyze:ci": "slither contracts/ --config-file .slither.config.json --json slither-report.json --fail-high"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.0.0",

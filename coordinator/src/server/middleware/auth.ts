@@ -1,13 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
 import type { Logger } from "pino";
-import { resolveClientIp } from "./ratelimit.js";
+import { resolveClientIp, type TrustedProxyConfig } from "./ratelimit.js";
 
 export type Role = "operator";
 
 export interface AuthOptions {
   operatorKeys?: ReadonlySet<string>;
   log?: Logger;
-  trustedProxies?: ReadonlySet<string>;
+  trustedProxies?: ReadonlySet<string> | TrustedProxyConfig;
 }
 
 /**

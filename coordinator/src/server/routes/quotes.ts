@@ -1,5 +1,7 @@
 import { Router } from "express";
 import type { QuoteService } from "../../services/quote-service.js";
+import type { Logger } from "pino";
+import { classifiedExpensiveRouteLimiter } from "../middleware/expensive-route-limits.js";
 
 /**
  * Quote routes.
@@ -10,8 +12,12 @@ import type { QuoteService } from "../../services/quote-service.js";
  *                            combines both pairs into a single response so
  *                            the BridgeForm can fetch one endpoint.
  */
-export function quotesRoutes(quotes: QuoteService): Router {
+export function quotesRoutes(quotes: QuoteService, log?: Logger): Router {
   const router = Router();
+
+  // Quotes are expensive (price fetch + calculation): separate anonymous and
+  // authenticated policies, with an audited bypass for configured identities.
+  router.use(classifiedExpensiveRouteLimiter("quotes", { log }));
 
   /**
    * ETH/XLM quote.

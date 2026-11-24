@@ -169,6 +169,7 @@ approval in 5a is confirmed. Verify each before enabling mainnet traffic:
 - [ ] Migration guide written for any breaking changes.
 - [ ] `docs/TECHNICAL_DEBT.md` updated — mark resolved items ✅, add any new debt discovered.
 - [ ] `docs/DOC_MAP.md` updated if new documentation files were added.
+- [ ] `pnpm validate:debt` passes — no format violations in `docs/TECHNICAL_DEBT.md`.
 
 ---
 
@@ -178,6 +179,8 @@ approval in 5a is confirmed. Verify each before enabling mainnet traffic:
 - [ ] Version follows semantic versioning per `RELEASE_POLICY.md`.
 - [ ] `pnpm validate:manifests` passes (names, versions, export paths in sync).
 - [ ] `pnpm validate:commands` passes (script contract still enforced).
+- [ ] `pnpm validate:examples` passes (SDK doc examples type-check clean).
+- [ ] Release notes file `releases/vX.Y.Z.md` passes `node scripts/check-release-notes.mjs releases/vX.Y.Z.md`.
 - [ ] `soroban/Cargo.toml` workspace version updated if Soroban contracts changed.
 
 ---

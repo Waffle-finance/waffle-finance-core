@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { FakeClock } from '../../packages/test-utils/src/fake-clock.js';
 
 // ── Isolate metrics ───────────────────────────────────────────────────────────
 vi.mock('../src/metrics.js', () => ({
@@ -392,11 +393,13 @@ describe('RetryEngine — RPC timeout simulation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Circuit breaker — cooldown boundary (fake timers)
+// Circuit breaker — cooldown boundary (FakeClock)
 // ---------------------------------------------------------------------------
 //
-// This suite pins down the exact cooldown contract using vi.useFakeTimers()
-// so the test is deterministic and documents the transition points precisely:
+// This suite pins down the exact cooldown contract using the shared FakeClock
+// utility from @wafflefinance/test-utils so the test is deterministic and
+// documents the transition points precisely — without any real wall-clock
+// sleeps and with guaranteed cleanup even when a test throws:
 //
 //   closed ──[threshold failures]──▶ open
 //      open ──[elapsed < resetMs]──▶ fast-fail (CircuitOpenError)
@@ -404,18 +407,16 @@ describe('RetryEngine — RPC timeout simulation', () => {
 //   half-open + success ──▶ closed
 //   half-open + failure ──▶ open
 //
-// The fake clock never sleeps, so these checks run in microseconds and are
-// immune to timing-sensitive CI flakiness.
+// FakeClock.restore() is called in afterEach, so fake-timer state never leaks
+// into the negative-delay suite or any other suite that runs afterwards.
 // ---------------------------------------------------------------------------
 
-describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
+describe('RetryEngine — circuit breaker cooldown boundary (FakeClock)', () => {
+  // One shared clock instance; each test installs it and afterEach restores.
+  const clock = new FakeClock({ scope: 'all' });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+  beforeEach(() => clock.install());
+  afterEach(() => clock.restore());
 
   /**
    * Helper: trip the circuit by running `threshold` failing calls.
@@ -462,7 +463,7 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
     expect(engine.circuitState('rpc')).toBe('open');
 
     // Advance to 1 ms before the reset window closes — still open.
-    vi.advanceTimersByTime(RESET_MS - 1);
+    clock.advance(RESET_MS - 1);
     const blocked = vi.fn().mockResolvedValue('nope');
     await expect(engine.run('rpc', blocked, { maxAttempts: 1 })).rejects.toBeInstanceOf(CircuitOpenError);
     expect(blocked).not.toHaveBeenCalled();
@@ -482,7 +483,7 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
     expect(engine.circuitState('rpc')).toBe('open');
 
     // Advance exactly to the reset boundary.
-    vi.advanceTimersByTime(RESET_MS);
+    clock.advance(RESET_MS);
 
     // The probe call is allowed through and succeeds → circuit closes.
     const probeWorker = vi.fn().mockResolvedValue('probe-result');
@@ -506,7 +507,7 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
     await tripCircuit(engine, 'rpc', 2);
 
     // Advance exactly to the reset boundary so a probe is allowed.
-    vi.advanceTimersByTime(RESET_MS);
+    clock.advance(RESET_MS);
 
     // Probe fails → circuit must reopen immediately.
     const failingProbe = vi.fn().mockRejectedValue(new Error('probe failure'));
@@ -521,7 +522,7 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
     expect(blocked).not.toHaveBeenCalled();
   });
 
-  it('1 ms past cooldown is still open; 1 ms at-or-beyond is half-open', async () => {
+  it('1 ms before cooldown is still open; exactly at boundary is half-open', async () => {
     // Verify the boundary condition is >= (inclusive), not >.
     const RESET_MS = 2_000;
     const engine = new RetryEngine({
@@ -535,13 +536,13 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
     await tripCircuit(engine, 'rpc', 1);
 
     // One ms before the boundary — still blocked.
-    vi.advanceTimersByTime(RESET_MS - 1);
+    clock.advance(RESET_MS - 1);
     await expect(
       engine.run('rpc', vi.fn().mockResolvedValue('x'), { maxAttempts: 1 })
     ).rejects.toBeInstanceOf(CircuitOpenError);
 
     // Advance the final 1 ms to reach the exact boundary.
-    vi.advanceTimersByTime(1);
+    clock.advance(1);
     const worker = vi.fn().mockResolvedValue('boundary-ok');
     await expect(engine.run('rpc', worker, { maxAttempts: 1 })).resolves.toBe('boundary-ok');
     expect(engine.circuitState('rpc')).toBe('closed');
@@ -559,40 +560,40 @@ describe('RetryEngine — circuit breaker cooldown boundary (fake timers)', () =
 // ---------------------------------------------------------------------------
 
 describe('RetryEngine — negative delay clamping', () => {
+  // Shared clock for the two tests in this suite that need fake timers.
+  const clock = new FakeClock({ scope: 'all' });
+  afterEach(() => clock.restore());
+
   // ── Constructor-level clamping ────────────────────────────────────────────
 
   it('clamps negative defaultBaseDelayMs to zero — no negative timer scheduled', async () => {
-    vi.useFakeTimers();
-    try {
-      const engine = new RetryEngine({
-        defaultBaseDelayMs: -5_000,   // should be treated as 0
-        defaultMaxDelayMs: 100,
-        defaultMaxAttempts: 2,
-        jitterFactor: 0,
-        circuitBreakerThreshold: 99,
-      });
+    clock.install();
+    const engine = new RetryEngine({
+      defaultBaseDelayMs: -5_000,   // should be treated as 0
+      defaultMaxDelayMs: 100,
+      defaultMaxAttempts: 2,
+      jitterFactor: 0,
+      circuitBreakerThreshold: 99,
+    });
 
-      // Two attempts: first fails (transient), second succeeds.
-      let calls = 0;
-      const fn = vi.fn().mockImplementation(async () => {
-        calls++;
-        if (calls === 1) throw new Error('transient');
-        return 'ok';
-      });
+    // Two attempts: first fails (transient), second succeeds.
+    let calls = 0;
+    const fn = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw new Error('transient');
+      return 'ok';
+    });
 
-      // Run the engine — the backoff sleep is setTimeout(resolve, 0) when
-      // base is clamped to 0.  Advance timers by 0 ms to flush it.
-      const p = engine.run('rpc', fn);
-      vi.advanceTimersByTime(0);
-      const result = await p;
+    // Run the engine — the backoff sleep is setTimeout(resolve, 0) when
+    // base is clamped to 0.  Advance timers by 0 ms to flush it.
+    const p = engine.run('rpc', fn);
+    clock.advance(0);
+    const result = await p;
 
-      expect(result).toBe('ok');
-      expect(fn).toHaveBeenCalledTimes(2);
-      // Confirm the clamped config value.
-      expect((engine as any).cfg.defaultBaseDelayMs).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(result).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+    // Confirm the clamped config value.
+    expect((engine as any).cfg.defaultBaseDelayMs).toBe(0);
   });
 
   it('clamps negative defaultMaxDelayMs to zero', () => {
@@ -626,64 +627,56 @@ describe('RetryEngine — negative delay clamping', () => {
   // ── Per-call override clamping ────────────────────────────────────────────
 
   it('clamps a negative per-call baseDelayMs override to zero', async () => {
-    vi.useFakeTimers();
-    try {
-      const engine = new RetryEngine({
-        defaultMaxAttempts: 2,
-        jitterFactor: 0,
-        circuitBreakerThreshold: 99,
-        defaultBaseDelayMs: 1_000,  // positive default …
-        defaultMaxDelayMs: 5_000,
-      });
+    clock.install();
+    const engine = new RetryEngine({
+      defaultMaxAttempts: 2,
+      jitterFactor: 0,
+      circuitBreakerThreshold: 99,
+      defaultBaseDelayMs: 1_000,  // positive default …
+      defaultMaxDelayMs: 5_000,
+    });
 
-      let calls = 0;
-      const fn = vi.fn().mockImplementation(async () => {
-        calls++;
-        if (calls === 1) throw new Error('transient');
-        return 'clamped-ok';
-      });
+    let calls = 0;
+    const fn = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw new Error('transient');
+      return 'clamped-ok';
+    });
 
-      // Override with a negative value — must be treated as 0.
-      const p = engine.run('rpc', fn, { baseDelayMs: -9_999, maxDelayMs: -1 });
-      vi.advanceTimersByTime(0);
-      const result = await p;
+    // Override with a negative value — must be treated as 0.
+    const p = engine.run('rpc', fn, { baseDelayMs: -9_999, maxDelayMs: -1 });
+    clock.advance(0);
+    const result = await p;
 
-      expect(result).toBe('clamped-ok');
-      expect(fn).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(result).toBe('clamped-ok');
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 
   // ── Retry count invariance ────────────────────────────────────────────────
 
   it('clamping does not change the number of retry attempts', async () => {
-    vi.useFakeTimers();
-    try {
-      const MAX = 3;
-      const engine = new RetryEngine({
-        defaultMaxAttempts: MAX,
-        defaultBaseDelayMs: -100,  // negative → clamped to 0
-        defaultMaxDelayMs: -100,   // negative → clamped to 0
-        jitterFactor: -1,           // negative → clamped to 0
-        circuitBreakerThreshold: 99,
-      });
+    clock.install();
+    const MAX = 3;
+    const engine = new RetryEngine({
+      defaultMaxAttempts: MAX,
+      defaultBaseDelayMs: -100,  // negative → clamped to 0
+      defaultMaxDelayMs: -100,   // negative → clamped to 0
+      jitterFactor: -1,           // negative → clamped to 0
+      circuitBreakerThreshold: 99,
+    });
 
-      const fn = vi.fn().mockRejectedValue(new Error('always fails'));
-      const p = engine.run('rpc', fn);
-      // With 0-ms delays each backoff is setTimeout(resolve, 0).
-      // Flush all pending micro/macro tasks for each retry.
-      for (let i = 0; i < MAX; i++) {
-        vi.advanceTimersByTime(0);
-        await Promise.resolve(); // let the microtask queue drain
-      }
-      await p.catch(() => {});
-
-      // All MAX attempts were made despite clamped-to-zero delays.
-      expect(fn).toHaveBeenCalledTimes(MAX);
-    } finally {
-      vi.useRealTimers();
+    const fn = vi.fn().mockRejectedValue(new Error('always fails'));
+    const p = engine.run('rpc', fn);
+    // With 0-ms delays each backoff is setTimeout(resolve, 0).
+    // Flush all pending micro/macro tasks for each retry.
+    for (let i = 0; i < MAX; i++) {
+      clock.advance(0);
+      await Promise.resolve(); // let the microtask queue drain
     }
+    await p.catch(() => {});
+
+    // All MAX attempts were made despite clamped-to-zero delays.
+    expect(fn).toHaveBeenCalledTimes(MAX);
   });
 
   // ── calculateBackoff utility ──────────────────────────────────────────────

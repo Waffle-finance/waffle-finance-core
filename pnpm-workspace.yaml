@@ -6,3 +6,4 @@ packages:
   - 'coordinator'
   - 'e2e'
   - 'packages/*'
+  - 'eslint-rules'

@@ -112,6 +112,8 @@ the tables below pin down exactly which packages participate in each.
 | `pnpm dev` | `pnpm -r dev` | Long-running dev servers (coordinator, relayer, resolver, dashboard, frontend) |
 | `pnpm clean` | `pnpm -r clean` + removes root `node_modules` | Packages that define `clean` |
 | `pnpm format` / `pnpm format:check` | Prettier write / check across the repo | All TS/TSX/JSON/MD files |
+| `pnpm smoke:deployment` | Probes coordinator/relayer/resolver health after rollout, with redacted diagnostics | Local/stub or deployed service URLs |
+| `pnpm test:smoke:deployment` | Runs the hermetic Node test for the deployment smoke checker | `scripts/test/deployment-health-smoke.test.mjs` |
 | `pnpm validate:commands` | Enforces this command contract | All workspace manifests |
 | `pnpm validate:manifests` | Validates names, versions, and export paths | All workspace manifests |
 | `pnpm validate:deployments` | Validates `deployments.testnet.json` | Deployment records |
@@ -174,9 +176,27 @@ Coordinator extras: `seed-demo` (demo data), `db:backup` / `db:restore`
 | `test` | `vitest run` | Library unit tests |
 | `test:watch` | `vitest` | Watch mode |
 | `lint` (sdk only) | `eslint src --ext .ts` | ESLint over sources |
+| `typecheck:consumer:src` | `tsc --noEmit -p tsconfig.consumer-src.json` | Every documented public SDK subpath type-checks via source alias (frontend/e2e consumption mode) |
+| `typecheck:consumer:dist` | `tsc --noEmit -p tsconfig.consumer-dist.json` | Every documented public SDK subpath type-checks against built `dist/` (service consumption mode); **requires `build` first** |
+| `typecheck:consumers` | Runs both consumer checks in sequence | Both consumption modes pass; deep internal imports are blocked |
 | `clean` | Removes `dist/` | — |
 
-SDK extra: `build:analyze` reports bundle size. Build the SDK before working
+**SDK consumer typecheck** validates two separate consumption modes:
+
+```bash
+# After building the SDK:
+pnpm --filter @wafflefinance/sdk typecheck:consumers
+```
+
+Run this after any change to the SDK's public API surface or its `tsconfig.json`.
+Both checks must pass before a release; failing `typecheck:consumer:dist`
+indicates a type regression in the built package that would break service imports.
+Failing `typecheck:consumer:src` indicates a regression for frontend/e2e source-alias
+imports. The deep-import fixture (`consumer-fixtures/deep-import.consumer.ts`)
+is expected to produce a type error — the CI check inverts its exit code.
+
+SDK extras: `build:analyze` reports bundle size; `verify:subpaths` confirms
+every declared export path exists in `dist/`. Build the SDK before working
 on any package that imports it (`pnpm --filter @wafflefinance/sdk build`).
 
 ### `@wafflefinance/frontend` — browser app (Vite + React)

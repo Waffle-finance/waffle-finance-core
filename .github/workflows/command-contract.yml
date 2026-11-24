@@ -21,3 +21,6 @@ jobs:
       # outage.
       - name: Validate command contract (docs/COMMANDS.md)
         run: node scripts/validate-commands.mjs
+
+      - name: Audit metric label cardinality budget
+        run: node scripts/validate-metric-labels.mjs

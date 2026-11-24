@@ -111,9 +111,13 @@
     "analyze:cost": "node scripts/measure-entry-cost.mjs",
     "analyze:cost:bundle": "node scripts/measure-entry-cost.mjs --bundle",
     "verify:subpaths": "node scripts/verify-subpath-isolation.mjs",
+    "typecheck:consumer:dist": "tsc --noEmit -p tsconfig.consumer-dist.json",
+    "typecheck:consumer:src": "tsc --noEmit -p tsconfig.consumer-src.json",
+    "typecheck:consumers": "pnpm run typecheck:consumer:src && pnpm run typecheck:consumer:dist",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck:examples": "tsc --noEmit -p tsconfig.typecheck.json",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },

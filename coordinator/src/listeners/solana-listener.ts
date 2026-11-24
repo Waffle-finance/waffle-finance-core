@@ -502,6 +502,7 @@ export class SolanaListener {
           txHash: sig,
           blockNumber: effectiveSlot,
           timelock,
+          observedAtMs: Date.now(),
         });
 
         // Track the processed order under its slot for regression rollback.

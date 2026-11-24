@@ -220,8 +220,98 @@ And is wired into `pnpm validate`:
 
 ```jsonc
 // package.json (current shape)
-"validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs"
+"validate": "pnpm validate:manifests && pnpm validate:deps && pnpm validate:docs && pnpm validate:versions && pnpm validate:debt && pnpm validate:examples"
 ```
+
+### Technical debt register format check — implemented (2026-11-19)
+
+`scripts/check-debt-register.mjs` validates every `TD-NNN` entry in
+`docs/TECHNICAL_DEBT.md` against the required machine-readable schema.
+
+Format rules enforced:
+
+| Rule | Description |
+|---|---|
+| F1 | Heading must be `### TD-NNN · <title> <tag>` with a valid severity tag (🔴 🟡 🟢 ✅) |
+| F2 | Open entries must have a `Discovered:` field |
+| F3 | Open entries must have a `Location:` field containing a file path |
+| F4 | Open entries must have a `Next steps:` section with at least one numbered item |
+| F5 | Resolved entries must have a `Resolved:` field with an ISO-8601 date |
+| F6 | IDs must be unique |
+| F7 | IDs must follow the `TD-NNN` format |
+
+Non-blocking stale-review warnings:
+
+| Rule | Description |
+|---|---|
+| S1 | 🔴 HIGH items open more than 90 days without resolution |
+| S2 | 🟡 MED items open more than 180 days without resolution |
+| S3 | Resolved entries with no PR/commit reference tracing the implementation change |
+
+Warnings do not fail the check — they are surfaced at the monthly debt review
+(see `docs/TECHNICAL_DEBT_MAINTENANCE.md §M-02`).
+
+The script runs via:
+
+```bash
+pnpm validate:debt
+```
+
+### Dependency graph — implemented (2026-11-19)
+
+`scripts/dep-graph.mjs` generates a deterministic report of all direct
+workspace-to-workspace dependency edges from declared `dependencies`,
+`devDependencies`, and `peerDependencies` in every workspace `package.json`.
+It does not use file-name heuristics — only declared package names.
+
+Usage:
+
+```bash
+# Human-readable text report (stdout)
+pnpm dep-graph
+
+# JSON report
+pnpm dep-graph:json
+
+# Write JSON to file
+node scripts/dep-graph.mjs --format json --out dep-graph.json
+
+# Changed-package comparison: which workspace packages depend on the SDK?
+node scripts/dep-graph.mjs --changed @wafflefinance/sdk
+
+# Multiple changed packages at once
+node scripts/dep-graph.mjs --changed @wafflefinance/sdk,@wafflefinance/config
+```
+
+The changed-package mode is designed for release preparation: given the packages
+modified in this release, it identifies every other workspace package that depends
+on them directly — without relying on a manually maintained list.
+
+The report is intentionally not wired into `pnpm validate` because it is a
+reporting tool, not a failure gate.  It is intended to be run manually during
+release preparation (see `.github/RELEASE_CHECKLIST.md §1`).
+
+### SDK documentation examples type-check — implemented (2026-11-19)
+
+The SDK's `tsconfig.typecheck.json` includes `examples/**/*.ts` alongside
+`src/**/*.ts` and `test/**/*.ts`.  The `typecheck:examples` script in
+`packages/sdk/package.json` runs:
+
+```bash
+pnpm --filter @wafflefinance/sdk typecheck:examples
+# Or from the workspace root:
+pnpm validate:examples
+```
+
+This compiles every file under `packages/sdk/examples/` against the current
+SDK source.  A renamed or removed public symbol in a marked example fails the
+check before the change is published.
+
+The marker convention for distinguishing public API examples (compiled) from
+illustrative prose snippets (not compiled) is documented in
+[`docs/DOC_EXAMPLES.md`](DOC_EXAMPLES.md).
+
+`pnpm validate:examples` is included in the `pnpm validate` chain.
 
 ### Checks 1, 2, 4, 5, 7, 8 — not yet automated
 
@@ -234,9 +324,8 @@ natural next PRs after the initial documentation pass. Checks 1 and 2
 
 ### CI wiring — still manual
 
-There is still no `.github/workflows/` entry that runs `pnpm validate` (or
-`pnpm validate:docs`) automatically on every push. Until a general CI workflow
-is added, `pnpm validate:docs` must be run locally before merging or tagging.
-This is the same constraint that applied to `pnpm validate` before this pass.
-Wiring it into CI is the prerequisite for the "catches drift before merges"
-acceptance bar.
+There is still no `.github/workflows/` entry that runs `pnpm validate`
+automatically on every push. Until a general CI workflow is added,
+`pnpm validate` must be run locally before merging or tagging. This is the
+same constraint that applied before this pass. Wiring it into CI is the
+prerequisite for the "catches drift before merges" acceptance bar.

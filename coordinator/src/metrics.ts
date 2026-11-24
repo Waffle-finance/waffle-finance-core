@@ -90,6 +90,90 @@ export const repositoryTransactionDeadlocks = new Counter({
   registers: [registry],
 });
 
+// ── Database pool & query latency metrics (#1112) ─────────────────────────────
+
+/**
+ * Active database connections currently in use by queries.
+ *
+ * PostgreSQL: pool.totalCount - pool.idleCount
+ * SQLite: always 1 (single-connection synchronous mode)
+ *
+ * Alert when this approaches the pool size limit to detect connection saturation.
+ */
+export const dbPoolActiveConnections = new Gauge({
+  name: 'coordinator_db_pool_active_connections',
+  help: 'Number of active database connections currently executing queries',
+  registers: [registry],
+});
+
+/**
+ * Idle database connections in the pool available for new queries.
+ *
+ * PostgreSQL: pool.idleCount
+ * SQLite: N/A (not applicable for synchronous single-connection mode)
+ *
+ * A sustained value of 0 indicates pool exhaustion.
+ */
+export const dbPoolIdleConnections = new Gauge({
+  name: 'coordinator_db_pool_idle_connections',
+  help: 'Number of idle database connections available in the pool',
+  registers: [registry],
+});
+
+/**
+ * Total size of the database connection pool.
+ *
+ * PostgreSQL: pool.totalCount
+ * SQLite: 1
+ */
+export const dbPoolTotalConnections = new Gauge({
+  name: 'coordinator_db_pool_total_connections',
+  help: 'Total configured size of the database connection pool',
+  registers: [registry],
+});
+
+/**
+ * Database pool connection wait time in seconds.
+ *
+ * Measures the time a query waits for an available connection when the pool
+ * is saturated. Only emitted for PostgreSQL (pg Pool); SQLite operations
+ * do not wait for connections.
+ *
+ * Alert when p95 > 100ms to detect pool saturation before query failures occur.
+ */
+export const dbPoolWaitDuration = new Histogram({
+  name: 'coordinator_db_pool_wait_duration_seconds',
+  help: 'Time spent waiting for an available database connection from the pool',
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [registry],
+});
+
+/**
+ * Representative query latency by bounded category.
+ *
+ * Categories are defined to avoid high cardinality (no order IDs or SQL text):
+ *   - order_insert     — INSERT INTO orders
+ *   - order_update     — UPDATE orders WHERE public_id = ?
+ *   - order_select_one — SELECT FROM orders WHERE <single row lookup>
+ *   - order_scan       — SELECT FROM orders WHERE <multi-row scan>
+ *   - audit_insert     — INSERT INTO audit_log
+ *   - secret_insert    — INSERT INTO secrets
+ *   - event_claim      — INSERT INTO processed_events (dedup guard)
+ *   - cursor_update    — UPDATE orders SET last_X_block
+ *   - maintenance      — Scheduled cleanup/expiry queries
+ *
+ * Use this to distinguish slow queries from connection saturation:
+ *   - High `dbPoolWaitDuration` + normal `dbQueryCategoryDuration` → pool too small
+ *   - Normal wait + high category duration → query needs optimization
+ */
+export const dbQueryCategoryDuration = new Histogram({
+  name: 'coordinator_db_query_category_duration_seconds',
+  help: 'Database query latency by bounded category (avoids high cardinality)',
+  labelNames: ['category'] as const,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [registry],
+});
+
 /** Last block number seen by each listener */
 export const listenerLastBlock = new Gauge({
   name: 'coordinator_listener_last_block',
@@ -121,6 +205,36 @@ export const listenerLagBlocks = new Gauge({
   labelNames: ['chain'] as const,
   registers: [registry],
 });
+
+/**
+ * Event-to-API freshness: time from a trusted chain observation timestamp to
+ * the durable order transition that makes the event visible via the API.
+ * Only `chain` is a label — never an order ID, wallet, or signature.
+ */
+export const eventToApiFreshnessSeconds = new Histogram({
+  name: 'coordinator_event_to_api_freshness_seconds',
+  help: 'Seconds from trusted chain event observation to durable coordinator API visibility, by chain',
+  labelNames: ['chain'] as const,
+  buckets: [1, 5, 15, 30, 60, 120, 300, 600, 1800],
+  registers: [registry],
+});
+
+/**
+ * Record freshness only when the caller supplies a trustworthy observation
+ * timestamp (e.g. the listener's finalized-event observation). Missing,
+ * future, or implausibly old timestamps are skipped rather than guessed.
+ */
+export function observeEventToApiFreshness(
+  chain: string,
+  observedAtMs: number | undefined,
+  nowMs = Date.now()
+): void {
+  if (!Number.isFinite(observedAtMs) || observedAtMs === undefined) return;
+  const ageMs = nowMs - observedAtMs;
+  // Skew guard: reject future timestamps and observations older than 24 h.
+  if (ageMs < 0 || ageMs > 86_400_000) return;
+  eventToApiFreshnessSeconds.observe({ chain }, ageMs / 1000);
+}
 
 /** Event processing duration per chain and event type */
 export const listenerEventProcessingDuration = new Histogram({
@@ -354,6 +468,22 @@ export const reconciliationLastRun = new Gauge({
   registers: [registry],
 });
 
+/**
+ * Unix timestamp of the last SUCCESSFUL reconciliation run.
+ *
+ * Updated only when a reconciliation run completes without fatal errors.
+ * Remains unchanged on failed runs, allowing operators to alert when the
+ * reconciler has not successfully scanned chain events within the expected
+ * interval.
+ *
+ * Alert threshold = configured schedule + startup window (e.g. 5 min cron + 2 min startup = 7 min)
+ */
+export const reconciliationLastSuccessTimestamp = new Gauge({
+  name: 'coordinator_reconciliation_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the most recent successful reconciliation run',
+  registers: [registry],
+});
+
 /** Total events replayed by reconciler */
 export const reconciliationEventsReplayed = new Counter({
   name: 'coordinator_reconciliation_events_replayed_total',
@@ -558,11 +688,11 @@ export const staleOrdersArchivedAgeSeconds = new Histogram({
   registers: [registry],
 });
 
-/** Resolver participation per operation */
+/** Resolver participation per operation (bounded dimensions only) */
 export const resolverLockActionsTotal = new Counter({
   name: 'coordinator_resolver_lock_actions_total',
-  help: 'Total resolver lock actions by resolver address and action type',
-  labelNames: ['resolver_address', 'action'] as const,
+  help: 'Total resolver lock actions by action type (no resolver identifier labels)',
+  labelNames: ['action'] as const,
   registers: [registry],
 });
 

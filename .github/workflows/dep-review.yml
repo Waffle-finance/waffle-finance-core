@@ -81,6 +81,62 @@ jobs:
       - name: Run dep-version validator
         run: node scripts/check-dep-versions.mjs
 
+  # ── 2b. Dependency audit (CVE triage with suppression support) ──────────────
+  audit-deps:
+    name: Dependency audit (triage report)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run dependency audit
+        run: node scripts/audit-deps.mjs --level high --output audit-report.json
+
+      - name: Upload audit report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-report
+          path: audit-report.json
+          if-no-files-found: ignore
+
+  # ── 2c. ESLint security rule self-tests ─────────────────────────────────────
+  lint-security-rules:
+    name: ESLint security rule tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run ESLint security rule tests
+        run: pnpm --filter eslint-plugin-wafflefinance-security test
+
   # ── 3. Label PRs that touch audit-critical packages ────────────────────────
   label-critical-deps:
     name: Label critical-dependency changes

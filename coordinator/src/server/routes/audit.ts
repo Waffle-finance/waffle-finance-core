@@ -26,12 +26,16 @@
  */
 
 import { Router, type Request, type Response } from "express";
+import { Writable } from "node:stream";
 import type { Logger } from "pino";
 import type { AuditRepository } from "../../audit/audit-repo.js";
 import type { AuditExporter } from "../../audit/audit-exporter.js";
+import { createExportManifest } from "../../audit/audit-exporter.js";
+import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 import type { OrdersRepository } from "../../persistence/orders-repo.js";
 import { AUDIT_EVENT_TYPES, type AuditEventType } from "../../audit/audit-log.js";
 import { validationError } from "../errors.js";
+import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -120,6 +124,12 @@ export function auditRoutes(
   ordersRepo?: OrdersRepository,
 ): Router {
   const router = Router();
+  // The streaming audit export contains the full, unredacted event payloads;
+  // only operators may access it. Other audit reads are redacted views.
+  router.use(
+    "/audit/export",
+    requireRole("operator", { operatorKeys: loadOperatorKeys(), log })
+  );
 
   /**
    * GET /api/audit
@@ -320,6 +330,31 @@ export function auditRoutes(
       }
       log.error({ err }, 'audit tail query failed');
       res.status(500).json({ error: 'internal_error', message: 'audit tail query failed' });
+    }
+  });
+
+  /**
+   * GET /api/audit/export/manifest — operator-only integrity manifest for a
+   * full export. Requires an operator bearer token; the manifest contains
+   * only the record range, generation time and a digest of canonical records.
+   */
+  router.get('/audit/export/manifest', requireRole('operator', {
+    operatorKeys: loadOperatorKeys(),
+    log,
+  }), async (_req: Request, res: Response): Promise<void> => {
+    try {
+      let ndjson = '';
+      const sink = new Writable({
+        write(chunk, _encoding, cb) { ndjson += chunk.toString(); cb(); },
+      });
+      await exporter.exportNdjson(sink, { pageSize: 500 });
+      const records = ndjson.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      const manifest = createExportManifest(records, { authorized: true });
+      res.json(manifest);
+      log.info({ recordRange: manifest.recordRange }, 'audit export manifest generated');
+    } catch (err) {
+      log.error({ err }, 'audit export manifest failed');
+      if (!res.headersSent) res.status(500).json({ error: 'internal_error', message: 'audit export manifest failed' });
     }
   });
 

@@ -711,6 +711,7 @@ export class SorobanListener {
           txHash: ev.txHash,
           blockNumber: ev.ledger,
           timelock: decoded.timelock,
+          observedAtMs: Date.now(),
         });
         this.log.info({
           audit: "src_lock",
@@ -1330,6 +1331,7 @@ export class SolanaListener {
             txHash: sig,
             blockNumber: effectiveSlot,
             timelock,
+            observedAtMs: Date.now(),
           });
           this.markSigProcessed(sig);
 
