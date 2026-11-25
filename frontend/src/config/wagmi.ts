@@ -2,7 +2,7 @@
  * Wagmi v2 client configuration for WaffleFinance.
  *
  * Wires up viem transports for Ethereum Mainnet and Sepolia, and registers the
- * MetaMask injected connector.  RainbowKit v2 wraps this config through
+ * Mainnet and Sepolia transports. RainbowKit v2 wraps this config through
  * `getDefaultConfig`, which handles WalletConnect project-id plumbing and
  * supplies additional connectors (Coinbase Wallet, Rainbow, etc.) automatically.
  *

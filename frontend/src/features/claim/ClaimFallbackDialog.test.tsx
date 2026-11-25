@@ -39,7 +39,6 @@ const baseNetworkState = {
   freighterMatches: true,
   setMode: vi.fn(),
   syncWalletsToAppMode: vi.fn(),
-  refreshWalletNetworks: vi.fn(),
 };
 
 const mockClaimOrder = vi.fn();

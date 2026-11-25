@@ -45,7 +45,6 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
     hasAnyMismatch,
     setMode,
     syncWalletsToAppMode,
-    refreshWalletNetworks,
   } = networkState;
 
   if (!hasAnyMismatch) {
@@ -81,8 +80,6 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
             : mode;
       if (nextMode !== mode) {
         await setMode(nextMode);
-      } else {
-        refreshWalletNetworks();
       }
     } finally {
       setBusy(false);
@@ -93,7 +90,6 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
     setBusy(true);
     try {
       await syncWalletsToAppMode();
-      refreshWalletNetworks();
     } finally {
       setBusy(false);
     }

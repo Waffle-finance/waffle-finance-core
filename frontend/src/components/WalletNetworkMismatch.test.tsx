@@ -28,7 +28,6 @@ function makeNetworkState(overrides: Partial<NetworkModeState> = {}): NetworkMod
     hasAnyMismatch: false,
     setMode: vi.fn().mockResolvedValue({ ok: true }),
     syncWalletsToAppMode: vi.fn().mockResolvedValue({ ok: true }),
-    refreshWalletNetworks: vi.fn(),
     ...overrides,
   };
 }

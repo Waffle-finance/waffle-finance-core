@@ -69,9 +69,9 @@ function toHexChainId(id: number): string {
 export function useEthereumWallet() {
   // ── wagmi v2 primitives ─────────────────────────────────────────────────
   const { address, isConnected, isConnecting, isReconnecting } = useAccount();
-  const { connect, isPending: connectPending, error: connectError } = useConnect();
+  const { connectAsync, isPending: connectPending, error: connectError } = useConnect();
   const { disconnect: wagmiDisconnect } = useDisconnect();
-  const { switchChain, isPending: switchPending, error: switchError } = useSwitchChain();
+  const { switchChainAsync, isPending: switchPending, error: switchError } = useSwitchChain();
   const activeChainId = useChainId();
   const connectors = useConnectors();
 
@@ -105,7 +105,7 @@ export function useEthereumWallet() {
     if (!connectError) return;
 
     const msg = connectError.message ?? '';
-    const code = (connectError as any).code ?? 0;
+    const code = providerErrorCode(connectError) ?? 0;
 
     if (code === -32002 || msg.includes('already pending')) {
       setLocalError({
@@ -137,7 +137,7 @@ export function useEthereumWallet() {
   // Translate wagmi switch-chain errors.
   useEffect(() => {
     if (!switchError) return;
-    const code = (switchError as any).code ?? 0;
+    const code = providerErrorCode(switchError) ?? 0;
     if (code === 4001 || switchError.message?.toLowerCase().includes('rejected')) {
       setLocalError({
         code: 'network_mismatch',
@@ -193,7 +193,7 @@ export function useEthereumWallet() {
 
   // ── connect() ───────────────────────────────────────────────────────────
   // Prefer the injected (MetaMask) connector; fall back to the first available.
-  const connect_ = useCallback(async () => {
+  const connect_ = useCallback(async (): Promise<boolean> => {
     setLocalError(null);
 
     if (!isInstalled) {
@@ -202,7 +202,7 @@ export function useEthereumWallet() {
         message: 'MetaMask not found.',
         hint: 'Install MetaMask from metamask.io and reload the page.',
       });
-      return;
+      return false;
     }
 
     const injected = connectors.find((c) => c.type === 'injected') ?? connectors[0];
@@ -212,20 +212,45 @@ export function useEthereumWallet() {
         message: 'No wallet connector found.',
         hint: 'Install MetaMask and reload.',
       });
-      return;
+      return false;
     }
 
     try {
-      connect({ connector: injected });
-    } catch (err: any) {
-      // Synchronous throw — wagmi also surfaces async errors via connectError.
-      setLocalError({
-        code: 'metamask_connect_failed',
-        message: err?.message ?? 'MetaMask connection failed',
-        hint: 'Check the MetaMask popup and try again.',
-      });
+      await connectAsync({ connector: injected });
+      return true;
+    } catch (err: unknown) {
+      // Wagmi rejects connectAsync for connector errors; retain its message
+      // here so callers waiting on connect() see the same failure promptly.
+      const code = providerErrorCode(err);
+      const message = err instanceof Error ? err.message : 'MetaMask connection failed';
+      if (code === -32002 || message.toLowerCase().includes('already pending')) {
+        setLocalError({
+          code: 'wallet_locked',
+          message: 'MetaMask is locked. Please unlock it and try again.',
+          hint: 'Open MetaMask, enter your password to unlock, then retry.',
+        });
+      } else if (code === 4001 || message.toLowerCase().includes('rejected')) {
+        setLocalError({
+          code: 'metamask_connect_failed',
+          message,
+          hint: 'You rejected the connection request in MetaMask.',
+        });
+      } else if (message.toLowerCase().includes('not found') || message.toLowerCase().includes('no provider')) {
+        setLocalError({
+          code: 'metamask_unavailable',
+          message: 'MetaMask not found.',
+          hint: 'Install MetaMask from metamask.io and reload the page.',
+        });
+      } else {
+        setLocalError({
+          code: 'metamask_connect_failed',
+          message,
+          hint: 'Check the MetaMask popup and try again.',
+        });
+      }
+      return false;
     }
-  }, [connect, connectors, isInstalled]);
+  }, [connectAsync, connectors, isInstalled]);
 
   // ── disconnect() ────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
@@ -237,11 +262,11 @@ export function useEthereumWallet() {
   // Exposed so callers (e.g. BridgeFormContainer) can programmatically
   // request a chain switch without triggering a full reconnect.
   const switchToExpectedChain = useCallback(
-    (networkMode: 'mainnet' | 'testnet' = 'testnet') => {
+    async (networkMode: 'mainnet' | 'testnet' = 'testnet') => {
       const targetId = networkMode === 'mainnet' ? mainnet.id : sepolia.id;
-      switchChain({ chainId: targetId });
+      await switchChainAsync({ chainId: targetId });
     },
-    [switchChain],
+    [switchChainAsync],
   );
 
   // ── Return ──────────────────────────────────────────────────────────────
@@ -262,4 +287,16 @@ export function useEthereumWallet() {
     disconnect,
     switchToExpectedChain,
   };
+}
+
+function providerErrorCode(error: unknown): number | undefined {
+  const seen = new Set<object>();
+  let current = error;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === 'number') return value.code;
+    current = value.cause;
+  }
+  return undefined;
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import freighterApi from '@stellar/freighter-api';
+import { useChainId, useSwitchChain } from 'wagmi';
 import { isMainnetEnabled, isTestnet, resolveNetworkMode } from '../config/networks';
-import { resolveViteMainnetRpcUrl, resolveViteSepoliaRpcUrl } from '../config/rpc-urls';
 
 export type NetworkMode = 'testnet' | 'mainnet';
 
@@ -10,10 +10,6 @@ const ETH_SEPOLIA_CHAIN_ID_HEX = '0xaa36a7';
 
 const STELLAR_MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
 const STELLAR_TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015';
-
-const MAINNET_RPC_URL = resolveViteMainnetRpcUrl();
-
-const SEPOLIA_RPC_URL = resolveViteSepoliaRpcUrl();
 
 /** Normalize eth_chainId responses (0xaa36a7 vs 11155111 vs mixed case). */
 function normalizeChainId(chainId: string | null): string | null {
@@ -76,15 +72,13 @@ export interface NetworkModeState {
   setMode: (next: NetworkMode) => Promise<{ ok: boolean; reason?: string }>;
   /** Ask connected wallets to match the current app mode (even if mode unchanged). */
   syncWalletsToAppMode: () => Promise<{ ok: boolean; reason?: string }>;
-  refreshWalletNetworks: () => void;
 }
 
 /**
  * Single source of truth for "is the app in testnet or mainnet mode?".
  *
  * - Reads the chosen mode from the `?network=` URL param (falls back to env).
- * - Subscribes to `chainChanged` from MetaMask so manual wallet switches
- *   are reflected immediately.
+ * - Uses wagmi's active chain state and switch API for Ethereum.
  * - Polls Freighter once on mount and once every 4s to detect manual
  *   network switches (Freighter exposes no event API).
  * - `setMode` first asks the connected wallets to switch; only once a
@@ -96,12 +90,16 @@ export function useNetworkMode(opts: {
   ethAddress?: string;
   stellarAddress?: string;
 }): NetworkModeState {
+  const activeChainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
   const [mode, setLocalMode] = useState<NetworkMode>(() => readModeFromUrl());
-  const [metamaskChainId, setMetamaskChainId] = useState<string | null>(null);
   const [freighterNetworkPassphrase, setFreighterNetworkPassphrase] = useState<string | null>(null);
 
   const metamaskConnected = Boolean(opts.ethAddress);
   const freighterConnected = Boolean(opts.stellarAddress);
+  const metamaskChainId = metamaskConnected
+    ? normalizeChainId(`0x${activeChainId.toString(16)}`)
+    : null;
 
   useEffect(() => {
     const handler = () => setLocalMode(readModeFromUrl());
@@ -119,19 +117,6 @@ export function useNetworkMode(opts: {
       url.searchParams.set('network', 'testnet');
       window.history.replaceState({}, '', url.toString());
       setLocalMode('testnet');
-    }
-  }, []);
-
-  const refreshMetamask = useCallback(async () => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      setMetamaskChainId(null);
-      return;
-    }
-    try {
-      const chainId = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
-      setMetamaskChainId(normalizeChainId(chainId));
-    } catch {
-      setMetamaskChainId(null);
     }
   }, []);
 
@@ -161,34 +146,6 @@ export function useNetworkMode(opts: {
   }, []);
 
   useEffect(() => {
-    refreshMetamask();
-
-    if (typeof window === 'undefined' || !window.ethereum) {
-      return;
-    }
-    const eth = window.ethereum as any;
-    const onChainChanged = (next: string) => setMetamaskChainId(normalizeChainId(next));
-    if (typeof eth.on === 'function') {
-      eth.on('chainChanged', onChainChanged);
-    }
-    return () => {
-      if (typeof eth.removeListener === 'function') {
-        eth.removeListener('chainChanged', onChainChanged);
-      }
-    };
-  }, [refreshMetamask]);
-
-  // Re-read chain when MetaMask connects; poll while connected (some wallets omit chainChanged).
-  useEffect(() => {
-    if (!metamaskConnected) {
-      return;
-    }
-    refreshMetamask();
-    const id = window.setInterval(refreshMetamask, 4000);
-    return () => window.clearInterval(id);
-  }, [metamaskConnected, refreshMetamask]);
-
-  useEffect(() => {
     refreshFreighter();
     const id = window.setInterval(refreshFreighter, 4000);
     return () => window.clearInterval(id);
@@ -201,58 +158,23 @@ export function useNetworkMode(opts: {
     window.history.replaceState({}, '', url.toString());
   };
 
-  const switchMetamaskChain = async (next: NetworkMode): Promise<{ ok: boolean; reason?: string }> => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      return { ok: true };
-    }
-    const target = expectedEthChainIdHex(next);
+  const switchMetamaskChain = useCallback(async (
+    next: NetworkMode,
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const chainId = next === 'mainnet' ? 1 : 11155111;
     try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: target }],
-      });
+      await switchChainAsync({ chainId });
       return { ok: true };
-    } catch (err: any) {
-      if (err?.code === 4902) {
-        try {
-          if (next === 'mainnet') {
-            await window.ethereum.request({
-              method: 'wallet_addEthereumChain',
-              params: [
-                {
-                  chainId: target,
-                  chainName: 'Ethereum Mainnet',
-                  rpcUrls: [MAINNET_RPC_URL],
-                  blockExplorerUrls: ['https://etherscan.io'],
-                  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-                },
-              ],
-            });
-          } else {
-            await window.ethereum.request({
-              method: 'wallet_addEthereumChain',
-              params: [
-                {
-                  chainId: target,
-                  chainName: 'Sepolia Testnet',
-                  rpcUrls: [SEPOLIA_RPC_URL],
-                  blockExplorerUrls: ['https://sepolia.etherscan.io'],
-                  nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-                },
-              ],
-            });
-          }
-          return { ok: true };
-        } catch {
-          return { ok: false, reason: 'metamask-add-failed' };
-        }
-      }
-      if (err?.code === 4001) {
+    } catch (err: unknown) {
+      if (getProviderErrorCode(err) === 4001 || errorMessage(err).toLowerCase().includes('rejected')) {
         return { ok: false, reason: 'user-rejected' };
+      }
+      if (getProviderErrorCode(err) === 4902) {
+        return { ok: false, reason: 'metamask-add-failed' };
       }
       return { ok: false, reason: 'metamask-switch-failed' };
     }
-  };
+  }, [switchChainAsync]);
 
   const syncWalletsToAppMode = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
     if (metamaskConnected) {
@@ -261,10 +183,9 @@ export function useNetworkMode(opts: {
         return result;
       }
     }
-    await refreshMetamask();
     await refreshFreighter();
     return { ok: true };
-  }, [mode, metamaskConnected, refreshMetamask, refreshFreighter]);
+  }, [mode, metamaskConnected, refreshFreighter, switchMetamaskChain]);
 
   const setMode = useCallback(
     async (next: NetworkMode): Promise<{ ok: boolean; reason?: string }> => {
@@ -285,17 +206,11 @@ export function useNetworkMode(opts: {
 
       writeUrlMode(next);
       setLocalMode(next);
-      await refreshMetamask();
       await refreshFreighter();
       return { ok: true };
     },
-    [mode, metamaskConnected, refreshMetamask, refreshFreighter],
+    [mode, metamaskConnected, refreshFreighter, switchMetamaskChain],
   );
-
-  const refreshWalletNetworks = useCallback(() => {
-    refreshMetamask();
-    refreshFreighter();
-  }, [refreshMetamask, refreshFreighter]);
 
   const expectedChain = expectedEthChainIdHex(mode);
   const expectedPassphrase = expectedStellarPassphrase(mode);
@@ -320,6 +235,21 @@ export function useNetworkMode(opts: {
     hasAnyMismatch: !metamaskMatches || !freighterMatches,
     setMode,
     syncWalletsToAppMode,
-    refreshWalletNetworks,
   };
+}
+
+function getProviderErrorCode(error: unknown): number | undefined {
+  const seen = new Set<object>();
+  let current = error;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === 'number') return value.code;
+    current = value.cause;
+  }
+  return undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

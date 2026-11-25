@@ -57,7 +57,7 @@ function makeDefaults() {
       connector: undefined,
     },
     connect: {
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: null as Error | null,
     },
@@ -65,7 +65,7 @@ function makeDefaults() {
       disconnect: vi.fn(),
     },
     switchChain: {
-      switchChain: vi.fn(),
+      switchChainAsync: vi.fn(),
       isPending: false,
       error: null as Error | null,
     },
@@ -107,7 +107,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
     // connect() called while not installed
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: null,
     });
@@ -160,7 +160,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
     // First render: no error yet
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: null,
     });
@@ -169,7 +169,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
     // Now surface the locked error through the connect hook
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: lockedError,
     });
@@ -190,7 +190,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
     mockUseConnectors.mockReturnValue([{ type: 'injected', id: 'metaMask' }]);
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: null,
     });
@@ -198,7 +198,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
     const { result, rerender } = renderHook(() => useEthereumWallet());
 
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: rejectError,
     });
@@ -224,7 +224,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
     mockUseChainId.mockReturnValue(11155111); // Sepolia — correct for testnet mode
     mockUseConnectors.mockReturnValue([{ type: 'injected', id: 'metaMask' }]);
     mockUseConnect.mockReturnValue({
-      connect: vi.fn(),
+      connectAsync: vi.fn(),
       isPending: false,
       error: null,
     });
@@ -273,7 +273,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
   it('calls wagmi switchChain with sepolia chainId for testnet mode', () => {
     const switchChainFn = vi.fn();
-    mockUseSwitchChain.mockReturnValue({ switchChain: switchChainFn, isPending: false, error: null });
+    mockUseSwitchChain.mockReturnValue({ switchChainAsync: switchChainFn, isPending: false, error: null });
     mockUseConnectors.mockReturnValue([{ type: 'injected', id: 'metaMask' }]);
 
     const { result } = renderHook(() => useEthereumWallet());
@@ -285,7 +285,7 @@ describe('useEthereumWallet — diagnostics (issue #470 / wagmi v2)', () => {
 
   it('calls wagmi switchChain with mainnet chainId for mainnet mode', () => {
     const switchChainFn = vi.fn();
-    mockUseSwitchChain.mockReturnValue({ switchChain: switchChainFn, isPending: false, error: null });
+    mockUseSwitchChain.mockReturnValue({ switchChainAsync: switchChainFn, isPending: false, error: null });
     mockUseConnectors.mockReturnValue([{ type: 'injected', id: 'metaMask' }]);
 
     const { result } = renderHook(() => useEthereumWallet());
