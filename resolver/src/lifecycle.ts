@@ -274,21 +274,22 @@ export class ResolverLifecycle {
 
     // Log the transition
     this.log.info(
-      { from: previousState, to: nextState, durationMs: this._stateDurationMs },
+      { from: previousState, to: nextState, durationMs: this.stateDurationMs },
       "lifecycle state transition"
     );
 
-    // Update metrics
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    // Update metrics: enum-style gauge — set previous state to 0, new state to 1
+    lifecycleStateGauge.labels({ state: previousState }).set(0);
+    lifecycleStateGauge.labels({ state: nextState }).set(1);
+    lifecycleTransitionsTotal.inc({ from: previousState, to: nextState });
   }
 
   /**
    * Validate a transition has all required preconditions.
    */
   private validateTransition(from: LifecycleState, to: LifecycleState): void {
-    // Cannot pause a non-running service
-    if (from !== "running" && to === "paused") {
+    // Cannot go to paused state without first going through pausing
+    if (to === "paused" && from !== "pausing") {
       throw new StateNotAllowedError(
         from,
         "pause"
@@ -326,12 +327,13 @@ export class ResolverLifecycle {
     this._transitionCount++;
 
     this.log.warn(
-      { from: previousState, to: nextState, reason, durationMs: this._stateDurationMs },
+      { from: previousState, to: nextState, reason, durationMs: this.stateDurationMs },
       "forced lifecycle state transition"
     );
 
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    lifecycleStateGauge.labels({ state: previousState }).set(0);
+    lifecycleStateGauge.labels({ state: nextState }).set(1);
+    lifecycleTransitionsTotal.inc({ from: previousState, to: nextState });
   }
 
   /**
@@ -538,8 +540,7 @@ export function recordLifecycleMetrics(
   state: LifecycleState,
   durationMs: number
 ): void {
-  // This will be implemented in metrics.ts
-  lifecycleStateGauge.set(state);
+  lifecycleStateGauge.labels({ state }).set(1);
   // duration metric would be recorded here
 }
 

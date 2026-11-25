@@ -29,6 +29,9 @@ import {
  * | CONNECTED  | Supervisor is running, all monitored chains have emitted an event within       |
  * |            | `staleAfterSeconds` (default 300 s), and recent failures are below the         |
  * |            | `degradedFailureThreshold` (default 3).                                        |
+ * | STALE      | Supervisor is running but one or more chains have not emitted an event for     |
+ * |            | longer than `staleAfterSeconds`. Stale is checked before degraded because     |
+ * |            | a quiet chain requires immediate attention to prevent missed settlements.      |
  * | DEGRADED   | Supervisor is running or actively restarting AND one of the following is true: |
  * |            | (a) supervisor is in `restarting` state; OR                                    |
  * |            | (b) `recentFailureCount >= degradedFailureThreshold`; OR                       |
@@ -185,11 +188,11 @@ function computeChainHealthState(opts: {
  * be tested deterministically.
  *
  * ### Precedence when multiple conditions hold:
- * inactive > degraded > stale > connected
+ * inactive > stale > degraded > connected
  *
  * A resolver that isn't running at all (INACTIVE) is the strongest signal.
- * Active failures/restarts (DEGRADED) are stronger than a quiet chain (STALE)
- * because degraded implies active problems even if events are still arriving.
+ * A chain that has gone quiet (STALE) is checked before active errors (DEGRADED)
+ * because a stale chain may prevent settlements even if the supervisor is active.
  * A resolver with no recent events but no active errors is STALE.
  * Everything healthy is CONNECTED.
  */
@@ -270,9 +273,25 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
     };
   }
 
+  // ── STALE: chain(s) have gone quiet ───────────────────────────────────────
+  // Check stale before degraded: a chain that has gone quiet is a stronger
+  // operational signal than active-but-restarting — operators must act on
+  // stale chains to prevent missed settlements.
+  const staleChains = chains.filter((c) => !c.live);
+  if (staleChains.length > 0) {
+    const details = staleChains.map((c) =>
+      c.secondsSinceLastEvent !== null
+        ? `${c.chain} (${c.secondsSinceLastEvent}s ago, threshold ${staleAfterSeconds}s)`
+        : `${c.chain} (no events yet)`
+    );
+    return {
+      ...base,
+      state: "stale",
+      reason: `no recent events from: ${details.join("; ")}`,
+    };
+  }
+
   // ── DEGRADED: active failures or consecutive RPC errors ───────────────────
-  // Check degraded before stale: active errors are a stronger signal than
-  // a temporarily quiet chain.
   if (supervisorState === "restarting") {
     return {
       ...base,
@@ -294,21 +313,6 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
       ...base,
       state: "degraded",
       reason: `consecutive RPC errors (${consecutiveRpcErrors} >= threshold ${consecutiveRpcErrorThreshold})`,
-    };
-  }
-
-  // ── STALE: chain(s) have gone quiet ───────────────────────────────────────
-  const staleChains = chains.filter((c) => !c.live);
-  if (staleChains.length > 0) {
-    const details = staleChains.map((c) =>
-      c.secondsSinceLastEvent !== null
-        ? `${c.chain} (${c.secondsSinceLastEvent}s ago, threshold ${staleAfterSeconds}s)`
-        : `${c.chain} (no events yet)`
-    );
-    return {
-      ...base,
-      state: "stale",
-      reason: `no recent events from: ${details.join("; ")}`,
     };
   }
 

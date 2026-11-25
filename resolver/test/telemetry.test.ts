@@ -135,11 +135,21 @@ describe("ResolverTelemetryCollector", () => {
   it("collects a connected snapshot from live metrics and supervisor state", async () => {
     const supervisor = new Supervisor({ log });
     // Drive the supervisor into "running" without a real listener loop.
+    // Phase 1 (startup): resolves immediately so supervisor reaches "running".
+    // Phase 2 (loop): never resolves so supervisor stays in "running".
+    let startCalls = 0;
     const runPromise = supervisor.run({
-      start: () => new Promise(() => {}),
+      start: () => {
+        startCalls++;
+        if (startCalls === 1) return Promise.resolve(); // startup succeeds
+        return new Promise(() => {}); // loop call never resolves
+      },
       stop: async () => {},
     });
     void runPromise;
+
+    // Wait for startup to complete and supervisor to enter running state.
+    await new Promise((r) => setTimeout(r, 10));
 
     const now = Math.floor(Date.now() / 1000);
     listenerLastEventTimestampSeconds.set({ chain: "ethereum" }, now);

@@ -275,8 +275,11 @@ export class EventOrderGuard {
     blockNumber: bigint,
     maxHeight: bigint,
   ): Error | undefined {
-    if (blockNumber > maxHeight) {
-      // Future block - not necessarily stale, but suspicious
+    // Reject events whose block is significantly in the future
+    // (more than maxBlockAge blocks ahead of the last known chain head).
+    // A block 1-2 ahead is normal chain progress; a block 100+ ahead is impossible.
+    const maxFutureHeight = maxHeight + BigInt(this.maxBlockAge);
+    if (blockNumber > maxFutureHeight) {
       return new StalenessError(
         chain,
         blockNumber,
@@ -285,14 +288,17 @@ export class EventOrderGuard {
       );
     }
 
-    const age = Number(maxHeight - blockNumber);
-    if (age > this.maxBlockAge) {
-      return new StalenessError(
-        chain,
-        blockNumber,
-        maxHeight,
-        `block is ${age} blocks old (max allowed: ${this.maxBlockAge})`,
-      );
+    // Reject events whose block is too old (more than maxBlockAge behind the head).
+    if (blockNumber <= maxHeight) {
+      const age = Number(maxHeight - blockNumber);
+      if (age > this.maxBlockAge) {
+        return new StalenessError(
+          chain,
+          blockNumber,
+          maxHeight,
+          `block is ${age} blocks old (max allowed: ${this.maxBlockAge})`,
+        );
+      }
     }
 
     return undefined;

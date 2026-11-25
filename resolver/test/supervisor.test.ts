@@ -16,46 +16,60 @@ describe("Supervisor", () => {
   describe("clean exit", () => {
     it("resolves when the listener set starts without error", async () => {
       const supervisor = makeSupervisor();
-      const start = vi.fn().mockResolvedValue(undefined);
+      // Phase 1 (startup): start() resolves → running.
+      // Phase 2 (loop): start() resolves → stopped.
+      const start = vi
+        .fn()
+        .mockResolvedValueOnce(undefined) // startup
+        .mockResolvedValueOnce(undefined); // loop clean exit
       const stop = vi.fn().mockResolvedValue(undefined);
 
       await expect(supervisor.run({ start, stop })).resolves.toBeUndefined();
-      expect(start).toHaveBeenCalledOnce();
+      expect(start).toHaveBeenCalledTimes(2);
     });
 
     it("does not restart after a clean exit", async () => {
       const supervisor = makeSupervisor();
-      const start = vi.fn().mockResolvedValue(undefined);
+      const start = vi
+        .fn()
+        .mockResolvedValueOnce(undefined) // startup
+        .mockResolvedValueOnce(undefined); // loop clean exit
       const stop = vi.fn();
 
       await supervisor.run({ start, stop });
-      expect(start).toHaveBeenCalledTimes(1);
+      expect(start).toHaveBeenCalledTimes(2);
       expect(supervisor.restarts).toBe(0);
     });
   });
 
   describe("recoverable errors — restart behaviour", () => {
     it("restarts after a single recoverable error then exits cleanly", async () => {
+      // Startup succeeds; first loop call fails; second loop call succeeds.
       const supervisor = makeSupervisor();
       const start = vi
         .fn()
-        .mockRejectedValueOnce(new Error("rpc timeout"))
-        .mockResolvedValueOnce(undefined);
+        .mockResolvedValueOnce(undefined)       // startup
+        .mockRejectedValueOnce(new Error("rpc timeout")) // loop iteration 1 → restart
+        .mockResolvedValueOnce(undefined);      // loop iteration 2 → clean exit
       const stop = vi.fn();
 
       await supervisor.run({ start, stop });
-      expect(start).toHaveBeenCalledTimes(2);
+      expect(start).toHaveBeenCalledTimes(3);
       expect(supervisor.restarts).toBe(1);
     });
 
     it("retries up to maxRestarts times before rejecting", async () => {
       const supervisor = makeSupervisor({ maxRestarts: 2 });
-      const start = vi.fn().mockRejectedValue(new Error("persistent error"));
+      // Startup succeeds; all loop calls fail.
+      const start = vi
+        .fn()
+        .mockResolvedValueOnce(undefined) // startup
+        .mockRejectedValue(new Error("persistent error")); // loop always fails
       const stop = vi.fn();
 
       await expect(supervisor.run({ start, stop })).rejects.toThrow("max restarts");
-      // initial attempt + 2 restarts = 3 total
-      expect(start).toHaveBeenCalledTimes(3);
+      // startup(1) + 3 loop attempts (maxRestarts+1) = 4 total
+      expect(start).toHaveBeenCalledTimes(4);
       expect(supervisor.restarts).toBe(3);
     });
 
@@ -64,7 +78,9 @@ describe("Supervisor", () => {
       let calls = 0;
       const start = vi.fn().mockImplementation(async () => {
         calls++;
-        if (calls < 3) throw new Error("not yet");
+        if (calls === 1) return; // startup succeeds
+        if (calls < 4) throw new Error("not yet"); // loop iterations 1,2 fail
+        // loop iteration 3 succeeds
       });
       const stop = vi.fn();
 
@@ -74,13 +90,26 @@ describe("Supervisor", () => {
   });
 
   describe("fatal errors — no restart", () => {
-    it("does not restart on a FatalError", async () => {
+    it("does not restart on a FatalError in startup", async () => {
       const supervisor = makeSupervisor();
       const start = vi.fn().mockRejectedValue(new FatalError("config invalid"));
       const stop = vi.fn();
 
       await expect(supervisor.run({ start, stop })).rejects.toBeInstanceOf(FatalError);
       expect(start).toHaveBeenCalledTimes(1);
+      expect(supervisor.restarts).toBe(0);
+    });
+
+    it("does not restart on a FatalError in the loop", async () => {
+      const supervisor = makeSupervisor();
+      const start = vi
+        .fn()
+        .mockResolvedValueOnce(undefined) // startup succeeds
+        .mockRejectedValue(new FatalError("config invalid")); // loop always fatal
+      const stop = vi.fn();
+
+      await expect(supervisor.run({ start, stop })).rejects.toBeInstanceOf(FatalError);
+      expect(start).toHaveBeenCalledTimes(2);
       expect(supervisor.restarts).toBe(0);
     });
 
@@ -121,8 +150,11 @@ describe("Supervisor", () => {
       let resolveDelay!: () => void;
       const delayPromise = new Promise<void>((res) => { resolveDelay = res; });
 
+      let calls = 0;
       const start = vi.fn().mockImplementation(async () => {
-        // First call: throw so the supervisor enters the retry wait.
+        calls++;
+        if (calls === 1) return; // startup succeeds
+        // First loop call: throw so the supervisor enters the retry wait.
         throw new Error("transient");
       });
       const stop = vi.fn();
@@ -145,7 +177,7 @@ describe("Supervisor", () => {
 
       // The run() should resolve cleanly (not reject).
       await expect(runPromise).resolves.toBeUndefined();
-      expect(start).toHaveBeenCalledTimes(1);
+      expect(start).toHaveBeenCalledTimes(2);
     });
   });
 
