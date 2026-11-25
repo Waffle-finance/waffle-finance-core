@@ -29,7 +29,7 @@ export const METRIC_FILES = [
 export const ALLOWED_LABELS = new Set([
   'action', 'chain', 'checkpoint', 'conflict_type', 'decision', 'direction',
   'error_type', 'event', 'event_type', 'failure_category', 'failure_reason',
-  'fault_class', 'from', 'from_state', 'job', 'method', 'mismatch_type', 'mode',
+  'fault_class', 'from', 'from_state', 'job', 'listener', 'method', 'mismatch_type', 'mode',
   'mutation', 'name', 'network_mode', 'operation', 'outcome', 'path', 'phase',
   'priority', 'query_name', 'reason', 'recovered_to_state', 'recovery_type',
   'result', 'route', 'state', 'status', 'status_code', 'to', 'to_state',

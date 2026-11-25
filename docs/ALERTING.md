@@ -173,6 +173,17 @@ groups:
 
 ---
 
+## Resolver listener progress
+
+Resolver listener alerts are in
+[`resolver/ops/resolver-alerts.yml`](../resolver/ops/resolver-alerts.yml).
+`ResolverListenerProgressStalled` fires when
+`resolver_listener_progress_age_seconds` exceeds
+`resolver_listener_progress_stale_threshold_seconds` for 2 minutes, which
+means no successful poll and no processed event. A healthy idle chain keeps
+polling and does not fire it. Thresholds, states and rationale are in
+[resolver/docs/METRICS_REFERENCE.md](../resolver/docs/METRICS_REFERENCE.md#per-chain-progress-age-metrics).
+
 ## Dashboard Panels
 
 Recommended Grafana panels for stale-order tracking (the acceptance

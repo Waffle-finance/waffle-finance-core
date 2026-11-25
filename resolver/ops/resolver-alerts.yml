@@ -1,0 +1,91 @@
+# Prometheus Alert Rules for the WaffleFinance Resolver
+#
+# Listener progress-age alerts (issue #1093). These tell a healthy quiet chain
+# apart from a listener that is connected but has stopped advancing.
+#
+# Metrics are defined in resolver/src/metrics.ts and documented in
+# resolver/docs/METRICS_REFERENCE.md#per-chain-progress-age-metrics.
+#
+# To use this in your environment:
+#
+#   rule_files:
+#     - /path/to/resolver-alerts.yml
+#
+# Thresholds are not hard-coded here. Each listener exports its configured
+# threshold on resolver_listener_progress_stale_threshold_seconds, so changing
+# RESOLVER_PROGRESS_STALE_AFTER_SECONDS_<CHAIN> changes the alert with no rules
+# change needed.
+
+groups:
+  - name: resolver_listener_progress
+    interval: 30s
+    rules:
+      # A quiet chain whose polls keep succeeding has a small progress age
+      # and never fires this alert. Only a listener whose polls AND events
+      # have both stopped advancing for longer than its threshold fires.
+      - alert: ResolverListenerProgressStalled
+        expr: |
+          max by (chain, listener) (resolver_listener_progress_age_seconds)
+            > on (chain, listener)
+          max by (chain, listener) (resolver_listener_progress_stale_threshold_seconds)
+        # The threshold already holds the tolerance for missed polls. The
+        # extra 2m smooths out scrape jitter and a single slow scrape.
+        for: 2m
+        labels:
+          severity: critical
+          service: resolver
+          component: listener
+        annotations:
+          summary: "Resolver {{ $labels.chain }} ({{ $labels.listener }}) listener has not progressed for {{ $value | humanizeDuration }}"
+          description: |
+            The {{ $labels.chain }} listener has had no successful poll and no
+            processed event for longer than its configured threshold.
+
+            **Impact**: Preimage reveals and refunds on {{ $labels.chain }} are not
+            being observed. Settlements stall and timelocks keep running.
+
+            **Triage**:
+            1. GET /listener-health and check `progressState`, `lastPollSuccessAt`
+               and `consecutiveFailures` for {{ $labels.chain }}.
+            2. Check RPC reachability and the provider status page.
+            3. If the listener shows `isActive: true` but polls are not advancing,
+               restart the resolver. A hung poll loop does not recover on its own.
+            4. For subscription listeners (ethereum), confirm on-chain activity
+               first. A quiet contract can exceed the threshold; if that is
+               normal for this deployment, raise
+               RESOLVER_PROGRESS_STALE_AFTER_SECONDS_ETHEREUM.
+
+      # Early warning at 75% of the threshold so on-call can look before the
+      # critical alert pages.
+      - alert: ResolverListenerProgressSlow
+        expr: |
+          max by (chain, listener) (resolver_listener_progress_age_seconds)
+            > on (chain, listener)
+          0.75 * max by (chain, listener) (resolver_listener_progress_stale_threshold_seconds)
+        for: 5m
+        labels:
+          severity: warning
+          service: resolver
+          component: listener
+        annotations:
+          summary: "Resolver {{ $labels.chain }} ({{ $labels.listener }}) progress age is near its stale threshold"
+          description: |
+            Progress age for {{ $labels.chain }} is above 75% of its threshold.
+            Check RPC latency and poll errors (resolver_listener_poll_runs_total{result="failure"}).
+
+      # Stopped listener or repeated poll failures (3 or more in a row).
+      - alert: ResolverListenerProgressDegraded
+        expr: resolver_listener_progress_state{state="degraded"} == 1
+        # Restarts briefly mark a listener stopped. 5m keeps a normal
+        # supervisor restart from paging.
+        for: 5m
+        labels:
+          severity: warning
+          service: resolver
+          component: listener
+        annotations:
+          summary: "Resolver {{ $labels.chain }} ({{ $labels.listener }}) listener is degraded"
+          description: |
+            The {{ $labels.chain }} listener is stopped or has failed 3 or more
+            polls in a row. See resolver_listener_consecutive_failures and
+            resolver_active_listeners, and check GET /telemetry for supervisor state.

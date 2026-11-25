@@ -243,7 +243,7 @@ export class SorobanListener {
 
     activeListeners.set({ chain: CHAIN }, 1);
 
-    globalStalenessMonitor.recordStarted(CHAIN);
+    globalStalenessMonitor.recordStarted(CHAIN, 'poll');
 
     const tick = async () => {
       if (this.stopped) return;
@@ -361,6 +361,7 @@ export class SorobanListener {
       }
 
       listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+      globalStalenessMonitor.recordEventProcessed(CHAIN);
 
       // Serialise topics and value to base64 XDR so the decoder can
       // call xdr.ScVal.fromXDR() on them without needing the raw SDK
@@ -412,6 +413,7 @@ export class SorobanListener {
 
         eventsTotal.inc({ chain: CHAIN, event_type: 'contract_event' });
         listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+        globalStalenessMonitor.recordEventProcessed(CHAIN);
 
         switch (typed.type) {
           case 'created':
