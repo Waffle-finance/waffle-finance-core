@@ -17,6 +17,7 @@ import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, conflictError, notFoundError, invalidCursorError } from "../errors.js";
 import { getRequestId } from "../../request-context.js";
+import { LIMITS } from "../middleware/payload-limits.js";
 
 /// Strictly parse a query-string integer parameter. Returns `undefined` when
 /// `raw` is omitted so the caller can fall back to a default, but rejects any
@@ -125,7 +126,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     abuseDetector
   });
 
-  router.post("/orders/announce", announceRateLimit, async (req, res, next) => {
+  router.post("/orders/announce", LIMITS.announce, announceRateLimit, async (req, res, next) => {
     try {
       const parsed = announceSchema.parse(req.body);
       const order = await orders.announce(parsed);
@@ -235,15 +236,24 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     }
   });
 
+  /**
+   * Field-length limits for lock payloads.
+   *
+   * orderId follows the on-chain order-ID format; 200 chars is generous.
+   * txHash is 0x + 64 hex = 66 chars for Ethereum; allow 132 for other chains.
+   * blockNumber / timelock are coerced numbers — no string-length bound needed.
+   * resolver is an optional address: 100 chars matches the announce address cap.
+   */
   const lockSchema = z.object({
-    orderId: z.string().min(1),
-    txHash: z.string().min(1),
+    orderId: z.string().min(1).max(200, "orderId must be at most 200 characters"),
+    txHash: z.string().min(1).max(132, "txHash must be at most 132 characters"),
     blockNumber: z.coerce.number().int().nonnegative(),
-    timelock: z.coerce.number().int().nonnegative()
+    timelock: z.coerce.number().int().nonnegative(),
   });
 
   router.post(
     "/orders/:id/src-locked",
+    LIMITS.srcLocked,
     requireRole("operator", { operatorKeys, log, trustedProxies }),
     async (req, res, next) => {
       const idResult = orderIdSchema.safeParse(req.params.id);
@@ -278,6 +288,7 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
 
   router.post(
     "/orders/:id/dst-locked",
+    LIMITS.dstLocked,
     requireRole("operator", { operatorKeys, log, trustedProxies }),
     async (req, res, next) => {
       const idResult = orderIdSchema.safeParse(req.params.id);

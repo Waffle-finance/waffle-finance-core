@@ -6,6 +6,7 @@ import { SecretRevealError } from "../../services/secret-errors.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, notRevealedError } from "../errors.js";
+import { LIMITS } from "../middleware/payload-limits.js";
 
 export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetector?: AbuseDetector): Router {
   const router = Router();
@@ -36,13 +37,22 @@ export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetecto
     abuseDetector
   });
 
+  /**
+   * Field-length limits for the reveal payload.
+   *
+   * publicId follows the wf_0x{64 hex} format = 70 chars; allow 100.
+   * preimage is 0x + up to 64 hex chars = 132 chars max.
+   * txHash is 0x + 64 hex chars = 66 chars; allow 132 for other chains.
+   */
   const revealSchema = z.object({
-    publicId: z.string().min(1),
-    preimage: z.string().regex(/^0x[0-9a-fA-F]+$/),
-    txHash: z.string().min(1)
+    publicId: z.string().min(1).max(100, "publicId must be at most 100 characters"),
+    preimage: z.string()
+      .max(132, "preimage must be at most 132 characters")
+      .regex(/^0x[0-9a-fA-F]+$/, "preimage must be 0x-prefixed hex"),
+    txHash: z.string().min(1).max(132, "txHash must be at most 132 characters"),
   });
 
-  router.post("/secrets/reveal", revealRateLimit, async (req, res, next) => {
+  router.post("/secrets/reveal", LIMITS.secretReveal, revealRateLimit, async (req, res, next) => {
     try {
       const body = revealSchema.parse(req.body);
       await secrets.reveal(body.publicId, body.preimage, body.txHash);

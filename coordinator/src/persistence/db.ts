@@ -270,6 +270,10 @@ export class PostgresStatement {
  */
 export const CURRENT_SCHEMA_VERSION = "013_replay_safety.sql";
 
+// NOTE: When a new migration is added to the migrations/ directory it must
+// also be appended here (and to POSTGRES_MIGRATION_FILES) before the
+// validateMigrationRegistry guard will allow the database to open.
+
 /**
  * Canonical SQLite migration sequence, in application order.
  *
@@ -293,6 +297,7 @@ export const SQLITE_MIGRATIONS = [
   "010_soroban_checkpoints.sql",
   "011_order_ledger_cursors.sql",
   "012_order_cancellation.sql",
+  "013_backlog_indexes.sql",
   "013_replay_safety.sql",
 ] as const;
 
@@ -324,6 +329,7 @@ export const POSTGRES_MIGRATION_FILES = [
   "010_soroban_checkpoints_postgres.sql",
   "011_order_ledger_cursors_postgres.sql",
   "012_order_cancellation_postgres.sql",
+  "013_backlog_indexes_postgres.sql",
   "013_replay_safety_postgres.sql",
 ] as const;
 

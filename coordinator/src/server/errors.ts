@@ -19,6 +19,7 @@
  * | order_validation_error | 400  | Order-level business rule violation              |
  * | order_conflict         | 409  | Concurrent write conflict (optimistic lock fail) |
  * | invalid_cursor         | 400  | Pagination cursor is malformed or expired        |
+ * | payload_too_large      | 413  | Request body exceeds the route-specific limit    |
  * | not_found              | 404  | Requested resource does not exist                |
  * | not_revealed           | 404  | Secret has not been revealed for this order      |
  * | unknown_order          | 404  | No order matches the supplied ID                 |
