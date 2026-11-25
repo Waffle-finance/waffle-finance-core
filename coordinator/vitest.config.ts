@@ -13,6 +13,7 @@ export default defineConfig({
       "@wafflefinance/sdk/ethereum": resolve(__dirname, "../packages/sdk/src/ethereum/index.ts"),
       "@wafflefinance/sdk/shared-utils": resolve(__dirname, "../packages/sdk/src/shared-utils/index.ts"),
       "@wafflefinance/sdk/state-machine": resolve(__dirname, "../packages/sdk/src/state-machine/index.ts"),
+      "@wafflefinance/sdk/solana": resolve(__dirname, "../packages/sdk/src/solana/rpc-provider.ts"),
       "@wafflefinance/sdk/types": resolve(__dirname, "../packages/sdk/src/types/index.ts"),
       "@wafflefinance/sdk": resolve(__dirname, "../packages/sdk/src/index.ts"),
     },

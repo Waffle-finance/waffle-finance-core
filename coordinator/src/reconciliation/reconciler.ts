@@ -48,6 +48,7 @@
  * will reassess the gap from the same HWM and retry.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   createPublicClient,
   http,
@@ -62,6 +63,7 @@ import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
 import type { Chain } from "../persistence/orders-repo.js";
+import { runWithContext, setOrderId } from "../request-context.js";
 import {
   reconciliationRuns,
   reconciliationErrors,
@@ -298,6 +300,17 @@ export class Reconciler {
    *   5. Update status and run-level metrics.
    */
   async run(): Promise<void> {
+    return runWithContext(
+      {
+        requestId: randomUUID(),
+        correlationId: `rec-${randomUUID()}`,
+        operationClass: "admin",
+      },
+      () => this._runInternal()
+    );
+  }
+
+  private async _runInternal(): Promise<void> {
     this.log.info("reconciliation run starting");
 
     // Seed cursors from DB on first run (startup recovery).
@@ -569,6 +582,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "order_not_found" });
           continue;
         }
+        setOrderId(order.publicId);
 
         const blockNum = safeToNumber(
           log.blockNumber ?? 0n,
@@ -680,6 +694,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "order_not_found" });
           continue;
         }
+        setOrderId(order.publicId);
 
         const blockNum = safeToNumber(
           log.blockNumber ?? 0n,
@@ -769,6 +784,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "order_not_found" });
           continue;
         }
+        setOrderId(order.publicId);
 
         const blockNum = safeToNumber(
           log.blockNumber ?? 0n,
@@ -932,6 +948,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSorobanLedger, ev.ledger)) {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "cursor_already_processed" });
           return 0;
@@ -983,6 +1000,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSorobanLedger, ev.ledger)) {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "cursor_already_processed" });
           return 0;
@@ -1034,6 +1052,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSorobanLedger, ev.ledger)) {
           reconciliationEventsSkipped.inc({ chain: "stellar", reason: "cursor_already_processed" });
           return 0;
@@ -1190,6 +1209,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
           await this.claimEvent(key, "solana", "OrderCreated");
@@ -1247,6 +1267,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
           await this.claimEvent(key, "solana", "OrderClaimed");
@@ -1309,6 +1330,7 @@ export class Reconciler {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "order_not_found" });
           return 0;
         }
+        setOrderId(order.publicId);
         if (isEventBehindOrderCursor(order.lastSolanaSlot, slot)) {
           reconciliationEventsSkipped.inc({ chain: "solana", reason: "cursor_already_processed" });
           await this.claimEvent(key, "solana", "OrderRefunded");

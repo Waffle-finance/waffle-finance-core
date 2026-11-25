@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { rpc } from "@stellar/stellar-sdk";
 import type { xdr } from "@stellar/stellar-sdk";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
+import { runWithContext, setOrderId } from "../request-context.js";
 import {
   observeListenerEventProcessing,
   recordListenerProgress,
@@ -615,6 +616,20 @@ export class SorobanListener {
    * @returns `true` when a state transition was applied, `false` otherwise.
    */
   private async processSorobanEvent(
+    ev: SorobanRpcEvent,
+    path: WorkflowPath = "live"
+  ): Promise<boolean> {
+    return runWithContext(
+      {
+        requestId: randomUUID(),
+        correlationId: ev.txHash,
+        operationClass: path === "recovery" ? "order.lock" : "order.lock",
+      },
+      () => this._processSorobanEventInternal(ev, path)
+    );
+  }
+
+  private async _processSorobanEventInternal(
     ev: SorobanRpcEvent,
     path: WorkflowPath = "live"
   ): Promise<boolean> {
@@ -1263,6 +1278,17 @@ export class SolanaListener {
    * the fields we need.
    */
   private handleLogs(sig: string, logs: string[], slot?: number): void {
+    runWithContext(
+      {
+        requestId: randomUUID(),
+        correlationId: sig,
+        operationClass: "order.lock",
+      },
+      () => this._handleLogsInternal(sig, logs, slot)
+    );
+  }
+
+  private _handleLogsInternal(sig: string, logs: string[], slot?: number): void {
     // ── In-process deduplication ────────────────────────────────────────────
     // If we have already processed this signature in the current process
     // lifetime, skip without touching the DB.
