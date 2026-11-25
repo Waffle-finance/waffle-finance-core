@@ -19,6 +19,13 @@ environment settings for retention or batch size.
 30-day selector argument, the 100-order default batch cap, and the archival
 policy's strict cutoff at exactly 30 days.
 
+[Boundary tests](../test/order-retention-boundaries.test.ts) use a fixed clock to
+place orders one second before, at, and one second after the 30-day cutoff, and
+check that both jobs and the repository selector agree. They also cover
+non-announced and source-locked orders, repeated and batch-capped runs, export
+visibility of archived rows, reactivation, and the request-metadata (7 days) and
+ciphertext (30 days) retention rules.
+
 | Job | Effect on an eligible row | Protection |
 | --- | --- | --- |
 | `stale_cleanup` | Sets status to terminal `abandoned`, stamps `archived_at`, records reason `stale:no_src_lock` and actor `stale-cleanup`, and appends a transition event. | [Stale cleanup tests](../test/stale-cleanup.test.ts): “archives announced orders older than the retention window with no src lock”, “does not archive orders younger than the retention window”, and “respects batch size and leaves remaining stale orders for the next run”. |
