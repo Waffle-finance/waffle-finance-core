@@ -31,14 +31,22 @@ import { createApp } from "../src/server/app.js";
 import {
   getRequestContext,
   getRequestId,
+  getOrderId,
+  getCorrelationId,
+  setOrderId,
+  setCorrelationId,
   runWithContext,
 } from "../src/request-context.js";
+import { correlationMixin } from "../src/logger.js";
+import { sensitiveSerializers } from "../src/sensitive/sensitive-fields.js";
 import { CORRELATION_ID_HEADER } from "../src/server/middleware/request-id.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 interface LogLine {
   requestId?: string;
+  correlationId?: string;
+  orderId?: string;
   msg?: string;
   [key: string]: unknown;
 }
@@ -54,10 +62,8 @@ function makeLogCapture(): { logs: LogLine[]; log: Logger } {
   const log = pino(
     {
       level: "debug",
-      mixin() {
-        const id = getRequestId();
-        return id ? { requestId: id } : {};
-      },
+      mixin: correlationMixin,
+      serializers: sensitiveSerializers(),
     },
     dest
   );
@@ -270,5 +276,79 @@ describe("request ID propagation to service logs", () => {
     const allAnnounceLogs = logs.filter((l) => l.msg === "order announced");
     expect(allAnnounceLogs).toHaveLength(2);
     expect(allAnnounceLogs[0].requestId).not.toBe(allAnnounceLogs[1].requestId);
+  });
+
+  it("propagates correlationId and orderId into service logs on order announce", async () => {
+    const { logs, log } = makeLogCapture();
+    const app = await freshApp(log);
+
+    const customCorrelation = "corr-upstream-12345";
+    const res = await request(app)
+      .post("/api/orders/announce")
+      .set(CORRELATION_ID_HEADER, customCorrelation)
+      .send(BASE_ANNOUNCE);
+
+    expect(res.status).toBe(201);
+    const body = res.body;
+    expect(body.id).toBeDefined();
+
+    const announceLog = logs.find((l) => l.msg === "order announced");
+    expect(announceLog).toBeDefined();
+    expect(announceLog?.requestId).toBe(res.headers["x-request-id"]);
+    expect(announceLog?.correlationId).toBe(customCorrelation);
+    expect(announceLog?.orderId).toBe(body.id);
+  });
+
+  it("populates orderId into service logs during order lookup", async () => {
+    const { logs, log } = makeLogCapture();
+    const app = await freshApp(log);
+
+    const announceRes = await request(app)
+      .post("/api/orders/announce")
+      .send(BASE_ANNOUNCE);
+    expect(announceRes.status).toBe(201);
+    const orderId = announceRes.body.id;
+
+    logs.length = 0; // clear announce logs
+
+    const getRes = await request(app)
+      .get(`/api/orders/${orderId}`)
+      .set(CORRELATION_ID_HEADER, "corr-lookup-999");
+    expect(getRes.status).toBe(200);
+
+    const accessLog = logs.find((l) => l.req !== undefined);
+    if (accessLog) {
+      expect(accessLog.orderId).toBe(orderId);
+      expect(accessLog.correlationId).toBe("corr-lookup-999");
+    }
+  });
+
+  it("redacts sensitive fields in coordinator logs", async () => {
+    const { logs, log } = makeLogCapture();
+    log.info({ preimage: "0xsecretpreimage123", publicId: "wf_123" }, "test sensitive log");
+
+    const sensitiveLog = logs.find((l) => l.msg === "test sensitive log");
+    expect(sensitiveLog).toBeDefined();
+    expect(sensitiveLog?.preimage).toBe("[REDACTED]");
+    expect(sensitiveLog?.publicId).toBe("wf_123");
+  });
+
+  it("getOrderId and setOrderId mutate active context correctly", () => {
+    expect(getOrderId()).toBeUndefined();
+    expect(getCorrelationId()).toBeUndefined();
+
+    runWithContext({ requestId: "test-req-1" }, () => {
+      expect(getRequestId()).toBe("test-req-1");
+      expect(getCorrelationId()).toBe("test-req-1");
+      expect(getOrderId()).toBeUndefined();
+
+      setOrderId("wf_test_123");
+      expect(getOrderId()).toBe("wf_test_123");
+
+      setCorrelationId("corr_test_456");
+      expect(getCorrelationId()).toBe("corr_test_456");
+    });
+
+    expect(getOrderId()).toBeUndefined();
   });
 });

@@ -6,6 +6,7 @@ import { SecretRevealError } from "../../services/secret-errors.js";
 import { makeRateLimiter, loadApiKeys, loadTrustedProxies } from "../middleware/ratelimit.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, notRevealedError } from "../errors.js";
+import { setOrderId } from "../../request-context.js";
 
 export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetector?: AbuseDetector): Router {
   const router = Router();
@@ -45,6 +46,8 @@ export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetecto
   router.post("/secrets/reveal", revealRateLimit, async (req, res, next) => {
     try {
       const body = revealSchema.parse(req.body);
+      setOrderId(body.publicId);
+      res.locals["orderId"] = body.publicId;
       await secrets.reveal(body.publicId, body.preimage, body.txHash);
       res.json({ ok: true });
     } catch (err) {
@@ -71,6 +74,10 @@ export function secretsRoutes(secrets: SecretService, log?: Logger, abuseDetecto
   router.get("/secrets/:publicId", getSecretRateLimit, async (req, res, next) => {
     try {
       const publicId = req.params["publicId"] ?? "";
+      if (publicId) {
+        setOrderId(publicId);
+        res.locals["orderId"] = publicId;
+      }
       const preimage = await secrets.get(publicId);
       if (!preimage) {
         res.status(404).json(notRevealedError());

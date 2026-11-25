@@ -139,12 +139,16 @@ export function redactSensitiveFields<T>(
  *   ```
  */
 export function sensitiveSerializers(): Record<string, (v: unknown) => unknown> {
-  return {
+  const serializers: Record<string, (v: unknown) => unknown> = {
     order: (v: unknown) => redactSensitiveFields(v),
     err:   (v: unknown) => redactSensitiveFields(v),
     req:   (v: unknown) => redactSensitiveFields(v),
     res:   (v: unknown) => redactSensitiveFields(v),
   };
+  for (const name of SENSITIVE_FIELD_NAMES) {
+    serializers[name] = () => REDACTED_PLACEHOLDER;
+  }
+  return serializers;
 }
 
 // ── Type guard ────────────────────────────────────────────────────────────────

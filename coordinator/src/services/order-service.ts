@@ -29,7 +29,7 @@ import { announceSchema, type AnnounceInput } from "../validation/announce.js";
 import { HistoryCache } from "./history-cache.js";
 import type { AuditRepository } from "../audit/audit-repo.js";
 import { buildOrderAuditEntry } from "../audit/audit-log.js";
-import { getRequestId } from "../request-context.js";
+import { getRequestId, setOrderId } from "../request-context.js";
 import type { SseBroker } from "../sse/sse-broker.js";
 import {
   buildOrderCreatedPayload,
@@ -199,6 +199,7 @@ export class OrderService {
     }
 
     const order = await this.repo.announce(input as AnnounceOrderInput);
+    setOrderId(order.publicId);
     this.log.info(
       { publicId: order.publicId, direction: order.direction, hashlock: order.hashlock },
       "order announced"
@@ -237,6 +238,7 @@ export class OrderService {
   }
 
   get(publicId: string): Promise<OrderRow | null> {
+    setOrderId(publicId);
     return this.repo.findByPublicId(publicId);
   }
 
@@ -306,6 +308,7 @@ export class OrderService {
     /** Trusted chain-observation timestamp from the listener, in milliseconds. */
     observedAtMs?: number;
   }): Promise<void> {
+    setOrderId(input.publicId);
     const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
@@ -384,6 +387,7 @@ export class OrderService {
     resolver: string | null;
     actor?: MutationActor;
   }): Promise<void> {
+    setOrderId(input.publicId);
     const actor = input.actor ?? "system";
     const order = await this.repo.findByPublicId(input.publicId);
     if (!order) throw new OrderValidationError(`unknown order ${input.publicId}`);
@@ -470,6 +474,7 @@ export class OrderService {
   }
 
   async recordSecret(publicId: string, preimage: string, txHash: string, encVersion: number | null = null, actor: MutationActor = "system"): Promise<void> {
+    setOrderId(publicId);
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
@@ -529,6 +534,7 @@ export class OrderService {
   }
 
   async markStatus(publicId: string, status: OrderRow["status"], actor: MutationActor = "system"): Promise<void> {
+    setOrderId(publicId);
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
 
