@@ -152,6 +152,8 @@ import {
   lifecycleTransitionsTotal,
 } from "./metrics.js";
 
+const lifecycleTransitionsCounter = lifecycleTransitionsTotal;
+
 // ── ResolverLifecycle Class ───────────────────────────────────────────────────
 
 /**
@@ -279,8 +281,8 @@ export class ResolverLifecycle {
     );
 
     // Update metrics
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    lifecycleStateGauge.labels({ state: nextState }).set(1);
+    lifecycleTransitionsCounter.labels({ from: previousState, to: nextState }).inc();
   }
 
   /**
@@ -330,8 +332,8 @@ export class ResolverLifecycle {
       "forced lifecycle state transition"
     );
 
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    lifecycleStateGauge.labels({ state: nextState }).set(1);
+    lifecycleTransitionsCounter.labels({ from: previousState, to: nextState }).inc();
   }
 
   /**
@@ -539,7 +541,7 @@ export function recordLifecycleMetrics(
   durationMs: number
 ): void {
   // This will be implemented in metrics.ts
-  lifecycleStateGauge.set(state);
+  lifecycleStateGauge.labels({ state }).set(1);
   // duration metric would be recorded here
 }
 
