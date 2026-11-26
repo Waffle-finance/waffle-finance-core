@@ -1,5 +1,30 @@
 import pino, { type Logger } from "pino";
-import { getRequestId } from "./request-context.js";
+import { getRequestContext, getRequestId } from "./request-context.js";
+import {
+  sensitiveSerializers,
+  SENSITIVE_FIELD_NAMES,
+  REDACTED_PLACEHOLDER,
+} from "./sensitive/sensitive-fields.js";
+
+/**
+ * Mixin that extracts correlation identifiers (requestId, correlationId, orderId)
+ * from the active AsyncLocalStorage request context at log-write time.
+ */
+export function correlationMixin(): Record<string, unknown> {
+  const ctx = getRequestContext();
+  if (ctx) {
+    const fields: Record<string, unknown> = {
+      requestId: ctx.requestId,
+      correlationId: ctx.correlationId,
+    };
+    if (ctx.orderId) {
+      fields.orderId = ctx.orderId;
+    }
+    return fields;
+  }
+  const requestId = getRequestId();
+  return requestId ? { requestId } : {};
+}
 
 let cached: Logger | null = null;
 
@@ -8,15 +33,23 @@ export function getLogger(level: string = "info"): Logger {
     cached = pino({
       level,
       base: { service: "wafflefinance-coordinator" },
-      // Inject the active request ID into every log line at write time.
-      // Because the request-id middleware wraps each request in an
-      // AsyncLocalStorage context, this picks up the correct ID even for
-      // log calls deep inside service and repository methods.
-      mixin() {
-        const requestId = getRequestId();
-        return requestId ? { requestId } : {};
-      }
+      mixin: correlationMixin,
+      serializers: sensitiveSerializers(),
+      redact: {
+        paths: [
+          ...SENSITIVE_FIELD_NAMES,
+          "*.preimage",
+          "*.secret",
+          "*.privateKey",
+          "*.secretKey",
+        ],
+        censor: REDACTED_PLACEHOLDER,
+      },
     });
   }
   return cached;
+}
+
+export function resetLoggerForTesting(): void {
+  cached = null;
 }

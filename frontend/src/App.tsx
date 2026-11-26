@@ -175,8 +175,9 @@ function App() {
   const connectMetaMask = async () => {
     setIsConnecting(true);
     try {
-      await ethWallet.connect();
-      setShowWalletMenu(false);
+      if (await ethWallet.connect()) {
+        setShowWalletMenu(false);
+      }
     } catch (error: any) {
       console.error('MetaMask connection error:', error);
     } finally {
@@ -701,4 +702,3 @@ function App() {
 }
 
 export default App;
-

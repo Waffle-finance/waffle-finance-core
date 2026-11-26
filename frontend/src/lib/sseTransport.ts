@@ -29,11 +29,11 @@ const HTLC_EVENT_NAMES = [
  * Falls back to the `status` field inside the payload data when present.
  */
 const EVENT_NAME_TO_STATUS: Record<string, string> = {
-  OrderCreated:   "src_locked",
-  OrderClaimed:   "dst_locked",
-  OrderRefunded:  "refunded",
+  OrderCreated: "src_locked",
+  OrderClaimed: "dst_locked",
+  OrderRefunded: "refunded",
   SecretRevealed: "secret_revealed",
-  StatusChanged:  "", // resolved from data.status
+  StatusChanged: "", // resolved from data.status
 };
 
 /**
@@ -56,7 +56,7 @@ export function createSseTransport(
           message: "EventSource is not available in this environment",
           retryable: false,
         });
-        return () => {};
+        return () => { };
       }
 
       const url = `${apiBaseUrl.replace(/\/$/, "")}/api/orders/${encodeURIComponent(orderId)}/events`;
@@ -70,7 +70,7 @@ export function createSseTransport(
           message: err instanceof Error ? err.message : "Failed to open SSE connection",
           retryable: true,
         });
-        return () => {};
+        return () => { };
       }
 
       // Wire each named HTLC event type

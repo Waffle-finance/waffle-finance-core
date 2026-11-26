@@ -26,6 +26,7 @@
  */
 
 import { Router, type Request, type Response } from "express";
+import { setOrderId } from "../../request-context.js";
 import { Writable } from "node:stream";
 import type { Logger } from "pino";
 import type { AuditRepository } from "../../audit/audit-repo.js";
@@ -124,6 +125,14 @@ export function auditRoutes(
   ordersRepo?: OrdersRepository,
 ): Router {
   const router = Router();
+
+  router.param("orderId", (_req, res, next, orderId) => {
+    if (typeof orderId === "string" && orderId) {
+      setOrderId(orderId);
+      res.locals["orderId"] = orderId;
+    }
+    next();
+  });
   // The streaming audit export contains the full, unredacted event payloads;
   // only operators may access it. Other audit reads are redacted views.
   router.use(

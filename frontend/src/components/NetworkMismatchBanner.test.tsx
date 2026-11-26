@@ -32,7 +32,6 @@ function makeNetworkState(overrides: Partial<NetworkModeState> = {}): NetworkMod
     hasAnyMismatch: false,
     setMode: vi.fn().mockResolvedValue({ ok: true }),
     syncWalletsToAppMode: vi.fn().mockResolvedValue({ ok: true }),
-    refreshWalletNetworks: vi.fn(),
     ...overrides,
   };
 }
@@ -84,7 +83,6 @@ describe('NetworkMismatchBanner', () => {
 
   it('"Switch wallet to Testnet" button calls syncWalletsToAppMode', async () => {
     const syncWalletsToAppMode = vi.fn().mockResolvedValue({ ok: true });
-    const refreshWalletNetworks = vi.fn();
     render(
       <NetworkMismatchBanner
         networkState={makeNetworkState({
@@ -94,7 +92,6 @@ describe('NetworkMismatchBanner', () => {
           metamaskMatches: false,
           hasAnyMismatch: true,
           syncWalletsToAppMode,
-          refreshWalletNetworks,
         })}
       />,
     );
@@ -102,7 +99,6 @@ describe('NetworkMismatchBanner', () => {
       screen.getByRole('button', { name: /switch wallet to testnet/i }),
     );
     await waitFor(() => expect(syncWalletsToAppMode).toHaveBeenCalledOnce());
-    expect(refreshWalletNetworks).toHaveBeenCalledOnce();
   });
 
   // ── MetaMask on Sepolia while app is mainnet ──────────────────────────────

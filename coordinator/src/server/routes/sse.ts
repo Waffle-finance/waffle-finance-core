@@ -17,6 +17,7 @@ import { SSE_CONNECTED_FRAME, buildReplayGapPayload } from "../../sse/event-buil
 import type { SseBroker } from "../../sse/sse-broker.js";
 import { MAX_SUBSCRIBERS } from "../../sse/sse-broker.js";
 import { validationError, notFoundError } from "../errors.js";
+import { setOrderId } from "../../request-context.js";
 
 export function sseRoutes(
   orders: OrderService,
@@ -33,6 +34,8 @@ export function sseRoutes(
       return;
     }
     const orderId = idResult.data;
+    setOrderId(orderId);
+    res.locals["orderId"] = orderId;
 
     // 2. Ensure order exists before upgrading to stream
     let order;
