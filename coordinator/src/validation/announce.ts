@@ -39,6 +39,30 @@ import {
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 
 /**
+ * Maximum field lengths for announce payloads.
+ *
+ * These caps sit well above any real-world value so legitimate orders pass
+ * unconditionally, while pathological inputs (multi-MB strings, padding
+ * attacks) are caught at the schema layer before reaching persistence or logs.
+ *
+ * exported so boundary tests can reference the same constants.
+ */
+export const ANNOUNCE_FIELD_LIMITS = {
+  /** direction enum values are short; 20 chars is more than enough. */
+  direction: 20,
+  /** hashlock is exactly 66 chars (0x + 64 hex); allow 66. */
+  hashlock: 66,
+  /** chain enum values top out at "ethereum" (8 chars). */
+  chain: 20,
+  /** Longest realistic address: Stellar G + 55 = 56 chars. 100 chars budget. */
+  address: 100,
+  /** Asset identifiers: "native" or a Stellar asset code like USDC:G... */
+  asset: 200,
+  /** Decimal integer strings: 78 chars covers uint256 max (2^256-1). */
+  amount: 78,
+} as const;
+
+/**
  * The src/dst chains each supported swap direction must use.
  *
  * @deprecated Use `POLICY_DIRECTION_CHAINS` from `./route-policy.ts` directly.
@@ -49,17 +73,36 @@ export const DIRECTION_CHAINS: Record<Direction, { src: Chain; dst: Chain }> =
   POLICY_DIRECTION_CHAINS;
 
 const announceShape = z.object({
-  direction: z.enum(["eth_to_xlm", "xlm_to_eth", "eth_to_sol", "sol_to_eth"]),
-  hashlock: z.string().regex(HEX32, "hashlock must be 0x + 64 hex chars"),
+  direction: z.enum(["eth_to_xlm", "xlm_to_eth", "eth_to_sol", "sol_to_eth"]).refine(
+    (v) => v.length <= ANNOUNCE_FIELD_LIMITS.direction,
+    { message: `direction must be at most ${ANNOUNCE_FIELD_LIMITS.direction} characters` }
+  ),
+  hashlock: z.string()
+    .max(ANNOUNCE_FIELD_LIMITS.hashlock, `hashlock must be at most ${ANNOUNCE_FIELD_LIMITS.hashlock} characters`)
+    .regex(HEX32, "hashlock must be 0x + 64 hex chars"),
   srcChain: z.enum(["ethereum", "stellar", "solana"]),
-  srcAddress: z.string(),
-  srcAsset: z.string().min(1),
-  srcAmount: z.string().regex(/^\d+$/, "srcAmount must be a decimal integer string"),
-  srcSafetyDeposit: z.string().regex(/^\d+$/, "srcSafetyDeposit must be a decimal integer string"),
+  srcAddress: z.string()
+    .min(1, "srcAddress is required")
+    .max(ANNOUNCE_FIELD_LIMITS.address, `srcAddress must be at most ${ANNOUNCE_FIELD_LIMITS.address} characters`),
+  srcAsset: z.string()
+    .min(1, "srcAsset is required")
+    .max(ANNOUNCE_FIELD_LIMITS.asset, `srcAsset must be at most ${ANNOUNCE_FIELD_LIMITS.asset} characters`),
+  srcAmount: z.string()
+    .max(ANNOUNCE_FIELD_LIMITS.amount, `srcAmount must be at most ${ANNOUNCE_FIELD_LIMITS.amount} digits`)
+    .regex(/^\d+$/, "srcAmount must be a decimal integer string"),
+  srcSafetyDeposit: z.string()
+    .max(ANNOUNCE_FIELD_LIMITS.amount, `srcSafetyDeposit must be at most ${ANNOUNCE_FIELD_LIMITS.amount} digits`)
+    .regex(/^\d+$/, "srcSafetyDeposit must be a decimal integer string"),
   dstChain: z.enum(["ethereum", "stellar", "solana"]),
-  dstAddress: z.string(),
-  dstAsset: z.string().min(1),
-  dstAmount: z.string().regex(/^\d+$/, "dstAmount must be a decimal integer string")
+  dstAddress: z.string()
+    .min(1, "dstAddress is required")
+    .max(ANNOUNCE_FIELD_LIMITS.address, `dstAddress must be at most ${ANNOUNCE_FIELD_LIMITS.address} characters`),
+  dstAsset: z.string()
+    .min(1, "dstAsset is required")
+    .max(ANNOUNCE_FIELD_LIMITS.asset, `dstAsset must be at most ${ANNOUNCE_FIELD_LIMITS.asset} characters`),
+  dstAmount: z.string()
+    .max(ANNOUNCE_FIELD_LIMITS.amount, `dstAmount must be at most ${ANNOUNCE_FIELD_LIMITS.amount} digits`)
+    .regex(/^\d+$/, "dstAmount must be a decimal integer string")
 });
 
 /**

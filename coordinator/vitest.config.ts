@@ -16,6 +16,15 @@ export default defineConfig({
       "@wafflefinance/sdk/solana": resolve(__dirname, "../packages/sdk/src/solana/rpc-provider.ts"),
       "@wafflefinance/sdk/types": resolve(__dirname, "../packages/sdk/src/types/index.ts"),
       "@wafflefinance/sdk": resolve(__dirname, "../packages/sdk/src/index.ts"),
+      // Stub for the optional @wormhole/config package, which is not installed
+      // in this environment. The coordinator's tests never exercise the SDK's
+      // config-validation layer at runtime; this alias lets the module graph
+      // resolve without the real package being present.
+      "@wormhole/config": resolve(__dirname, "../packages/sdk/src/__stubs__/wormhole-config.ts"),
+      // Stub for kysely — declared in kysely-db.ts but not added to the
+      // coordinator's package.json yet. Tests never call createKyselyDb() so
+      // a no-op stub is safe.
+      "kysely": resolve(__dirname, "src/__stubs__/kysely.ts"),
     },
   },
   test: {

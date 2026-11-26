@@ -270,6 +270,10 @@ export class PostgresStatement {
  */
 export const CURRENT_SCHEMA_VERSION = "013_replay_safety.sql";
 
+// NOTE: When a new migration is added to the migrations/ directory it must
+// also be appended here (and to POSTGRES_MIGRATION_FILES) before the
+// validateMigrationRegistry guard will allow the database to open.
+
 /**
  * Canonical SQLite migration sequence, in application order.
  *

@@ -110,6 +110,21 @@ export function createApp(deps: AppDeps): Express {
       serializers: sensitiveSerializers(),
     })
   );
+  // Per-route payload size limits must be registered BEFORE express.json()
+  // so they can reject oversized bodies before the JSON parser buffers them.
+  // The global express.json({ limit: "1mb" }) below is a last-resort safety
+  // net for routes without an explicit per-route limit.
+  //
+  // Each LIMITS.* middleware checks Content-Length first (zero body read),
+  // then installs a streaming byte counter. When a request exceeds the limit,
+  // it responds with 413 and destroys the socket before express.json() can
+  // attempt to parse the body.
+  const express_json_limit_8k = express.json({ limit: `${8_192}b` });
+  const express_json_limit_2k = express.json({ limit: `${2_048}b` });
+  app.use("/api/orders/announce", express_json_limit_8k);
+  app.use("/api/secrets/reveal", express_json_limit_2k);
+  app.use("/api/orders/:id/src-locked", express_json_limit_2k);
+  app.use("/api/orders/:id/dst-locked", express_json_limit_2k);
   app.use(express.json({ limit: "1mb" }));
   app.use(
     cors({
@@ -179,11 +194,27 @@ export function createApp(deps: AppDeps): Express {
   // Final error handler - never leak a stack trace to clients.
   app.use(
     (
-      err: Error,
+      err: Error & { type?: string; status?: number; statusCode?: number },
       _req: express.Request,
       res: express.Response,
       _next: express.NextFunction
     ) => {
+      // body-parser (express.json) emits an error with type "entity.too.large"
+      // and status 413 when the per-route JSON limit is exceeded. Convert it
+      // to our standard payload_too_large envelope so the response shape is
+      // consistent with what the payload-limits middleware produces.
+      if (
+        (err.type === "entity.too.large" || err.status === 413 || err.statusCode === 413)
+      ) {
+        if (!res.headersSent) {
+          res.status(413).json({
+            error: "payload_too_large",
+            message: "Request body exceeds the size limit for this endpoint",
+          });
+        }
+        return;
+      }
+
       const isSafe = err instanceof SecretRevealError;
       const safeErr = isSafe ? err : sanitizeForLog(err);
       
