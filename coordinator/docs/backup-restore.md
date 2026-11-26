@@ -24,8 +24,9 @@ The backup script:
 - creates a timestamped file under `backups/` unless `--out` is provided
 - uses SQLite `VACUUM INTO` for a consistent SQLite copy
 - uses `pg_dump --format=custom` for PostgreSQL
-- verifies SQLite backups with `PRAGMA integrity_check`
-- verifies PostgreSQL dumps with `pg_restore --list`
+- verifies SQLite backups with `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, required table checks, and schema version checks
+- verifies PostgreSQL dumps with `pg_restore --list`, invalid-index checks, required table checks, and schema version checks
+- writes a sanitized `<backup>.manifest.json` containing the archive SHA-256 checksum, schema version, migration list, and required-table row counts (never secret values, encryption keys, or database credentials)
 - refuses to overwrite an existing backup file
 
 ## Restore
@@ -46,10 +47,10 @@ DATABASE_URL=postgresql://user:pass@db.example.com:5432/wafflefinance pnpm --fil
 
 The restore script:
 
-- verifies the backup before restore unless `--no-verify` is passed
+- verifies the backup archive checksum against `<backup>.manifest.json` (or `--manifest <path>`) and runs engine-specific archive checks before restore unless `--no-verify` is passed
 - moves an existing SQLite database aside as `*.pre-restore-<timestamp>.bak`
 - uses `pg_restore --clean --if-exists` for PostgreSQL
-- verifies the restored SQLite database after copying
+- runs post-restore verification on the restored SQLite or PostgreSQL database (engine integrity checks, required tables, schema version, and row counts compared against the sanitized manifest) and prints the verification report before declaring success; never prints secret preimages, encryption keys, or credentials
 
 ## Operational checklist
 

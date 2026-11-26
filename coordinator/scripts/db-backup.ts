@@ -3,6 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import {
+  evaluateVerification,
+  formatVerificationReport,
+  inspectPostgresDatabase,
+  inspectSqliteDatabase,
+  writeBackupManifest,
+} from './db-backup-verify.js';
 
 const nodeRequire = createRequire(import.meta.url);
 const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
@@ -98,23 +106,13 @@ function sqliteLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function verifySqlite(path: string): void {
-  const db = new DatabaseSync(path, { readOnly: true });
-  try {
-    const row = db.prepare('PRAGMA integrity_check').get() as Record<string, string>;
-    const result = Object.values(row)[0];
-    if (result !== 'ok') {
-      throw new Error(`SQLite integrity_check failed: ${result}`);
-    }
-    db.prepare(
-      'SELECT migration FROM schema_migrations ORDER BY applied_at DESC, migration DESC LIMIT 1'
-    ).get();
-  } finally {
-    db.close();
-  }
+export interface BackupResult {
+  backupPath: string;
+  manifestPath: string;
+  schemaVersion: string | null;
 }
 
-function backupSqlite(databaseUrl: string, out?: string, verify = true): string {
+export function backupSqlite(databaseUrl: string, out?: string, verify = true): BackupResult {
   const source = sqlitePathFromUrl(databaseUrl);
   if (!existsSync(source)) {
     throw new Error(`SQLite database does not exist: ${source}`);
@@ -133,8 +131,21 @@ function backupSqlite(databaseUrl: string, out?: string, verify = true): string 
     db.close();
   }
 
-  if (verify) verifySqlite(target);
-  return target;
+  const inspection = inspectSqliteDatabase(target);
+  if (verify) {
+    const report = evaluateVerification(inspection);
+    console.log(formatVerificationReport(report));
+    if (!report.ok) {
+      throw new Error(`Backup verification failed:\n${report.mismatches.join('\n')}`);
+    }
+  }
+
+  const manifestPath = writeBackupManifest(target, inspection);
+  return {
+    backupPath: target,
+    manifestPath,
+    schemaVersion: inspection.schemaVersion,
+  };
 }
 
 function postgresEnvFromUrl(url: string): NodeJS.ProcessEnv {
@@ -164,7 +175,11 @@ function run(command: string, args: string[], env?: NodeJS.ProcessEnv): void {
   }
 }
 
-function backupPostgres(databaseUrl: string, out?: string, verify = true): string {
+export async function backupPostgres(
+  databaseUrl: string,
+  out?: string,
+  verify = true
+): Promise<BackupResult> {
   const target = defaultOutPath(out, 'postgres');
   if (existsSync(target)) {
     throw new Error(`Refusing to overwrite existing backup: ${target}`);
@@ -174,19 +189,40 @@ function backupPostgres(databaseUrl: string, out?: string, verify = true): strin
   const env = postgresEnvFromUrl(databaseUrl);
   run('pg_dump', ['--format=custom', '--no-owner', '--no-privileges', '--file', target], env);
   if (verify) run('pg_restore', ['--list', target], env);
-  return target;
+
+  const inspection = await inspectPostgresDatabase(databaseUrl);
+  if (verify) {
+    const report = evaluateVerification(inspection);
+    console.log(formatVerificationReport(report));
+    if (!report.ok) {
+      throw new Error(`Backup verification failed:\n${report.mismatches.join('\n')}`);
+    }
+  }
+
+  const manifestPath = writeBackupManifest(target, inspection);
+  return {
+    backupPath: target,
+    manifestPath,
+    schemaVersion: inspection.schemaVersion,
+  };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const output = isPostgresUrl(args.databaseUrl)
-    ? backupPostgres(args.databaseUrl, args.out, args.verify)
+  const result = isPostgresUrl(args.databaseUrl)
+    ? await backupPostgres(args.databaseUrl, args.out, args.verify)
     : backupSqlite(args.databaseUrl, args.out, args.verify);
 
-  console.log(`Backup created: ${output}`);
+  console.log(`Backup created: ${result.backupPath}`);
+  console.log(`Manifest created: ${result.manifestPath}`);
 }
 
-main().catch(err => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exitCode = 1;
-});
+const isDirectExecution =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isDirectExecution) {
+  main().catch(err => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  });
+}
