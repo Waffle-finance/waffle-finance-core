@@ -660,6 +660,15 @@ export class OrderService {
     return this.repo.claimEvent(input);
   }
 
+  /**
+   * Read-only check of the durable idempotence ledger. The reconciler uses it
+   * to skip events a previous run finished, and claims an event only after its
+   * order mutation is durable (see `claimEvent`).
+   */
+  async hasProcessedEvent(eventKey: string): Promise<boolean> {
+    return this.repo.hasProcessedEvent(eventKey);
+  }
+
   async getChainCursor(chain: Chain): Promise<number> {
     return this.repo.getChainCursor(chain);
   }

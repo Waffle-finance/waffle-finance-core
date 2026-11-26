@@ -178,7 +178,7 @@ export const ROUTES = [
     path: '/api/orders/:id/events',
     auth: 'public',
     health: 'none',
-    summary: 'Server-Sent Events stream; pushes order state transitions to the client in real time.',
+    summary: 'Server-Sent Events stream; pushes order state transitions to the client in real time. A subscriber whose socket stays backpressured for more than 256 consecutive frames is disconnected; reconnect with Last-Event-ID to resync.',
     sourceRef: 'coordinator/src/server/routes/sse.ts',
   },
 

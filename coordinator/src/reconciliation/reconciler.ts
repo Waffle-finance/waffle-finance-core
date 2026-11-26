@@ -189,6 +189,19 @@ function safeToNumber(
   return n;
 }
 
+/**
+ * Per-chain, per-run record of events that could not be applied.
+ *
+ * `lowestFailedBlock` is the earliest block holding an unapplied event. The
+ * chain cursor must not move to or past that block, so the next run re-scans
+ * it. `windowStart` is the block the scan began at; it is used when a failing
+ * log has no usable block number.
+ */
+export interface ReplayFailureTracker {
+  windowStart: number;
+  lowestFailedBlock: number | null;
+}
+
 export class Reconciler {
   private readonly log: Logger;
   private readonly ethClient: PublicClient;
@@ -266,9 +279,10 @@ export class Reconciler {
    * uniqueness guarantee and does survive a restart.
    *
    * Returns true when this call inserted the key and false when a prior run
-   * already recorded it. Most chain replay paths use this as a pre-write
-   * dedup guard. Solana records the key after reconciling order state, so a
-   * failed persistence attempt remains eligible for a later replay.
+   * already recorded it. Soroban replay still uses this as a pre-write dedup
+   * guard. Ethereum and Solana record the key after reconciling order state
+   * (Ethereum via `markEventProcessed`), so a failed persistence attempt
+   * remains eligible for a later replay.
    */
   private async claimEvent(
     key: string,
@@ -281,6 +295,53 @@ export class Reconciler {
       this.log.debug({ key, chain, eventType }, "reconciler: event already processed in a previous run — skipping");
     }
     return claimed;
+  }
+
+  /**
+   * Read-only duplicate check used before applying an Ethereum event.
+   *
+   * ETH replay claims an event only after its order mutation is durable (see
+   * `markEventProcessed`). A key that was never claimed, because the run
+   * crashed or the apply failed, therefore stays eligible for replay.
+   */
+  private async isEventProcessed(key: string): Promise<boolean> {
+    if (!(await this.orders.hasProcessedEvent(key))) return false;
+    reconciliationDuplicatesSkipped.inc();
+    this.log.debug({ key }, "reconciler: event already processed in a previous run — skipping");
+    return true;
+  }
+
+  /**
+   * Record an event as processed. Called only after its order mutation has
+   * committed, or after a deliberate skip such as a terminal conflict. If the
+   * process dies before this call, the event is replayed on the next run and
+   * the order's own decision logic makes the replay a no-op.
+   */
+  private async markEventProcessed(
+    key: string,
+    chain: "ethereum" | "soroban" | "solana",
+    eventType: "OrderCreated" | "OrderClaimed" | "OrderRefunded"
+  ): Promise<void> {
+    await this.orders.claimEvent({ eventKey: key, chain, eventType });
+  }
+
+  /**
+   * Record a per-event apply failure so the chain cursor is held below it.
+   * Events that fail are not claimed, so the next run re-scans them.
+   */
+  private trackReplayFailure(failures: ReplayFailureTracker, log: Log): void {
+    const block = safeToNumber(
+      log.blockNumber ?? 0n,
+      "blockNumber",
+      "ETH replay failure",
+      "ethereum",
+      () => {}
+    );
+    const failedAt = block ?? failures.windowStart;
+    if (failures.lowestFailedBlock === null || failedAt < failures.lowestFailedBlock) {
+      failures.lowestFailedBlock = failedAt;
+    }
+    reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "replay_failed" });
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -539,17 +600,34 @@ export class Reconciler {
       this.ethClient.getLogs({ address, event: ORDER_REFUNDED, fromBlock, toBlock }),
     ]);
 
+    const failures: ReplayFailureTracker = {
+      windowStart: Number(fromBlock),
+      lowestFailedBlock: null,
+    };
     let replayed = 0;
-    replayed += await this.replayEthCreated(createdLogs);
-    replayed += await this.replayEthClaimed(claimedLogs);
-    replayed += await this.replayEthRefunded(refundedLogs);
+    replayed += await this.replayEthCreated(createdLogs, failures);
+    replayed += await this.replayEthClaimed(claimedLogs, failures);
+    replayed += await this.replayEthRefunded(refundedLogs, failures);
 
-    // Persist cursor so the next run knows where we got to.
-    await this.orders.setChainCursor("ethereum", Number(latest));
+    // Persist cursor so the next run knows where we got to. The cursor stops
+    // one block below the earliest event that could not be applied, so that
+    // event is re-scanned instead of being skipped forever.
+    const latestNum = Number(latest);
+    const cursorTarget =
+      failures.lowestFailedBlock === null
+        ? latestNum
+        : Math.max(0, Math.min(latestNum, failures.lowestFailedBlock - 1));
+    if (failures.lowestFailedBlock !== null) {
+      this.log.warn(
+        { lowestFailedBlock: failures.lowestFailedBlock, cursorTarget, latest: latestNum },
+        "reconciler: ETH replay left unapplied events — cursor held below the first failure",
+      );
+    }
+    await this.orders.setChainCursor("ethereum", cursorTarget);
     return replayed;
   }
 
-  private async replayEthCreated(logs: Log[]): Promise<number> {
+  private async replayEthCreated(logs: Log[], failures: ReplayFailureTracker): Promise<number> {
     let n = 0;
     for (const log of logs) {
       const args = (log as any).args as {
@@ -570,7 +648,7 @@ export class Reconciler {
         continue;
       }
 
-      if (!(await this.claimEvent(key, "ethereum", "OrderCreated"))) continue;
+      if (await this.isEventProcessed(key)) continue;
 
       try {
         const order = await this.orders.findByHashlock(args.hashlock);
@@ -598,6 +676,7 @@ export class Reconciler {
 
         if (isEventBehindOrderCursor(order.lastEthBlock, blockNum)) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "cursor_already_processed" });
+          await this.markEventProcessed(key, "ethereum", "OrderCreated");
           continue;
         }
 
@@ -613,6 +692,7 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+          await this.markEventProcessed(key, "ethereum", "OrderCreated");
           // Conflict detection: chain shows a created event but DB is already
           // terminal — this indicates the order completed/refunded in a prior
           // session and is expected during replay of old history.
@@ -647,12 +727,14 @@ export class Reconciler {
           timelock: timelockNum,
         });
         await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+        await this.markEventProcessed(key, "ethereum", "OrderCreated");
         n++;
         reconciliationRestartRecoveryEvents.inc({ chain: "ethereum" });
         this.log.info({ hashlock: args.hashlock }, "reconciler: replayed ETH OrderCreated");
       } catch (err: any) {
         if (err?.message?.includes("cannot record") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "already_applied" });
+          await this.markEventProcessed(key, "ethereum", "OrderCreated");
           const blockNum = safeToNumber(
             log.blockNumber ?? 0n,
             "blockNumber",
@@ -666,13 +748,14 @@ export class Reconciler {
           }
           continue;
         }
+        this.trackReplayFailure(failures, log);
         this.log.warn({ err, hashlock: args.hashlock }, "reconciler: ETH created replay error");
       }
     }
     return n;
   }
 
-  private async replayEthClaimed(logs: Log[]): Promise<number> {
+  private async replayEthClaimed(logs: Log[], failures: ReplayFailureTracker): Promise<number> {
     let n = 0;
     for (const log of logs) {
       const args = (log as any).args as { orderId: bigint; preimage: `0x${string}` };
@@ -686,7 +769,7 @@ export class Reconciler {
       const conflict = this.seenSet.checkAndMark("ethereum", "OrderClaimed", key, semKey);
       if (conflict) continue;
 
-      if (!(await this.claimEvent(key, "ethereum", "OrderClaimed"))) continue;
+      if (await this.isEventProcessed(key)) continue;
 
       try {
         const order = await this.orders.findBySrcOrderId("ethereum", args.orderId.toString());
@@ -710,6 +793,7 @@ export class Reconciler {
 
         if (isEventBehindOrderCursor(order.lastEthBlock, blockNum)) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "cursor_already_processed" });
+          await this.markEventProcessed(key, "ethereum", "OrderClaimed");
           continue;
         }
 
@@ -725,6 +809,7 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+          await this.markEventProcessed(key, "ethereum", "OrderClaimed");
           continue;
         }
 
@@ -736,17 +821,20 @@ export class Reconciler {
           );
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "preimage_mismatch" });
           await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+          await this.markEventProcessed(key, "ethereum", "OrderClaimed");
           continue;
         }
 
         await this.orders.recordSecret(order.publicId, args.preimage, log.transactionHash ?? "0x", null, "reconciler");
         await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+        await this.markEventProcessed(key, "ethereum", "OrderClaimed");
         n++;
         reconciliationRestartRecoveryEvents.inc({ chain: "ethereum" });
         this.log.info({ orderId: args.orderId.toString() }, "reconciler: replayed ETH OrderClaimed");
       } catch (err: any) {
         if (err?.message?.includes("cannot record") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "already_applied" });
+          await this.markEventProcessed(key, "ethereum", "OrderClaimed");
           const blockNum = safeToNumber(log.blockNumber ?? 0n, "blockNumber", "ETH OrderClaimed catch", "ethereum", () => {});
           if (blockNum !== null) {
             const order = args?.orderId
@@ -756,13 +844,14 @@ export class Reconciler {
           }
           continue;
         }
+        this.trackReplayFailure(failures, log);
         this.log.warn({ err }, "reconciler: ETH claimed replay error");
       }
     }
     return n;
   }
 
-  private async replayEthRefunded(logs: Log[]): Promise<number> {
+  private async replayEthRefunded(logs: Log[], failures: ReplayFailureTracker): Promise<number> {
     let n = 0;
     for (const log of logs) {
       const args = (log as any).args as { orderId?: bigint };
@@ -776,7 +865,7 @@ export class Reconciler {
       const conflict = this.seenSet.checkAndMark("ethereum", "OrderRefunded", key, semKey);
       if (conflict) continue;
 
-      if (!(await this.claimEvent(key, "ethereum", "OrderRefunded"))) continue;
+      if (await this.isEventProcessed(key)) continue;
 
       try {
         const order = await this.orders.findBySrcOrderId("ethereum", args.orderId.toString());
@@ -800,6 +889,7 @@ export class Reconciler {
 
         if (isEventBehindOrderCursor(order.lastEthBlock, blockNum)) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "cursor_already_processed" });
+          await this.markEventProcessed(key, "ethereum", "OrderRefunded");
           continue;
         }
 
@@ -815,6 +905,7 @@ export class Reconciler {
         if (!decision.shouldApply) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: decision.reason });
           await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+          await this.markEventProcessed(key, "ethereum", "OrderRefunded");
           // DB says completed but chain shows refund — that's an ambiguous conflict.
           if (order.status === "completed") {
             reconciliationConflicts.inc({ chain: "ethereum", conflict_type: "terminal_clash" });
@@ -828,12 +919,14 @@ export class Reconciler {
 
         await this.orders.markStatus(order.publicId, "refunded", "reconciler");
         await this.advanceOrderCursor(order.publicId, "ethereum", blockNum);
+        await this.markEventProcessed(key, "ethereum", "OrderRefunded");
         n++;
         reconciliationRestartRecoveryEvents.inc({ chain: "ethereum" });
         this.log.info({ orderId: args.orderId.toString() }, "reconciler: replayed ETH OrderRefunded");
       } catch (err: any) {
         if (err?.message?.includes("cannot transition") || err?.message?.includes("terminal")) {
           reconciliationEventsSkipped.inc({ chain: "ethereum", reason: "already_applied" });
+          await this.markEventProcessed(key, "ethereum", "OrderRefunded");
           const blockNum = safeToNumber(log.blockNumber ?? 0n, "blockNumber", "ETH OrderRefunded catch", "ethereum", () => {});
           if (blockNum !== null) {
             const order = args?.orderId
@@ -843,6 +936,7 @@ export class Reconciler {
           }
           continue;
         }
+        this.trackReplayFailure(failures, log);
         this.log.warn({ err }, "reconciler: ETH refunded replay error");
       }
     }
