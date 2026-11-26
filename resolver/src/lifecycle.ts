@@ -152,6 +152,8 @@ import {
   lifecycleTransitionsTotal,
 } from "./metrics.js";
 
+const lifecycleTransitionsCounter = lifecycleTransitionsTotal;
+
 // ── ResolverLifecycle Class ───────────────────────────────────────────────────
 
 /**
@@ -274,21 +276,22 @@ export class ResolverLifecycle {
 
     // Log the transition
     this.log.info(
-      { from: previousState, to: nextState, durationMs: this._stateDurationMs },
+      { from: previousState, to: nextState, durationMs: this.stateDurationMs },
       "lifecycle state transition"
     );
 
     // Update metrics
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    lifecycleStateGauge.set({ state: nextState }, 1);
+    lifecycleTransitionsTotal.inc({ from: previousState, to: nextState });
   }
 
   /**
    * Validate a transition has all required preconditions.
    */
   private validateTransition(from: LifecycleState, to: LifecycleState): void {
-    // Cannot pause a non-running service
-    if (from !== "running" && to === "paused") {
+    // Cannot go directly to paused without going through the pausing state
+    // (must come from pausing to paused — that's the only valid source)
+    if (to === "paused" && from !== "pausing") {
       throw new StateNotAllowedError(
         from,
         "pause"
@@ -326,12 +329,12 @@ export class ResolverLifecycle {
     this._transitionCount++;
 
     this.log.warn(
-      { from: previousState, to: nextState, reason, durationMs: this._stateDurationMs },
+      { from: previousState, to: nextState, reason, durationMs: this.stateDurationMs },
       "forced lifecycle state transition"
     );
 
-    lifecycleStateGauge.set(nextState);
-    lifecycleTransitionsCounter.inc(previousState, nextState);
+    lifecycleStateGauge.set({ state: nextState }, 1);
+    lifecycleTransitionsTotal.inc({ from: previousState, to: nextState });
   }
 
   /**
@@ -346,41 +349,39 @@ export class ResolverLifecycle {
     timeoutMs: number = 30_000
   ): Promise<void> {
     return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let interval: ReturnType<typeof setInterval> | undefined;
+
+      const cleanup = () => {
+        if (interval !== undefined) clearInterval(interval);
+        if (timer !== undefined) clearTimeout(timer);
+      };
+
       const check = () => {
         if (condition(this._state)) {
+          cleanup();
           resolve();
-        } else {
-          reject(
-            new StateNotAllowedError(
-              this._state,
-              `waiting for state condition: ${condition.toString()}`
-            )
-          );
         }
       };
 
       // Check immediately
-      check();
+      if (condition(this._state)) {
+        resolve();
+        return;
+      }
 
       // Set up interval
-      const interval = setInterval(check, 100);
-      
+      interval = setInterval(check, 100);
+
       // Set up timeout
-      const timeout = setTimeout(() => {
-        clearInterval(interval);
+      timer = setTimeout(() => {
+        cleanup();
         reject(
           new Error(
             `Timeout waiting for state condition after ${timeoutMs}ms: ${condition.toString()}`
           )
         );
       }, timeoutMs);
-
-      // Cleanup on resolution
-      const cleanup = () => {
-        clearInterval(interval);
-        clearTimeout(timeout);
-      };
-      resolve().then(cleanup).catch(cleanup);
     });
   }
 
@@ -536,10 +537,10 @@ export class LifecycleGuard {
  */
 export function recordLifecycleMetrics(
   state: LifecycleState,
-  durationMs: number
+  durationMs: number,
 ): void {
   // This will be implemented in metrics.ts
-  lifecycleStateGauge.set(state);
+  lifecycleStateGauge.set({ state }, 1);
   // duration metric would be recorded here
 }
 

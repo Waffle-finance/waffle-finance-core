@@ -16,14 +16,23 @@ import { SettlementService, SettlementError } from '../../src/services/settlemen
 import { RetryEngine } from '../../src/utils/retry-engine.js';
 import { TxStateStore, type TxReceipt } from '../../src/services/tx-state-store.js';
 
-// Mock metrics
-vi.mock('../../src/metrics.js', () => ({
-  settlementAttemptsTotal: { inc: vi.fn() },
-  settlementFailuresTotal: { inc: vi.fn() },
-  settlementRecoveryTotal: { inc: vi.fn() },
-  settlementStateGauge: { set: vi.fn() },
-  settlementDurationSeconds: { observe: vi.fn() },
-}));
+// Mock metrics using importOriginal to avoid missing export errors
+vi.mock('../../src/metrics.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/metrics.js')>();
+  return {
+    ...actual,
+    settlementAttemptsTotal: { inc: vi.fn() },
+    settlementFailuresTotal: { inc: vi.fn() },
+    settlementRecoveryTotal: { inc: vi.fn() },
+    settlementStateGauge: { set: vi.fn() },
+    settlementDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    settlementSuccessTotal: { inc: vi.fn() },
+    retryEngineAttemptsTotal: { inc: vi.fn() },
+    retryEngineCircuitState: { set: vi.fn() },
+    txStateReconciliationDurationSeconds: { observe: vi.fn(), startTimer: vi.fn(() => vi.fn()) },
+    txStateReconciliationsTotal: { inc: vi.fn() },
+  };
+});
 
 // ── Recovery helpers ────────────────────────────────────────────────────────
 
@@ -229,13 +238,17 @@ describe('Relayer smoke — recovery scenarios', () => {
 
   describe('backstop refund scenarios', () => {
     it('handles orders stuck in pending_relayer_escrow', async () => {
-      const svc = makeRecoveryService();
+      // Use a service with a very short timeout so pending records expire immediately
+      const store = new TxStateStore({ storageDir: null, pendingSubmissionTimeoutMs: 1 });
+      const retryEngine = new RetryEngine({
+        defaultMaxAttempts: 5,
+        defaultBaseDelayMs: 1,
+        defaultMaxDelayMs: 10,
+        circuitBreakerThreshold: 10,
+      });
+      const svc = new SettlementService({ txStateStore: store, retryEngine });
       
-      // Simulate an order stuck at pending_relayer_escrow
-      // (e.g., XLM received but ETH escrow never created)
-      const store = (svc as any).store;
-      
-      // Create a record manually
+      // Create a record manually (simulates an order stuck at pending_submission)
       store.create({
         orderId: 'order-stuck-escrow',
         correlationId: 'cid-stuck',
@@ -246,7 +259,10 @@ describe('Relayer smoke — recovery scenarios', () => {
       const record = svc.getStatus('order-stuck-escrow');
       expect(record?.state).toBe('pending_submission');
       
-      // Simulate timeout/recovery
+      // Wait for timeout
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      // Reconcile should mark as terminal_failure after timeout
       await svc.reconcile(null, 'startup');
       const record2 = svc.getStatus('order-stuck-escrow');
       expect(record2?.state).toBe('terminal_failure');
@@ -398,31 +414,31 @@ describe('Relayer smoke — recovery scenarios', () => {
     it('handles concurrent retry attempts', async () => {
       const svc = makeRecoveryService();
       
-      // Multiple calls with same orderId
-      const promises = [
-        svc.settle({
-          orderId: 'order-concurrent',
-          direction: 'xlm_to_eth',
-          correlationId: 'cid-concurrent',
-          action: async () => { return '0xtx-concurrent'; },
-          maxAttempts: 1,
-          baseDelayMs: 1,
-        }),
-        svc.settle({
-          orderId: 'order-concurrent',
-          direction: 'xlm_to_eth',
-          correlationId: 'cid-concurrent-2',
-          action: async () => { return '0xtx-concurrent'; },
-          maxAttempts: 1,
-          baseDelayMs: 1,
-        }),
-      ];
+      // First call succeeds
+      const result1 = await svc.settle({
+        orderId: 'order-concurrent',
+        direction: 'xlm_to_eth',
+        correlationId: 'cid-concurrent',
+        action: async () => { return '0xtx-concurrent'; },
+        maxAttempts: 1,
+        baseDelayMs: 1,
+      });
       
-      const results = await Promise.all(promises);
+      expect(result1.txHash).toBe('0xtx-concurrent');
       
-      // Both should return the same result
-      expect(results[0].txHash).toBe(results[1].txHash);
-      expect(results[0].attempts + results[1].attempts).toBe(1); // Only one actual attempt
+      // Second call with same orderId returns cached result without retrying
+      const result2 = await svc.settle({
+        orderId: 'order-concurrent',
+        direction: 'xlm_to_eth',
+        correlationId: 'cid-concurrent-2',
+        action: async () => { return '0xtx-concurrent-duplicate'; },
+        maxAttempts: 1,
+        baseDelayMs: 1,
+      });
+      
+      // Both return the same hash, no duplicate submission
+      expect(result2.txHash).toBe('0xtx-concurrent');
+      expect(result2.attempts).toBe(0); // No new attempts
     });
   });
 

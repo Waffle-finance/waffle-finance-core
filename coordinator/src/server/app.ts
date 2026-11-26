@@ -23,6 +23,8 @@ import type { ReconciliationStatus } from "../reconciliation/reconciler.js";
 import type { StaleCleanupResult } from "../services/stale-cleanup.js";
 import type { ExpiryResult } from "./routes/admin.js";
 import { requestIdMiddleware, REQUEST_ID_HEADER } from "./middleware/request-id.js";
+import { getRequestContext } from "../request-context.js";
+import { sensitiveSerializers } from "../sensitive/sensitive-fields.js";
 import { AbuseDetector } from "./middleware/abuse-detection.js";
 import { sanitizeForLog } from "../utils/sanitize-for-log.js";
 import { SecretRevealError } from "../services/secret-errors.js";
@@ -91,13 +93,21 @@ export function createApp(deps: AppDeps): Express {
   app.use(
     pinoHttp({
       logger: deps.log,
-      // Echo the correlation ID into the pino-http access log record so the
-      // HTTP log line and downstream service log lines share the same field.
+      // Echo the correlation ID and order ID into the pino-http access log record
+      // so the HTTP log line and downstream service log lines share the same fields.
       customProps(_req, res) {
         const r = res as express.Response;
-        const id = r.locals["requestId"] as string | undefined;
-        return id ? { requestId: id } : {};
-      }
+        const ctx = getRequestContext();
+        const requestId = (r.locals["requestId"] as string | undefined) ?? ctx?.requestId;
+        const correlationId = (r.locals["correlationId"] as string | undefined) ?? ctx?.correlationId ?? requestId;
+        const orderId = (r.locals["orderId"] as string | undefined) ?? ctx?.orderId ?? undefined;
+        const props: Record<string, unknown> = {};
+        if (requestId) props.requestId = requestId;
+        if (correlationId) props.correlationId = correlationId;
+        if (orderId) props.orderId = orderId;
+        return props;
+      },
+      serializers: sensitiveSerializers(),
     })
   );
   // Per-route payload size limits must be registered BEFORE express.json()

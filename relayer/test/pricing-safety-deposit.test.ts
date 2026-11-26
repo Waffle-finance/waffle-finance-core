@@ -51,13 +51,16 @@ describe('safety deposit price snapshots', () => {
     expect(await deposit()).toBe(ethers.parseEther('0.0001'));
   });
 
-  it('replaces an expired snapshot with the fallback when refresh fails', async () => {
+  it('serves the last trusted observation, flagged stale, when refresh fails within the max stale age', async () => {
     feed.mockResolvedValueOnce(response(2000));
     await pricing.getPriceSnapshot();
     vi.setSystemTime(160_000);
     feed.mockRejectedValue(new Error('offline'));
-    expect(await deposit()).toBe(ethers.parseEther('0.0001'));
-    expect((await pricing.getPriceSnapshot()).ethUsdPrice).toBe(3500);
+    expect(await deposit()).toBe(ethers.parseEther('0.00005'));
+    expect(await pricing.getPriceSnapshot()).toMatchObject({
+      ethUsdPrice: 2000, source: 'fallback', freshness: 'stale', fallback: true,
+      fallbackReason: 'provider_unavailable', observedAt: 100_000, usable: true,
+    });
   });
 
   it.each([NaN, 0, -1])('falls back on an invalid ETH price (%s)', async price => {

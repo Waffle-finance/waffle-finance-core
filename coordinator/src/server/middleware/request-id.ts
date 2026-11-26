@@ -92,6 +92,7 @@ export function requestIdMiddleware(req: Request, res: Response, next: NextFunct
       : requestId;
 
   res.locals["requestId"] = requestId;
+  res.locals["correlationId"] = correlationId;
   res.setHeader(REQUEST_ID_HEADER, requestId);
 
   runWithContext(

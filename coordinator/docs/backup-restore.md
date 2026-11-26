@@ -173,3 +173,6 @@ migrated database or resume traffic until the selected recovery target passes.
   operator machine.
 - Do not paste database URLs with credentials into logs, tickets, or public
   issue comments.
+- **Regular restore drills** are required to validate this runbook and measure
+  recovery time objectives (RTO). See [ops/RESTORE_DRILL.md](../ops/RESTORE_DRILL.md)
+  for the automated drill procedure.

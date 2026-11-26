@@ -185,14 +185,21 @@ export class SorobanListener {
 
   /**
    * Returns true when the event has already been processed.
-   * Inserts the key into the Set when it is new.
-   * Evicts the oldest half of entries once the Set exceeds DEDUP_MAX_SIZE.
+   * Does NOT insert the key — call markProcessed() after the handler
+   * succeeds so that a handler failure does not permanently skip the event.
    */
   private isDuplicate(txHash: string, eventType: string): boolean {
     const key = dedupKey(txHash, eventType);
-    if (this.processedEvents.has(key)) {
-      return true;
-    }
+    return this.processedEvents.has(key);
+  }
+
+  /**
+   * Mark an event as processed after the handler succeeds.
+   * Evicts the oldest half of entries once the Set exceeds DEDUP_MAX_SIZE.
+   */
+  private markProcessed(txHash: string, eventType: string): void {
+    const key = dedupKey(txHash, eventType);
+    if (this.processedEvents.has(key)) return; // already marked
     if (this.processedEvents.size >= DEDUP_MAX_SIZE) {
       const half = DEDUP_MAX_SIZE / 2;
       let pruned = 0;
@@ -204,7 +211,6 @@ export class SorobanListener {
       this.log.debug({ pruned, remaining: this.processedEvents.size }, 'pruned dedup Set');
     }
     this.processedEvents.add(key);
-    return false;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -243,7 +249,7 @@ export class SorobanListener {
 
     activeListeners.set({ chain: CHAIN }, 1);
 
-    globalStalenessMonitor.recordStarted(CHAIN);
+    globalStalenessMonitor.recordStarted(CHAIN, 'poll');
 
     const tick = async () => {
       if (this.stopped) return;
@@ -292,7 +298,12 @@ export class SorobanListener {
 
     let events: Awaited<ReturnType<typeof this.server.getEvents>>;
     try {
-      events = await retryRpcCall(() => this.server.getEvents(req), { logger: this.log });
+      // Do not use retryRpcCall here: history-window errors (cursor too old)
+      // must propagate immediately to the catch block below so we can clamp
+      // to the current ledger head.  Wrapping in retryRpcCall would swallow
+      // the first throw and retry internally, consuming the mock's recovery
+      // return value and bypassing the history-window handling logic.
+      events = await this.server.getEvents(req);
     } catch (err) {
       // ------------------------------------------------------------------
       // History-window overflow: the persisted cursor (or startLedger) is
@@ -361,6 +372,7 @@ export class SorobanListener {
       }
 
       listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+      globalStalenessMonitor.recordEventProcessed(CHAIN);
 
       // Serialise topics and value to base64 XDR so the decoder can
       // call xdr.ScVal.fromXDR() on them without needing the raw SDK
@@ -412,6 +424,7 @@ export class SorobanListener {
 
         eventsTotal.inc({ chain: CHAIN, event_type: 'contract_event' });
         listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+        globalStalenessMonitor.recordEventProcessed(CHAIN);
 
         switch (typed.type) {
           case 'created':
@@ -428,6 +441,9 @@ export class SorobanListener {
             break;
         }
 
+        // Mark as processed only after successful dispatch so that a
+        // handler throw on the first attempt doesn't permanently skip the event.
+        this.markProcessed(txHash, eventType);
         // Record in dedup window only after successful dispatch.
         this._trackDedup(dedupKey);
       } catch (err) {

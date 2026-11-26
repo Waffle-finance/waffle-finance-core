@@ -337,7 +337,7 @@ export class SolanaListener {
     this.log.info({ program: programId, rpc: this.cfg.solana?.rpcUrl }, 'Solana listener starting');
 
     activeListeners.set({ chain: CHAIN }, 1);
-    globalStalenessMonitor.recordStarted(CHAIN);
+    globalStalenessMonitor.recordStarted(CHAIN, 'poll');
 
     const tick = async () => {
       if (this.stopped) return;
@@ -529,6 +529,7 @@ export class SolanaListener {
     }
 
     listenerLastEventTimestampSeconds.set({ chain: CHAIN }, Math.floor(Date.now() / 1000));
+    globalStalenessMonitor.recordEventProcessed(CHAIN);
 
     try {
       switch (event.type) {

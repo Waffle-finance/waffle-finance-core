@@ -6,6 +6,9 @@
  *  - Maintain a per-order replay buffer (circular, max 50 events)
  *  - Keep-alive: emit `: ping` on every idle stream every 30 s
  *  - Cap concurrent subscribers at MAX_SUBSCRIBERS (1 000) per process
+ *  - Backpressure: track writes the socket refuses; evict a subscriber once it
+ *    has been refused more than MAX_QUEUED_FRAMES_PER_SUBSCRIBER frames in a
+ *    row, so one stalled client cannot grow broker memory without bound
  *  - On terminal event: send frame, end the response, remove subscriber
  *  - On SIGTERM: send shutdown frame to all streams
  *  - On Redis adapter present: publish after local broadcast, subscribe for remote events
@@ -22,10 +25,41 @@ import {
   type SseEventData,
   type SseResponseHandle,
 } from "./event-builders.js";
+import {
+  sseActiveStreams,
+  sseBackpressureEvents,
+  sseSlowClientEvictions,
+} from "../metrics.js";
 
 export const MAX_SUBSCRIBERS = 1_000;
 export const REPLAY_BUFFER_SIZE = 50;
 export const KEEP_ALIVE_INTERVAL_MS = 30_000;
+/**
+ * Consecutive frames a subscriber may be refused by its socket before it is
+ * evicted. A client that drains between frames never reaches this limit.
+ */
+export const MAX_QUEUED_FRAMES_PER_SUBSCRIBER = 256;
+
+/** Per-connection write state, kept off the handle so the handle type stays narrow. */
+interface SubscriberFlowState {
+  /** Frames refused since the socket last reported it could accept data. */
+  refusedFrames: number;
+}
+
+export interface SseBrokerOptions {
+  redisAdapter?: SseRedisAdapter;
+  keepAliveIntervalMs?: number;
+  /** Override the per-subscriber refused-frame limit (positive integer). */
+  maxQueuedFrames?: number;
+}
+
+export interface SseBrokerStats {
+  activeSubscribers: number;
+  /** Writes refused by a socket since the broker started. */
+  backpressureEvents: number;
+  /** Subscribers evicted for exceeding the queue limit since the broker started. */
+  slowClientEvictions: number;
+}
 
 export class SseBroker {
   /** orderId → set of active response handles */
@@ -34,13 +68,24 @@ export class SseBroker {
   private readonly replayBuffers = new Map<string, SseEvent[]>();
   /** orderId → next event id (monotonically increasing) */
   private readonly counters = new Map<string, number>();
+  /** handle → backpressure state; weak so closed connections are collected */
+  private readonly flow = new WeakMap<SseResponseHandle, SubscriberFlowState>();
   /** Total active subscriber count across all orders */
   private _subscriberCount = 0;
+  private _backpressureEvents = 0;
+  private _slowClientEvictions = 0;
+  private readonly maxQueuedFrames: number;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private redisAdapter: SseRedisAdapter | null = null;
 
-  constructor(options: { redisAdapter?: SseRedisAdapter; keepAliveIntervalMs?: number } = {}) {
+  constructor(options: SseBrokerOptions = {}) {
     const intervalMs = options.keepAliveIntervalMs ?? KEEP_ALIVE_INTERVAL_MS;
+
+    const maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES_PER_SUBSCRIBER;
+    if (!Number.isInteger(maxQueued) || maxQueued < 1) {
+      throw new RangeError(`maxQueuedFrames must be a positive integer, received ${maxQueued}`);
+    }
+    this.maxQueuedFrames = maxQueued;
 
     if (options.redisAdapter) {
       this.redisAdapter = options.redisAdapter;
@@ -52,11 +97,15 @@ export class SseBroker {
 
     // Keep-alive timer — single interval, iterates all subscribers
     this.keepAliveTimer = setInterval(() => {
-      for (const [, handles] of this.registry) {
+      for (const orderId of Array.from(this.registry.keys())) {
+        const handles = this.registry.get(orderId);
+        if (!handles) continue;
         for (const handle of Array.from(handles)) {
-          if (!handle.writableEnded) {
-            handle.write(SSE_PING_FRAME);
+          if (handle.writableEnded) {
+            this.removeHandle(orderId, handle);
+            continue;
           }
+          this.writeFrame(orderId, handle, SSE_PING_FRAME);
         }
       }
     }, intervalMs);
@@ -69,6 +118,15 @@ export class SseBroker {
 
   get subscriberCount(): number {
     return this._subscriberCount;
+  }
+
+  /** Point-in-time backpressure and subscriber counters for this broker. */
+  get stats(): SseBrokerStats {
+    return {
+      activeSubscribers: this._subscriberCount,
+      backpressureEvents: this._backpressureEvents,
+      slowClientEvictions: this._slowClientEvictions,
+    };
   }
 
   /**
@@ -94,20 +152,12 @@ export class SseBroker {
     }
     this.registry.get(orderId)!.add(handle);
     this._subscriberCount++;
+    this.syncActiveGauge();
 
     const cleanup = () => {
       const handles = this.registry.get(orderId);
-      if (handles) {
-        if (!handles.delete(handle)) return;
-        if (handles.size === 0) {
-          this.registry.delete(orderId);
-          // Evict replay buffer when no subscribers remain and order may be terminal
-          // (buffer is always evicted on terminal; here we clean up on last disconnect)
-        }
-      } else {
-        return;
-      }
-      this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+      if (!handles || !handles.has(handle)) return;
+      this.removeHandle(orderId, handle);
     };
 
     handle.on("close", cleanup);
@@ -167,6 +217,7 @@ export class SseBroker {
 
     this.registry.clear();
     this._subscriberCount = 0;
+    this.syncActiveGauge();
 
     if (this.keepAliveTimer !== null) {
       clearInterval(this.keepAliveTimer);
@@ -190,23 +241,21 @@ export class SseBroker {
 
     for (const handle of Array.from(handles)) {
       if (handle.writableEnded) {
-        if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+        this.removeHandle(orderId, handle);
         continue;
       }
       try {
-        handle.write(frame);
-        if (isTerminal) {
+        // A false return means the subscriber was evicted for backpressure;
+        // its response has already been torn down, so there is nothing to end.
+        const stillConnected = this.writeFrame(orderId, handle, frame);
+        if (isTerminal && stillConnected) {
           handle.end();
-          if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+          this.removeHandle(orderId, handle);
         }
       } catch {
         // Write failed — connection already gone
-        if (handles.delete(handle)) this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+        this.removeHandle(orderId, handle);
       }
-    }
-
-    if (handles.size === 0) {
-      this.registry.delete(orderId);
     }
 
     // Evict replay buffer on terminal event when no subscribers remain
@@ -214,6 +263,81 @@ export class SseBroker {
       this.replayBuffers.delete(orderId);
       this.counters.delete(orderId);
     }
+  }
+
+  /**
+   * Write one frame to a subscriber and track whether the socket accepted it.
+   *
+   * Returns false only when the subscriber was evicted by this call.
+   */
+  private writeFrame(orderId: string, handle: SseResponseHandle, frame: string): boolean {
+    const state = this.getFlowState(handle);
+    const accepted = handle.write(frame);
+    if (accepted) {
+      state.refusedFrames = 0;
+      return true;
+    }
+
+    this._backpressureEvents++;
+    sseBackpressureEvents.inc();
+    state.refusedFrames++;
+    if (state.refusedFrames > this.maxQueuedFrames) {
+      this.evictSlowSubscriber(orderId, handle);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Remove a subscriber that stayed backpressured past the queue limit.
+   * Only this subscriber is affected; other handles in the registry are untouched.
+   */
+  private evictSlowSubscriber(orderId: string, handle: SseResponseHandle): void {
+    this.removeHandle(orderId, handle);
+    this._slowClientEvictions++;
+    sseSlowClientEvictions.inc();
+    try {
+      if (typeof handle.destroy === "function") {
+        handle.destroy();
+      } else {
+        handle.end();
+      }
+    } catch {
+      // Connection already gone; removal from the registry is what matters
+    }
+  }
+
+  /** Remove one subscriber from the registry and keep counters in step. */
+  private removeHandle(orderId: string, handle: SseResponseHandle): void {
+    const handles = this.registry.get(orderId);
+    if (!handles || !handles.delete(handle)) return;
+    if (handles.size === 0) {
+      this.registry.delete(orderId);
+    }
+    this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+    this.syncActiveGauge();
+  }
+
+  /**
+   * Return the flow state for a handle, creating it on first use. The drain
+   * listener resets the refused-frame count once the socket flushes, so the
+   * count only reflects a client that has stopped reading.
+   */
+  private getFlowState(handle: SseResponseHandle): SubscriberFlowState {
+    let state = this.flow.get(handle);
+    if (!state) {
+      state = { refusedFrames: 0 };
+      this.flow.set(handle, state);
+      const current = state;
+      handle.on("drain", () => {
+        current.refusedFrames = 0;
+      });
+    }
+    return state;
+  }
+
+  private syncActiveGauge(): void {
+    sseActiveStreams.set(this._subscriberCount);
   }
 
   private nextId(orderId: string): number {
@@ -249,15 +373,15 @@ export class SseBroker {
         data: { message: `Events missed. Re-fetch current order state via GET /api/orders/${orderId}` },
         timestamp: Date.now(),
       });
-      handle.write(gapFrame);
+      this.writeFrame(orderId, handle, gapFrame);
       return;
     }
 
     const missed = buf.filter((e) => e.id > lastEventId);
     for (const event of missed) {
-      if (!handle.writableEnded) {
-        handle.write(formatSseFrame(event));
-      }
+      if (handle.writableEnded) break;
+      // Stop replaying into a subscriber that was just evicted for backpressure
+      if (!this.writeFrame(orderId, handle, formatSseFrame(event))) break;
     }
   }
 

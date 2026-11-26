@@ -102,6 +102,38 @@ export function getRequestId(): string | undefined {
   return _contextStore.getStore()?.requestId;
 }
 
+/** Return the order ID from the current context, or undefined outside a scope or before set. */
+export function getOrderId(): string | undefined {
+  return _contextStore.getStore()?.orderId ?? undefined;
+}
+
+/** Return the correlation ID from the current context, or undefined outside a request scope. */
+export function getCorrelationId(): string | undefined {
+  return _contextStore.getStore()?.correlationId ?? undefined;
+}
+
+/**
+ * Set the order ID on the current request context.
+ * No-op when called outside a runWithContext scope.
+ */
+export function setOrderId(orderId: string): void {
+  const store = _contextStore.getStore();
+  if (store) {
+    store.orderId = orderId;
+  }
+}
+
+/**
+ * Set the correlation ID on the current request context.
+ * No-op when called outside a runWithContext scope.
+ */
+export function setCorrelationId(correlationId: string): void {
+  const store = _contextStore.getStore();
+  if (store) {
+    store.correlationId = correlationId;
+  }
+}
+
 /**
  * Run `fn` inside a new request context scope.
  *

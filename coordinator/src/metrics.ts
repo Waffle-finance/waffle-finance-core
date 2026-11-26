@@ -1321,3 +1321,32 @@ export const reconciliationDuplicatesSkipped = new Counter({
   help: "Total on-chain events skipped by the per-run deduplication filter",
   registers: [registry],
 });
+
+// ── SSE stream backpressure metrics ──────────────────────────────────────────
+
+/** Open SSE streams held by this instance (local subscribers only). */
+export const sseActiveStreams = new Gauge({
+  name: "coordinator_sse_active_streams",
+  help: "Number of SSE subscribers currently connected to this instance",
+  registers: [registry],
+});
+
+/**
+ * Frames the socket refused (write returned false because it is above its
+ * high-water mark). A sustained rate means at least one client is not keeping up.
+ */
+export const sseBackpressureEvents = new Counter({
+  name: "coordinator_sse_backpressure_events_total",
+  help: "SSE writes refused by the socket because the subscriber is not draining",
+  registers: [registry],
+});
+
+/**
+ * Subscribers disconnected because they stayed backpressured past the queue
+ * limit. The client is expected to reconnect with Last-Event-ID and resync.
+ */
+export const sseSlowClientEvictions = new Counter({
+  name: "coordinator_sse_slow_client_evictions_total",
+  help: "SSE subscribers closed for exceeding the per-subscriber queue limit",
+  registers: [registry],
+});

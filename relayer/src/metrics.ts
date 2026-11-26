@@ -845,3 +845,70 @@ export const coordinatorFallbacksTotal = new Counter({
   labelNames: ['reason'] as const,
   registers: [registry],
 });
+
+// ---------------------------------------------------------------------------
+// Price feed / safety-deposit pricing metrics (#1080, #1081)
+// ---------------------------------------------------------------------------
+
+/**
+ * Upstream price provider calls, by provider name and result
+ * (success|error|timeout|invalid). A rising error/timeout rate on the
+ * primary provider is the earliest signal of an outage.
+ */
+export const priceProviderRequestsTotal = new Counter({
+  name: 'relayer_price_provider_requests_total',
+  help: 'Upstream price provider requests, by provider and result (success|error|timeout|invalid)',
+  labelNames: ['provider', 'result'] as const,
+  registers: [registry],
+});
+
+/**
+ * Price resolutions that could not use a live market quote, by fallback mode:
+ *   last_known       — served the last trusted observation (within max stale age)
+ *   static           — served the hardcoded fallback (no observation yet, within max stale age)
+ *   static_outage    — served the hardcoded fallback beyond max stale age (PRICE_OUTAGE_POLICY=static_fallback)
+ *   rejected         — refused to price beyond max stale age (PRICE_OUTAGE_POLICY=reject)
+ *   divergence       — providers disagreed beyond PRICE_MAX_DIVERGENCE_BPS
+ */
+export const priceFallbackTotal = new Counter({
+  name: 'relayer_price_fallback_total',
+  help: 'Price resolutions that fell back from a live market quote, by mode',
+  labelNames: ['mode'] as const,
+  registers: [registry],
+});
+
+/** 1 while the current price snapshot is a fallback (not a live market quote), else 0. */
+export const priceFallbackActive = new Gauge({
+  name: 'relayer_price_fallback_active',
+  help: '1 while the current price snapshot is a fallback rather than a live market quote',
+  registers: [registry],
+});
+
+/**
+ * Age in seconds of the market observation behind the current price snapshot.
+ * Set to -1 when the snapshot is synthetic (hardcoded fallback, no observation).
+ */
+export const priceObservationAgeSeconds = new Gauge({
+  name: 'relayer_price_observation_age_seconds',
+  help: 'Age in seconds of the market observation behind the current price (-1 when synthetic)',
+  registers: [registry],
+});
+
+/** Last measured divergence between primary and secondary providers, in basis points. */
+export const priceProviderDivergenceBps = new Gauge({
+  name: 'relayer_price_provider_divergence_bps',
+  help: 'Last measured divergence between primary and secondary price providers (basis points)',
+  registers: [registry],
+});
+
+/**
+ * Safety-deposit calculations (and price lookups for quotes) refused because
+ * no trustworthy price could be established, by reason
+ * (outage_threshold_exceeded|provider_divergence).
+ */
+export const safetyDepositPriceRejectionsTotal = new Counter({
+  name: 'relayer_safety_deposit_price_rejections_total',
+  help: 'Safety-deposit / quote pricing refused because no trustworthy price was available, by reason',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});

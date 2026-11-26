@@ -1,7 +1,7 @@
 # Resolver Metrics Reference
 
 > Issue #769 — Add metric coverage for resolver missed events and stale listeners.  
-> Last updated: 2026-09-26  
+> Last updated: 2026-11-25  
 > Source of truth: `resolver/src/metrics.ts`, `resolver/src/telemetry.ts`
 
 This document is the operator-facing reference for every Prometheus metric the
@@ -19,6 +19,7 @@ on `GET /listener-health` (default port `9091`, overridden by
 ## Table of contents
 
 - [Missed-event and staleness metrics (issue #769)](#missed-event-and-staleness-metrics)
+- [Per-chain progress age metrics (issue #1093)](#per-chain-progress-age-metrics)
 - [Listener liveness metrics](#listener-liveness-metrics)
 - [Event throughput metrics](#event-throughput-metrics)
 - [Resolver lifecycle metrics](#resolver-lifecycle-metrics)
@@ -215,6 +216,118 @@ histogram_quantile(0.95,
   rate(resolver_event_processing_lag_seconds_bucket[5m])
 ) > 60
 ```
+
+---
+
+## Per-chain progress age metrics
+
+> Issue #1093. Alert rules: [`resolver/ops/resolver-alerts.yml`](../ops/resolver-alerts.yml).
+
+`resolver_listener_staleness_seconds` and `/readyz` alone cannot tell a healthy
+quiet chain from a listener that is connected but has stopped advancing. These
+metrics track two progress boundaries separately:
+
+- **successful poll**: the listener reached the RPC and finished a poll, even if
+  it returned no events. Only poll listeners (Soroban, Solana) have this.
+- **processed event**: an event was handed to the listener's handlers.
+
+**Progress age** is the time since the more recent of the two. Before the first
+poll or event it counts from listener start, so a listener that never completes
+a poll still ages and still alerts.
+
+All metrics in this group use the labels `chain` (`ethereum` | `soroban` |
+`solana`) and `listener` (`poll` | `subscription`). These are fixed sets with no
+order-, address- or transaction-specific values (see
+[METRIC_LABEL_BUDGET.md](../../docs/METRIC_LABEL_BUDGET.md)).
+
+### Progress states
+
+| State | Criteria | Meaning |
+|-------|----------|---------|
+| `active` | An event was processed within the threshold | Chain is busy and the listener is keeping up |
+| `idle` | Polls succeed within the threshold, no recent events | Chain is quiet. **Not a fault** |
+| `stale` | No successful poll and no processed event within the threshold | Listener connected but stalled. **Pages** |
+| `degraded` | Listener stopped, or 3 or more consecutive poll failures | Active failure |
+
+Precedence: `degraded` > `stale` > `active` > `idle`.
+
+### Thresholds and rationale
+
+| Listener | Default | Rationale |
+|----------|---------|-----------|
+| `poll` (Soroban, Solana) | 300 s | Polls run every few seconds, so 300 s is many missed polls in a row. That rides out a short RPC blip and still catches a stall long before HTLC timelocks (hours) are at risk. |
+| `subscription` (Ethereum) | 1800 s | An event subscription has no heartbeat, so a quiet contract looks the same as a dead subscription. The longer window keeps normal quiet periods from paging. Tune it from observed event rates. |
+
+Override per chain with `RESOLVER_PROGRESS_STALE_AFTER_SECONDS_<CHAIN>` (for
+example `RESOLVER_PROGRESS_STALE_AFTER_SECONDS_ETHEREUM=900`). Values that are
+not positive integers are ignored. The effective value is always exported on
+`resolver_listener_progress_stale_threshold_seconds`, and the alert rules read
+that metric instead of repeating the number.
+
+### `resolver_listener_last_poll_success_timestamp_seconds`
+
+| Property | Value |
+|----------|-------|
+| Type | Gauge |
+| Labels | `chain`, `listener` |
+
+Unix timestamp of the most recent successful poll, whether or not it returned
+events. Only set for `listener="poll"`.
+
+### `resolver_listener_last_processed_event_timestamp_seconds`
+
+| Property | Value |
+|----------|-------|
+| Type | Gauge |
+| Labels | `chain`, `listener` |
+
+Unix timestamp of the most recent event handed to the listener's handlers. On a
+healthy idle chain this stays put while the poll timestamp keeps moving.
+
+### `resolver_listener_progress_age_seconds`
+
+| Property | Value |
+|----------|-------|
+| Type | Gauge |
+| Labels | `chain`, `listener` |
+| Alert | `> resolver_listener_progress_stale_threshold_seconds` for 2m (critical) |
+
+Seconds since the last successful poll or processed event, or since listener
+start before the first of either. Recomputed on every `/metrics` scrape, so it
+keeps growing while a listener is frozen even if nobody calls `/telemetry`.
+
+### `resolver_listener_progress_stale_threshold_seconds`
+
+| Property | Value |
+|----------|-------|
+| Type | Gauge |
+| Labels | `chain`, `listener` |
+
+The progress-age threshold configured for each chain listener.
+
+### `resolver_listener_progress_state`
+
+| Property | Value |
+|----------|-------|
+| Type | Gauge (enum-style) |
+| Labels | `chain`, `listener`, `state` |
+| Values | `1` for the current state, `0` for others |
+
+Current progress state (`active`, `idle`, `stale`, `degraded`). Recomputed on
+every scrape.
+
+### Telemetry fields
+
+`GET /telemetry` and `GET /listener-health` include, per chain: `listener`,
+`progressState`, `progressAgeSeconds` and `progressStaleAfterSeconds`.
+`/telemetry` also includes `secondsSinceLastPoll` and
+`secondsSinceLastProcessedEvent`; `/listener-health` includes
+`lastPollSuccessAt` and `lastProcessedEventAt` (ISO-8601). `/telemetry` also
+lists `stalledChains` (progress state `stale` or `degraded`).
+
+When a poll listener reports successful polls, an idle chain counts as live for
+the coarse `/telemetry` state. A quiet Soroban or Solana chain then reports
+`connected` instead of `stale`.
 
 ---
 
@@ -445,7 +558,13 @@ generic health responses."
       "staleAfterSeconds": 300,
       "consecutiveFailures": 0,
       "missedEventBatches": 0,
-      "lastHealthyTickAt": "2026-09-26T01:23:45.000Z"
+      "lastHealthyTickAt": "2026-09-26T01:23:45.000Z",
+      "listener": "poll",
+      "progressState": "active" | "idle" | "stale" | "degraded",
+      "progressAgeSeconds": 4,
+      "progressStaleAfterSeconds": 300,
+      "lastPollSuccessAt": "2026-09-26T01:24:23.000Z",
+      "lastProcessedEventAt": "2026-09-26T01:10:02.000Z"
     }
   ],
   "uptime": 3600,
@@ -478,6 +597,9 @@ you need to know *which* chain is the problem.
 | `resolver_listener_health_state{state="stopped"}` | == 1 | LOW — expected during restart; HIGH if unexpected |
 | `resolver_listener_consecutive_failures` | > 3 | MEDIUM — RPC degraded |
 | `resolver_listener_staleness_seconds` | > 300 | HIGH |
+| `resolver_listener_progress_age_seconds` | > `resolver_listener_progress_stale_threshold_seconds` for 2 min | CRITICAL — listener connected but not advancing (`ResolverListenerProgressStalled`) |
+| `resolver_listener_progress_age_seconds` | > 75% of threshold for 5 min | WARNING — early warning (`ResolverListenerProgressSlow`) |
+| `resolver_listener_progress_state{state="degraded"}` | == 1 for > 5 min | WARNING — stopped or failing (`ResolverListenerProgressDegraded`) |
 | `resolver_lifecycle_state{state="failed"}` | == 1 | HIGH — process will not self-recover |
 | `resolver_listener_poll_runs_total` failure rate | > 50% over 5 min | MEDIUM |
 | `resolver_event_processing_lag_seconds` p95 | > 60 s | MEDIUM |
@@ -497,6 +619,20 @@ resolver_runtime_state_info{state="connected"}
 
 ```promql
 time() - resolver_listener_last_healthy_timestamp_seconds
+```
+
+### Which chains are idle vs stalled?
+
+```promql
+# One series per chain at 1; the state label reads active / idle / stale / degraded
+resolver_listener_progress_state == 1
+```
+
+### Progress age as a fraction of the threshold
+
+```promql
+resolver_listener_progress_age_seconds
+  / on (chain, listener) resolver_listener_progress_stale_threshold_seconds
 ```
 
 ### Missed event rate over the last hour

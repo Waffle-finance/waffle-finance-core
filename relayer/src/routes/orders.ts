@@ -20,6 +20,7 @@ import {
   calculateDynamicSafetyDeposit,
   PRICE_CACHE_FRESH_MS,
   PRICE_CACHE_STALE_MS,
+  PriceUnavailableError,
 } from '../services/pricing-service.js';
 import { type OrchestratorHandle } from '../core/event-orchestrator.js';
 import { refundXlmToUser, HorizonTimeoutError } from '../services/xlm-refund.js';
@@ -179,7 +180,10 @@ export function ordersRouter(options: OrdersRouterOptions): Router {
   router.get('/api/prices', async (_req: Request, res: Response) => {
     try {
       const snap = await getPriceSnapshot();
-      res.json({ xlmUsd: snap.xlmUsdPrice, ethUsd: snap.ethUsdPrice, ethPerXlm: snap.xlmUsdPrice / snap.ethUsdPrice, xlmPerEth: snap.ethToXlmRate, source: snap.source, fetchedAt: snap.fetchedAt, cacheFreshMs: PRICE_CACHE_FRESH_MS, cacheStaleMs: PRICE_CACHE_STALE_MS });
+      if (!snap.usable) {
+        return res.status(503).json({ error: 'Price feed temporarily unavailable', code: snap.rejectReason, staleness: snap.freshness, divergenceBps: snap.divergenceBps });
+      }
+      res.json({ xlmUsd: snap.xlmUsdPrice, ethUsd: snap.ethUsdPrice, ethPerXlm: snap.xlmUsdPrice / snap.ethUsdPrice, xlmPerEth: snap.ethToXlmRate, source: snap.source, provider: snap.provider, staleness: snap.freshness, fallback: snap.fallback, fallbackReason: snap.fallbackReason, crossChecked: snap.crossChecked, fetchedAt: snap.fetchedAt, observedAt: snap.observedAt, cacheFreshMs: PRICE_CACHE_FRESH_MS, cacheStaleMs: PRICE_CACHE_STALE_MS });
     } catch (err: unknown) {
       logger.error({ err }, 'Price feed unavailable');
       res.status(503).json({ error: 'Price feed temporarily unavailable' });
@@ -334,6 +338,10 @@ export function ordersRouter(options: OrdersRouterOptions): Router {
         throw new Error('Invalid direction specified');
       }
     } catch (err: unknown) {
+      if (err instanceof PriceUnavailableError) {
+        logger.error({ code: err.code, divergenceBps: err.snapshot.divergenceBps }, 'Bridge order rejected: no trustworthy price');
+        return res.status(503).json({ error: 'price_unavailable', code: err.code, details: err.message });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ err: msg }, 'Bridge order creation failed');
       res.status(500).json({ error: 'Bridge order creation failed', details: msg });

@@ -9,7 +9,11 @@ import type { ResolverConfig } from "./config.js";
 import type { Supervisor } from "./supervisor.js";
 import type { ResolverLifecycle } from "./lifecycle.js";
 import { buildSupportPolicy } from "./support.js";
-import { ResolverTelemetryCollector, globalStalenessMonitor } from "./telemetry.js";
+import {
+  ResolverTelemetryCollector,
+  computeProgressAgeSeconds,
+  globalStalenessMonitor,
+} from "./telemetry.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -279,6 +283,8 @@ export function createResolverHealthServer(deps: ResolverHealthDeps): Server {
 
       const chainData = globalStalenessMonitor.snapshotChainData();
       const nowSeconds = Math.floor(Date.now() / 1000);
+      const ageFrom = (ts: number | null) => (ts === null ? null : Math.max(0, nowSeconds - ts));
+      const isoOrNull = (ts: number | null) => (ts === null ? null : new Date(ts * 1000).toISOString());
 
       const chains = chainData.map((c) => {
         const staleness = c.lastHealthyTickSeconds !== null
@@ -305,6 +311,17 @@ export function createResolverHealthServer(deps: ResolverHealthDeps): Server {
           lastHealthyTickAt: c.lastHealthyTickSeconds !== null
             ? new Date(c.lastHealthyTickSeconds * 1000).toISOString()
             : null,
+          // Progress age (issue #1093): idle vs stalled per chain listener.
+          listener:                  c.listener,
+          progressState:             globalStalenessMonitor.progressStateFor(c.chain, nowSeconds),
+          progressAgeSeconds:        computeProgressAgeSeconds({
+            secondsSinceLastPoll:  ageFrom(c.lastPollSuccessSeconds),
+            secondsSinceLastEvent: ageFrom(c.lastProcessedEventSeconds),
+            secondsSinceStart:     ageFrom(c.startedAtSeconds),
+          }),
+          progressStaleAfterSeconds: c.progressStaleAfterSeconds,
+          lastPollSuccessAt:         isoOrNull(c.lastPollSuccessSeconds),
+          lastProcessedEventAt:      isoOrNull(c.lastProcessedEventSeconds),
         };
       });
 

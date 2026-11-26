@@ -16,8 +16,7 @@ import {
 import { requireRole, loadOperatorKeys } from "../middleware/auth.js";
 import type { AbuseDetector } from "../middleware/abuse-detection.js";
 import { validationError, orderValidationError, conflictError, notFoundError, invalidCursorError } from "../errors.js";
-import { getRequestId } from "../../request-context.js";
-import { LIMITS } from "../middleware/payload-limits.js";
+import { getRequestId, setOrderId } from "../../request-context.js";
 
 /// Strictly parse a query-string integer parameter. Returns `undefined` when
 /// `raw` is omitted so the caller can fall back to a default, but rejects any
@@ -96,6 +95,14 @@ function serialiseOrder(order: OrderRow | null, requestId?: string | null) {
 export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?: AbuseDetector): Router {
   const router = Router();
 
+  router.param("id", (_req, res, next, id) => {
+    if (typeof id === "string" && id) {
+      setOrderId(id);
+      res.locals["orderId"] = id;
+    }
+    next();
+  });
+
   const apiKeys = loadApiKeys();
   const trustedProxies = loadTrustedProxies();
   const operatorKeys = loadOperatorKeys();
@@ -130,6 +137,8 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
     try {
       const parsed = announceSchema.parse(req.body);
       const order = await orders.announce(parsed);
+      setOrderId(order.publicId);
+      res.locals["orderId"] = order.publicId;
       res.status(201).json(serialiseOrder(order, getRequestId()));
     } catch (err) {
       // Malformed/policy-denied announces count towards abuse detection;
@@ -202,8 +211,10 @@ export function ordersRoutes(orders: OrderService, log?: Logger, abuseDetector?:
         // Offset-based pagination (default for backward compatibility)
         const finalOffset = offset ?? 0;
         const list = await orders.history(address, limit, finalOffset);
+        const mapped = list.map((o) => serialiseOrder(o, getRequestId())).filter(Boolean);
         res.json({
-          orders: list.map((o) => serialiseOrder(o, getRequestId())).filter(Boolean),
+          orders: mapped,
+          transactions: mapped,
           pagination: { limit, offset: finalOffset, count: list.length }
         });
       }

@@ -41,7 +41,7 @@ import {
   getEscrowFactoryABI,
   getHtlcBridgeAddress,
 } from '../config/networks.js';
-import { calculateDynamicSafetyDeposit } from '../services/pricing-service.js';
+import { calculateDynamicSafetyDeposit, PriceUnavailableError } from '../services/pricing-service.js';
 import { getLogger } from '../logger.js';
 import {
   classifyFailureCategory,
@@ -247,6 +247,14 @@ export function createEventOrchestrator(
       (orderData as Record<string, unknown>).status = 'escrow_created_by_relayer';
       (orderData as Record<string, unknown>).escrowTxHash = tx.hash;
     } catch (err: unknown) {
+      if (err instanceof PriceUnavailableError) {
+        // Safety policy could not establish a trustworthy price — hold the
+        // order rather than lock a deposit computed from an untrusted price.
+        logger.error({ orderId, code: err.code }, 'Escrow creation held: no trustworthy price for safety deposit');
+        (orderData as Record<string, unknown>).status = 'escrow_creation_failed';
+        (orderData as Record<string, unknown>).priceUnavailableReason = err.code;
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ orderId, err: message }, 'Failed to create escrow for order');
       (orderData as Record<string, unknown>).status = 'escrow_creation_failed';

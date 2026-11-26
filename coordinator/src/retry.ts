@@ -9,7 +9,7 @@
 export {
   retryAsync as retryAsyncBase,
   type RetryPolicy,
-} from "@wafflefinance/sdk";
+} from "@wafflefinance/sdk/shared-utils";
 
 // ── FatalStartupError ────────────────────────────────────────────────────────
 

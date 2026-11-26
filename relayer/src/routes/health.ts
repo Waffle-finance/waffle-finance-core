@@ -67,6 +67,125 @@ export interface ReadinessCheck {
   ok: boolean;
   detail?: string;
   latencyMs?: number;
+  /**
+   * What kind of dependency this check probes — RPC connectivity (a chain
+   * node) or order-processing capability (the coordinator). Lets operators
+   * tell a degraded chain node apart from a degraded order-processing
+   * service without a 503 being mistaken for an idle instance (#1084).
+   */
+  kind?: DependencyKind;
+  /** Epoch ms of the last successful probe of this dependency (null = none yet). */
+  lastSuccessAt?: number | null;
+  /** Age in ms of the last successful probe (null when none has succeeded). */
+  lastSuccessAgeMs?: number | null;
+  /** Bounded, redacted reason for the most recent failure (omitted when ok). */
+  lastFailureReason?: string | null;
+  /** How many consecutive probes have failed (0 when the last probe succeeded). */
+  consecutiveFailures?: number;
+}
+
+/**
+ * Kind of dependency a readiness check inspects. Distinguishes a chain RPC
+ * connectivity probe from an order-processing capability probe so a degraded
+ * chain does not look like a degraded settlement service.
+ */
+export type DependencyKind = 'rpc_connectivity' | 'order_processing';
+
+/**
+ * Maps a readiness check name to its dependency kind.
+ */
+function dependencyKindFor(name: string): DependencyKind {
+  return name === 'coordinator' ? 'order_processing' : 'rpc_connectivity';
+}
+
+// ---------------------------------------------------------------------------
+// Dependency probe registry (#1084)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks the per-dependency probe history used to enrich the readiness output
+ * with probe age, last successful operation, and a bounded failure reason.
+ *
+ * One instance is created per `healthRouter()` so probe history persists across
+ * requests within a process (letting a later request report the last time a
+ * now-failing dependency was healthy) while staying isolated across separate
+ * routers in tests.
+ */
+export class DependencyProbeRegistry {
+  private readonly states = new Map<string, DependencyProbeState>();
+
+  /** Record the outcome of a probe for `name`. */
+  record(name: string, ok: boolean, detail: string | undefined): void {
+    const kind = dependencyKindFor(name);
+    const state = this.states.get(name) ?? {
+      name,
+      kind,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastFailureReason: null,
+      consecutiveFailures: 0,
+    };
+    state.kind = kind;
+    if (ok) {
+      state.lastSuccessAt = Date.now();
+      state.consecutiveFailures = 0;
+      state.lastFailureReason = null;
+    } else {
+      state.lastFailureAt = Date.now();
+      state.consecutiveFailures += 1;
+      // Bound and redact the failure reason so no secret or verbose payload
+      // leaks into the health output.
+      state.lastFailureReason = redactFailureReason(detail);
+    }
+    this.states.set(name, state);
+  }
+
+  /** Snapshot of the enrichment fields for a dependency (test/diagnostic helper). */
+  snapshot(name: string): {
+    kind: DependencyKind;
+    lastSuccessAt: number | null;
+    lastSuccessAgeMs: number | null;
+    lastFailureReason: string | null;
+    consecutiveFailures: number;
+  } {
+    const state = this.states.get(name);
+    const lastSuccessAt = state?.lastSuccessAt ?? null;
+    return {
+      kind: dependencyKindFor(name),
+      lastSuccessAt,
+      lastSuccessAgeMs: lastSuccessAt === null ? null : Date.now() - lastSuccessAt,
+      lastFailureReason: state?.lastFailureReason ?? null,
+      consecutiveFailures: state?.consecutiveFailures ?? 0,
+    };
+  }
+
+  /** Number of dependencies tracked (diagnostic helper). */
+  size(): number {
+    return this.states.size;
+  }
+}
+
+interface DependencyProbeState {
+  name: string;
+  kind: DependencyKind;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastFailureReason: string | null;
+  consecutiveFailures: number;
+}
+
+/**
+ * Redact and bound a failure reason for inclusion in health output. Long hex
+ * strings (private keys, preimages, tx hashes) and URL credentials are
+ * stripped, and the result is capped so a verbose upstream payload cannot
+ * bloat the response.
+ */
+function redactFailureReason(detail: string | undefined): string | null {
+  if (!detail) return null;
+  const redacted = detail
+    .replace(/0x[0-9a-fA-F]{16,}/gi, '[REDACTED]')
+    .replace(/(\w+:\/\/)[^:/\s]+:[^@/\s]+@/gi, '$1[REDACTED]@');
+  return redacted.length > 200 ? redacted.slice(0, 200) + '…' : redacted;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +383,9 @@ const sorobanLedgerTracker = new SorobanLedgerTracker();
  * overall readiness — the relayer is usable even when Solana is not
  * yet configured.
  */
-async function buildReadinessChecks(): Promise<ReadinessCheck[]> {
+async function buildReadinessChecks(
+  registry: DependencyProbeRegistry,
+): Promise<ReadinessCheck[]> {
   const checks: ReadinessCheck[] = [];
   const { ethRpcUrl, stellarHorizonUrl } = getRelayerRpcConfig();
 
@@ -371,6 +492,20 @@ async function buildReadinessChecks(): Promise<ReadinessCheck[]> {
   };
   checks.push(coordinatorCheck);
 
+  // ── Enrich each check with per-dependency probe history (#1084) ──────────
+  // After every probe is recorded, attach the kind, last successful probe
+  // time, probe age, and a bounded failure reason so a degraded dependency is
+  // identifiable without implying a 503 service is idle.
+  for (const check of checks) {
+    registry.record(check.name, check.ok, check.detail);
+    const snap = registry.snapshot(check.name);
+    check.kind = snap.kind;
+    check.lastSuccessAt = snap.lastSuccessAt;
+    check.lastSuccessAgeMs = snap.lastSuccessAgeMs;
+    check.lastFailureReason = check.ok ? null : snap.lastFailureReason;
+    check.consecutiveFailures = snap.consecutiveFailures;
+  }
+
   return checks;
 }
 
@@ -381,6 +516,9 @@ async function buildReadinessChecks(): Promise<ReadinessCheck[]> {
 export function healthRouter(): Router {
   const router = Router();
   const startedAt = Date.now();
+  // Per-router probe registry: persists across requests so a later /readyz
+  // can report the last time a now-degraded dependency was healthy.
+  const probeRegistry = new DependencyProbeRegistry();
 
   // ── /healthz — liveness ───────────────────────────────────────────────────
   // Always returns 200 as long as the process is alive.  No dependency checks.
@@ -395,7 +533,7 @@ export function healthRouter(): Router {
   // Probes all configured RPC connections and reports per-dependency status.
   router.get('/readyz', async (_req: Request, res: Response) => {
     try {
-      const checks = await buildReadinessChecks();
+      const checks = await buildReadinessChecks(probeRegistry);
       // A "disabled_placeholder" check is ok=true but is not required for
       // overall readiness — only genuinely configured dependencies matter.
       const ok = checks.every((c) => c.ok);
