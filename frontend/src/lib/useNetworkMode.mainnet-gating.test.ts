@@ -34,6 +34,14 @@
 import { renderHook, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
+const mockUseChainId = vi.fn(() => 11155111);
+const mockSwitchChainAsync = vi.fn().mockResolvedValue(11155111);
+
+vi.mock('wagmi', () => ({
+  useChainId: () => mockUseChainId(),
+  useSwitchChain: () => ({ switchChainAsync: mockSwitchChainAsync }),
+}));
+
 // ── Freighter stub ────────────────────────────────────────────────────────────
 
 vi.mock('@stellar/freighter-api', () => ({
@@ -69,6 +77,8 @@ vi.mock('../config/networks', async (importOriginal) => {
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 beforeEach(() => {
+  mockUseChainId.mockReturnValue(11155111);
+  mockSwitchChainAsync.mockReset().mockResolvedValue(11155111);
   // Reset to disabled state (safe default)
   mockIsMainnetEnabled.mockReturnValue(false);
   mockResolveNetworkMode.mockImplementation((m: string) =>

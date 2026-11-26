@@ -102,10 +102,16 @@ export interface SseEvent {
  * Keeping this narrow makes the broker unit-testable without a real HTTP server.
  */
 export interface SseResponseHandle {
+  /** Returns false when the underlying socket is above its high-water mark. */
   write(chunk: string): boolean;
   end(): void;
-  on(event: "close", listener: () => void): this;
+  on(event: "close" | "drain", listener: () => void): this;
   writableEnded: boolean;
+  /**
+   * Tears the connection down immediately, discarding buffered data. Used to
+   * evict slow subscribers; handles without it fall back to `end()`.
+   */
+  destroy?(): void;
 }
 
 // ── Wire serialisation ────────────────────────────────────────────────────────

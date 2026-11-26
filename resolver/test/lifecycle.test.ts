@@ -108,7 +108,7 @@ describe('ResolverLifecycle', () => {
 
     it('updates stateStartedAt on transition', async () => {
       const firstTime = lifecycle.stateStartedAt;
-      await new Promise(r => setTimeout(r, 1));
+      await new Promise(resolve => setTimeout(resolve, 1));
       lifecycle.transition('starting');
       expect(lifecycle.stateStartedAt).toBeGreaterThanOrEqual(firstTime);
     });
@@ -150,13 +150,11 @@ describe('ResolverLifecycle', () => {
     });
 
     it('rejects idle → pausing (cannot pause non-running)', () => {
-      // idle → pausing is not in the allowed transitions list
       expect(() => lifecycle.transition('pausing')).toThrow(InvalidLifecycleTransitionError);
     });
 
     it('rejects starting → paused (must go through running first)', () => {
       lifecycle.transition('starting');
-      // starting → paused is not allowed (not in LIFECYCLE_TRANSITIONS[starting])
       expect(() => lifecycle.transition('paused')).toThrow(InvalidLifecycleTransitionError);
     });
   });
@@ -297,12 +295,8 @@ describe('ResolverLifecycle', () => {
 
   describe('forceTransition', () => {
     it('bypasses validation and forces the transition', () => {
-      // Reach stopped via valid transitions
-      lifecycle.transition('starting');
-      lifecycle.transition('running');
-      lifecycle.transition('stopping');
-      lifecycle.transition('stopped');
-      // Should throw with normal transition
+      lifecycle.forceTransition('stopped', 'test setup');
+      // Should throw with normal transition (stopped has empty allowed transitions)
       expect(() => lifecycle.transition('starting')).toThrow(InvalidLifecycleTransitionError);
 
       // Force transition should work
@@ -311,9 +305,12 @@ describe('ResolverLifecycle', () => {
     });
 
     it('logs forced transition as warning', () => {
-      // forceTransition should not throw
-      expect(() => lifecycle.forceTransition('running', 'test')).not.toThrow();
+      // forceTransition always logs a warning - test that it doesn't throw
+      // and that the state changes correctly
+      lifecycle.forceTransition('running', 'test');
       expect(lifecycle.state).toBe('running');
+      lifecycle.forceTransition('stopped', 'test');
+      expect(lifecycle.state).toBe('stopped');
     });
   });
 
@@ -337,14 +334,14 @@ describe('ResolverLifecycle', () => {
 
     it('updates stateStartedAt', async () => {
       const before = lifecycle.stateStartedAt;
-      await new Promise(r => setTimeout(r, 1));
+      await new Promise(resolve => setTimeout(resolve, 1));
       lifecycle.reset();
       expect(lifecycle.stateStartedAt).toBeGreaterThanOrEqual(before);
     });
   });
 
   describe('snapshot', () => {
-    it('returns complete lifecycle state', async () => {
+    it('returns complete lifecycle state', () => {
       lifecycle.transition('starting');
       lifecycle.transition('running');
       await new Promise(r => setTimeout(r, 1));
@@ -385,7 +382,7 @@ describe('LifecycleGuard', () => {
 
   describe('assertCanStart', () => {
     it('allows starting from idle', () => {
-      // lifecycle is already in idle state
+      // idle is the initial state, no transition needed
       expect(() => guard.assertCanStart()).not.toThrow();
     });
 

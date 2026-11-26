@@ -252,6 +252,7 @@ describe('EventOrderGuard', () => {
       expect(guard.validateEvent(created).valid).toBe(true);
 
       // Order 1 claimed at block 101 (higher block, same order)
+      guard.updateChainHead('ethereum', 101n);
       const claimed = makeEventMetadata({
         orderId: 1n,
         eventType: 'order_claimed',
@@ -260,6 +261,7 @@ describe('EventOrderGuard', () => {
       expect(guard.validateEvent(claimed).valid).toBe(true);
 
       // Order 1 refunded at block 102 (higher block, same order)
+      guard.updateChainHead('ethereum', 102n);
       const refunded = makeEventMetadata({
         orderId: 1n,
         eventType: 'order_refunded',
@@ -279,6 +281,7 @@ describe('EventOrderGuard', () => {
       expect(guard.validateEvent(created).valid).toBe(true);
 
       // Both claimed and refunded are valid after created
+      guard.updateChainHead('ethereum', 101n);
       const claimed = makeEventMetadata({
         orderId: 1n,
         eventType: 'order_claimed',
@@ -286,6 +289,7 @@ describe('EventOrderGuard', () => {
       });
       expect(guard.validateEvent(claimed).valid).toBe(true);
 
+      guard.updateChainHead('ethereum', 102n);
       const refunded = makeEventMetadata({
         orderId: 2n,
         eventType: 'order_refunded',
@@ -344,8 +348,10 @@ describe('EventOrderMonitor', () => {
   });
 
   it('invalid events are tracked', () => {
-    // Set chain head BEFORE processing events so they're not rejected as "future".
     monitor.updateChainHead('ethereum', 100n);
+
+    // Order 5 then try order 3 (regression)
+    monitor.processEvent(makeEventMetadata({ orderId: 5n, blockNumber: 100n }));
 
     // Order 5 at block 100 — accepted and maxOrderId becomes 5
     monitor.processEvent(makeEventMetadata({ orderId: 5n, blockNumber: 100n }));

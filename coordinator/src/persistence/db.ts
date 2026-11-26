@@ -293,6 +293,7 @@ export const SQLITE_MIGRATIONS = [
   "010_soroban_checkpoints.sql",
   "011_order_ledger_cursors.sql",
   "012_order_cancellation.sql",
+  "013_backlog_indexes.sql",
   "013_replay_safety.sql",
 ] as const;
 
@@ -324,6 +325,7 @@ export const POSTGRES_MIGRATION_FILES = [
   "010_soroban_checkpoints_postgres.sql",
   "011_order_ledger_cursors_postgres.sql",
   "012_order_cancellation_postgres.sql",
+  "013_backlog_indexes_postgres.sql",
   "013_replay_safety_postgres.sql",
 ] as const;
 

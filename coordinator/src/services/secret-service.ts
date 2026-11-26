@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { keccak256, toHex } from "viem";
 import { OrderValidationError, type OrderService } from "./order-service.js";
+import { setOrderId } from "../request-context.js";
 
 export interface SecretStorageKeyConfig {
   /** Stable identifier written into new ciphertext for rotation tracking. */
@@ -128,8 +129,8 @@ export class SecretService {
         // Fail closed: production/testnet-in-production must never persist
         // preimages in plaintext. No key material is included in this message.
         throw new Error(
-          "SecretService: SECRET_STORAGE_KEY is required in production " +
-          `(network=${this.network}, NODE_ENV=${this.nodeEnv}). ` +
+          "SecretService: SECRET_STORAGE_KEY is required when network=mainnet (or in production: " +
+          `network=${this.network}, NODE_ENV=${this.nodeEnv}). ` +
           "Refusing to start in plaintext mode. Generate a key with " +
           "`pnpm --filter @wafflefinance/coordinator generate-key`, store it in " +
           "your secrets manager, and set SECRET_STORAGE_KEY in the coordinator " +
@@ -194,6 +195,7 @@ export class SecretService {
    * {@link ./secret-errors.ts} for the full failure model.
    */
   async reveal(publicId: string, preimage: string, txHash: string): Promise<{ ok: true }> {
+    setOrderId(publicId);
     const order = await this.orders.get(publicId);
     if (!order) {
       throw new UnknownOrderError(`unknown order ${publicId}`);
@@ -276,6 +278,7 @@ export class SecretService {
    * and re-thrown so callers receive a clear signal rather than corrupt data.
    */
   async get(publicId: string): Promise<string | null> {
+    setOrderId(publicId);
     const order = await this.orders.get(publicId);
     if (!order?.preimage) {
       return null;

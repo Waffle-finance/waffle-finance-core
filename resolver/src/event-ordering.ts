@@ -288,17 +288,14 @@ export class EventOrderGuard {
       );
     }
 
-    // Reject events whose block is too old (more than maxBlockAge behind the head).
-    if (blockNumber <= maxHeight) {
-      const age = Number(maxHeight - blockNumber);
-      if (age > this.maxBlockAge) {
-        return new StalenessError(
-          chain,
-          blockNumber,
-          maxHeight,
-          `block is ${age} blocks old (max allowed: ${this.maxBlockAge})`,
-        );
-      }
+    const age = Number(maxHeight - blockNumber);
+    if (age >= this.maxBlockAge) {
+      return new StalenessError(
+        chain,
+        blockNumber,
+        maxHeight,
+        `block is ${age} blocks old (max allowed: ${this.maxBlockAge})`,
+      );
     }
 
     return undefined;
