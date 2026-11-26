@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import type { Logger } from "pino";
 import type { CoordinatorConfig } from "../config.js";
 import type { OrderService } from "../services/order-service.js";
+import { runWithContext } from "../request-context.js";
 import {
   observeListenerEventProcessing,
   recordListenerProgress,
@@ -9,7 +11,7 @@ import {
 } from '../metrics.js';
 import { isSolanaPlaceholder } from '../config.js';
 import { decideDispatch } from '../services/workflow-priority-policy.js';
-import { SolanaRpcProvider, createSolanaRpcProvider } from '@wafflefinance/sdk';
+import { SolanaRpcProvider, createSolanaRpcProvider } from '@wafflefinance/sdk/solana';
 
 /**
  * Confirmation level constants for Solana commitment model.
@@ -427,6 +429,17 @@ export class SolanaListener {
    * the fields we need.
    */
   private async handleLogs(sig: string, logs: string[], slot?: number): Promise<boolean> {
+    return runWithContext(
+      {
+        requestId: randomUUID(),
+        correlationId: sig,
+        operationClass: "order.lock",
+      },
+      () => this._handleLogsInternal(sig, logs, slot)
+    );
+  }
+
+  private async _handleLogsInternal(sig: string, logs: string[], slot?: number): Promise<boolean> {
     // ── In-process deduplication ────────────────────────────────────────────
     // If we have already processed this signature in the current process
     // lifetime, skip without touching the DB.

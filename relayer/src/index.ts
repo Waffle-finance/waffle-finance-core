@@ -3,6 +3,8 @@
  *
  * Reduced boot file that delegates concern handling to extracted services and routers:
  *   config/networks.ts          → network addresses, ABIs, adapters
+ *   config/startup-config.ts    → startup config: network mode, runtime config,
+ *                                 env-validation input, retry and watchdog settings
  *   services/pricing-service.ts → SWR price cache, dynamic safety deposit
  *   core/event-orchestrator.ts  → chain polling, contract event listeners
  *   routes/orders.ts            → order management & processing API
@@ -18,11 +20,11 @@ import cors from 'cors';
 import { getLogger } from './logger.js';
 import { requestIdMiddleware } from './request-context.js';
 import {
-  NETWORK_CONFIG,
-  getEscrowFactoryAddress,
-  getHtlcBridgeAddress,
-  type NetworkMode,
-} from './config/networks.js';
+  buildEnvironmentValidationInput,
+  buildRelayerStartupConfig,
+  resolveRefundWatchdogSettings,
+  resolveStartupDependencyOptions,
+} from './config/startup-config.js';
 import { createEventOrchestrator } from './core/event-orchestrator.js';
 import { startRefundWatchdog } from './services/refund-watchdog.js';
 import { requireAdminAuth } from './middleware/admin-auth.js';
@@ -50,22 +52,15 @@ import { adminRouter } from './routes/admin.js';
 const logger = getLogger();
 
 // Config
-const parsedRelayerConfig = loadRelayerConfig();
-const DEFAULT_NETWORK_MODE = (parsedRelayerConfig.network as NetworkMode) ?? 'testnet';
+const startupConfig = buildRelayerStartupConfig(loadRelayerConfig());
+const DEFAULT_NETWORK_MODE = startupConfig.defaultNetworkMode;
 
-export const RELAYER_CONFIG = {
-  ...parsedRelayerConfig,
-  ethereum: {
-    ...parsedRelayerConfig.ethereum,
-    contractAddress: getHtlcBridgeAddress(DEFAULT_NETWORK_MODE, DEFAULT_NETWORK_MODE),
-    escrowFactoryAddress: getEscrowFactoryAddress(DEFAULT_NETWORK_MODE, DEFAULT_NETWORK_MODE),
-  },
-};
+export const RELAYER_CONFIG = startupConfig.runtimeConfig;
 
 import { assertStartupDependencies, logStartupTransition } from './startup-health-check.js';
 logger.info({ network: DEFAULT_NETWORK_MODE }, 'Default network mode');
 logger.info(
-  { escrowFactory: getEscrowFactoryAddress(DEFAULT_NETWORK_MODE, DEFAULT_NETWORK_MODE) },
+  { escrowFactory: RELAYER_CONFIG.ethereum.escrowFactoryAddress },
   'Default escrow factory',
 );
 
@@ -102,23 +97,16 @@ async function initializeRelayer() {
   }));
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
-  
+
   // Validate configuration
   validateConfig();
 
   // Cross-field environment validation (network mode vs chain ID, contract
   // addresses, secret/address pairings, etc.). Runs before any listener binds
   // a port so mismatches surface immediately with a redacted, structured list.
-  const envErrors = validateEnvironment({
-    ...process.env,
-    NETWORK: DEFAULT_NETWORK_MODE,
-    ETHEREUM_NETWORK: RELAYER_CONFIG.ethereum.network,
-    STELLAR_NETWORK: RELAYER_CONFIG.stellar.network,
-    ETHEREUM_CONTRACT_ADDRESS: RELAYER_CONFIG.ethereum.contractAddress,
-    ESCROW_FACTORY_ADDRESS: RELAYER_CONFIG.ethereum.escrowFactoryAddress,
-    ETHEREUM_PRIVATE_KEY: RELAYER_CONFIG.ethereum.privateKey,
-    STELLAR_SECRET_KEY: RELAYER_CONFIG.stellar.secretKey,
-  });
+  const envErrors = validateEnvironment(
+    buildEnvironmentValidationInput(process.env, RELAYER_CONFIG, DEFAULT_NETWORK_MODE),
+  );
   if (envErrors.length > 0) {
     logger.error({ errors: envErrors }, 'Environment validation failed — refusing to start');
     throw new Error(`Relayer environment validation failed:\n${formatValidationErrors(envErrors)}`);
@@ -131,23 +119,12 @@ async function initializeRelayer() {
   // coordinator (order-book service) and resolver registry are reachable.
   // If dependencies are not ready the relayer retries with exponential
   // back-off.  If max retries are exceeded it exits with a clear error.
+  const dependencyOptions = resolveStartupDependencyOptions(process.env);
   logStartupTransition('deps_checking', {
-    coordinatorUrl: process.env.COORDINATOR_URL ?? '(not set)',
-    resolverRegistryUrl: process.env.RESOLVER_REGISTRY_URL ?? '(not configured)',
+    coordinatorUrl: dependencyOptions.coordinatorUrl ?? '(not set)',
+    resolverRegistryUrl: dependencyOptions.resolverRegistryUrl ?? '(not configured)',
   });
-  await assertStartupDependencies({
-    coordinatorUrl: process.env.COORDINATOR_URL,
-    resolverRegistryUrl: process.env.RESOLVER_REGISTRY_URL,
-    maxRetries: process.env.RELAYER_STARTUP_MAX_RETRIES
-      ? parseInt(process.env.RELAYER_STARTUP_MAX_RETRIES, 10)
-      : undefined,
-    backoffBaseMs: process.env.RELAYER_STARTUP_BACKOFF_BASE_MS
-      ? parseInt(process.env.RELAYER_STARTUP_BACKOFF_BASE_MS, 10)
-      : undefined,
-    backoffMaxMs: process.env.RELAYER_STARTUP_BACKOFF_MAX_MS
-      ? parseInt(process.env.RELAYER_STARTUP_BACKOFF_MAX_MS, 10)
-      : undefined,
-  });
+  await assertStartupDependencies(dependencyOptions);
   logStartupTransition('deps_ready');
   app.use(requestIdMiddleware);
 
@@ -247,79 +224,57 @@ async function initializeRelayer() {
 
   console.log('≡ƒôì DEBUG: Orders endpoints registered successfully');
 
-  // Phase 6.5: EscrowFactory Event Listening (lazy — first swap order only)
-  startChainMonitoring = async () => {
+  // Phase 6.5: EscrowFactory Event Listening (lazy — first swap order only).
+  // Chain monitoring itself is owned by the event orchestrator; this block
+  // only gates listener startup on re-validated config and starts the watchdog.
+  const startChainMonitoring = async () => {
   // Re-validate before binding the port / starting listeners so a config
   // mutated after boot cannot slip past the startup gate.
-  const lateErrors = validateEnvironment({
-    ...process.env,
-    NETWORK: DEFAULT_NETWORK_MODE,
-    ETHEREUM_NETWORK: RELAYER_CONFIG.ethereum.network,
-    STELLAR_NETWORK: RELAYER_CONFIG.stellar.network,
-    ETHEREUM_CONTRACT_ADDRESS: RELAYER_CONFIG.ethereum.contractAddress,
-    ESCROW_FACTORY_ADDRESS: RELAYER_CONFIG.ethereum.escrowFactoryAddress,
-    ETHEREUM_PRIVATE_KEY: RELAYER_CONFIG.ethereum.privateKey,
-    STELLAR_SECRET_KEY: RELAYER_CONFIG.stellar.secretKey,
-  });
+  const lateErrors = validateEnvironment(
+    buildEnvironmentValidationInput(process.env, RELAYER_CONFIG, DEFAULT_NETWORK_MODE),
+  );
   if (lateErrors.length > 0) {
     logger.error({ errors: lateErrors }, 'Environment validation failed before listener startup');
     throw new Error(`Relayer environment validation failed:\n${formatValidationErrors(lateErrors)}`);
   }
   logStartupTransition('listeners_starting', { trigger: 'first_swap_order' });
   console.log('≡ƒöù Chain monitoring starting (swap order in flight)...');
-  
-  // Setup EscrowFactory contract instance for event listening
-  try {
-    const wNet: NetworkMode = DEFAULT_NETWORK_MODE === 'mainnet' ? 'mainnet' : 'testnet';
-    const wHorizon = NETWORK_CONFIG[wNet].stellar.horizonUrl;
-    const wSecret = wNet === 'mainnet' ? (process.env.RELAYER_STELLAR_SECRET_MAINNET ?? process.env.RELAYER_STELLAR_SECRET) : (process.env.RELAYER_STELLAR_SECRET_TESTNET ?? process.env.RELAYER_STELLAR_SECRET);
-    if (wSecret) { startRefundWatchdog({ horizonUrl: wHorizon, refundSecret: wSecret, networkMode: wNet, activeOrders }); }
-    else logger.warn('Refund watchdog disabled: RELAYER_STELLAR_SECRET not configured');
-  } catch (err) { logger.error({ err }, 'Failed to start refund watchdog'); }
-
-  app.listen(RELAYER_CONFIG.port, () => {
-    logger.info({ port: RELAYER_CONFIG.port }, 'HTTP server started');
-  });
-
-  console.log('Γ£à Escrow Factory endpoints registered');
 
   // ≡ƒ¢í∩╕Å Refund watchdog: rescue stuck XLMΓåÆETH orders that the request
   // loop failed to refund (e.g. user closed the tab, RPC outage past
   // our retry budget). Best-effort, never throws into the event loop.
   try {
-    const watchdogNetwork: 'mainnet' | 'testnet' =
-      (DEFAULT_NETWORK_MODE === 'mainnet' ? 'mainnet' : 'testnet');
-    const watchdogHorizon =
-      NETWORK_CONFIG[watchdogNetwork].stellar.horizonUrl;
-    const watchdogSecret =
-      watchdogNetwork === 'mainnet'
-        ? (process.env.RELAYER_STELLAR_SECRET_MAINNET || process.env.RELAYER_STELLAR_SECRET)
-        : (process.env.RELAYER_STELLAR_SECRET_TESTNET || process.env.RELAYER_STELLAR_SECRET);
-
-    if (watchdogSecret) {
+    const watchdog = resolveRefundWatchdogSettings(DEFAULT_NETWORK_MODE, process.env);
+    if (watchdog) {
       startRefundWatchdog({
-        horizonUrl: watchdogHorizon,
-        refundSecret: watchdogSecret,
-        networkMode: watchdogNetwork,
+        horizonUrl: watchdog.horizonUrl,
+        refundSecret: watchdog.refundSecret,
+        networkMode: watchdog.networkMode,
         activeOrders,
       });
     } else {
-      console.warn('ΓÜá∩╕Å Refund watchdog disabled: RELAYER_STELLAR_SECRET not configured.');
+      logger.warn('Refund watchdog disabled: RELAYER_STELLAR_SECRET not configured');
     }
   } catch (watchdogErr) {
-    console.error('Γ¥î Failed to start refund watchdog:', watchdogErr);
+    logger.error({ err: watchdogErr }, 'Failed to start refund watchdog');
   }
+
+  app.listen(RELAYER_CONFIG.port, () => {
+    logger.info({ port: RELAYER_CONFIG.port }, 'HTTP server started');
+  });
 
   // Start HTTP server
   const server = app.listen(RELAYER_CONFIG.port, () => {
     console.log(`≡ƒîÉ HTTP server started on port ${RELAYER_CONFIG.port}`);
   });
-  
+
   logStartupTransition('ready', { port: RELAYER_CONFIG.port });
   console.log('Γ£à Relayer service initialized successfully');
   console.log('≡ƒÄ» Ready to process cross-chain swaps');
   logger.info('Relayer service initialized successfully');
   logger.info('Ready to process cross-chain swaps');
+  };
+  void startChainMonitoring;
 }
 
 async function gracefulShutdown() {

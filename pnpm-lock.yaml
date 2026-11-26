@@ -189,8 +189,8 @@ importers:
   frontend:
     dependencies:
       '@rainbow-me/rainbowkit':
-        specifier: ^2.0.0
-        version: 2.2.11(@tanstack/react-query@5.108.4)(@types/react@18.3.31)(react-dom@18.3.1)(react@18.3.1)(typescript@5.9.3)(viem@2.58.6)(wagmi@2.19.5)
+        specifier: ^2.2.11
+        version: 2.2.11(@tanstack/react-query@5.102.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(viem@2.56.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.5.2))(wagmi@2.19.5(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@18.3.1))(@types/react@18.3.31)(bufferutil@4.1.0)(ioredis@5.11.1)(react@18.3.1)(typescript@5.9.3)(utf-8-validate@5.0.10)(viem@2.56.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.5.2))(zod@4.5.2))
       '@stellar/freighter-api':
         specifier: ^4.1.0
         version: 4.1.0
@@ -210,8 +210,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/sdk
       '@wagmi/core':
-        specifier: ^2.0.0
-        version: 2.22.1(@types/react@18.3.31)(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.4.0)(viem@2.58.6)
+        specifier: ^2.22.1
+        version: 2.22.1(@tanstack/query-core@5.102.8)(@types/react@18.3.31)(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.4.0(react@18.3.1))(viem@2.56.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.5.2))
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
@@ -234,11 +234,11 @@ importers:
         specifier: ^2.1.0
         version: 2.6.2
       viem:
-        specifier: ^2.21.0
-        version: 2.58.6(typescript@5.9.3)(zod@3.22.4)
+        specifier: ^2.56.0
+        version: 2.56.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.5.2)
       wagmi:
-        specifier: ^2.0.0
-        version: 2.19.5(@tanstack/react-query@5.108.4)(@types/react@18.3.31)(react@18.3.1)(typescript@5.9.3)(viem@2.58.6)
+        specifier: ^2.19.5
+        version: 2.19.5(@tanstack/query-core@5.102.8)(@tanstack/react-query@5.102.8(react@18.3.1))(@types/react@18.3.31)(bufferutil@4.1.0)(ioredis@5.11.1)(react@18.3.1)(typescript@5.9.3)(utf-8-validate@5.0.10)(viem@2.56.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.5.2))(zod@4.5.2)
     devDependencies:
       '@testing-library/jest-dom':
         specifier: ^6.9.1

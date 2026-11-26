@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Clock, RefreshCw, ShieldCheck } from "lucide-react";
-import { createWalletClient, createPublicClient, custom, http, type Address } from "viem";
+import { createPublicClient, http, type Address } from "viem";
 import { mainnet, sepolia } from "viem/chains";
-import { makeEthereumHTLCClient } from "../../lib/sdk-context";
+import { getEthereumWalletClient, makeEthereumHTLCClient } from "../../lib/sdk-context";
 import { isTestnet } from "../../config/networks";
 import { useNetworkMode } from "../../lib/useNetworkMode";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
@@ -139,9 +139,6 @@ export function RefundDialog(props: RefundDialogProps) {
         if (!props.v1ContractAddress) {
           throw new Error("v1-mainnet-htlc refund requires `v1ContractAddress` prop.");
         }
-        if (typeof window === "undefined" || !window.ethereum) {
-          throw new Error("No injected wallet found.");
-        }
         const orderIdBytes32 = props.orderId.startsWith("0x")
           ? (props.orderId as `0x${string}`)
           : (`0x${props.orderId}` as `0x${string}`);
@@ -156,11 +153,10 @@ export function RefundDialog(props: RefundDialogProps) {
           chain,
           transport: rpcUrl ? http(rpcUrl) : http(),
         });
-        const walletClient = createWalletClient({
-          chain,
-          transport: custom(window.ethereum),
-          account: props.userAddress,
-        });
+        const walletClient = await getEthereumWalletClient(chain.id);
+        if (!walletClient || walletClient.account.address.toLowerCase() !== props.userAddress.toLowerCase()) {
+          throw new Error("No connected Ethereum wallet found for this account.");
+        }
         const { request } = await publicClient.simulateContract({
           address: props.v1ContractAddress,
           abi: MAINNET_HTLC_ABI,

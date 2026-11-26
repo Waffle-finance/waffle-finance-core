@@ -17,6 +17,7 @@ import { z } from "zod";
 import type { Logger } from "pino";
 import { OrderExportService, UnsupportedExportFilterError, type OrderLifecycleExport } from "../../services/order-export.js";
 import { validationError, notFoundError, orderValidationError } from "../errors.js";
+import { setOrderId } from "../../request-context.js";
 import { loadOperatorKeys, requireRole } from "../middleware/auth.js";
 import { classifiedExpensiveRouteLimiter } from "../middleware/expensive-route-limits.js";
 
@@ -226,6 +227,14 @@ const downloadQuerySchema = z.object({
  */
 export function exportRoutes(exportService: OrderExportService, log?: Logger): Router {
   const router = Router();
+
+  router.param("orderId", (_req, res, next, orderId) => {
+    if (typeof orderId === "string" && orderId) {
+      setOrderId(orderId);
+      res.locals["orderId"] = orderId;
+    }
+    next();
+  });
   const authorize = requireRole("operator", { operatorKeys: loadOperatorKeys(), log });
   router.use(["/export/orders", "/orders/export"], authorize);
   // Export builds complete order lifecycles: separate anonymous/authenticated

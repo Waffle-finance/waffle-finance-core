@@ -286,7 +286,7 @@ export class EventOrderGuard {
     }
 
     const age = Number(maxHeight - blockNumber);
-    if (age > this.maxBlockAge) {
+    if (age >= this.maxBlockAge) {
       return new StalenessError(
         chain,
         blockNumber,
