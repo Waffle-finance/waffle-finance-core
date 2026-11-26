@@ -344,6 +344,7 @@ describe('ResolverLifecycle', () => {
     it('returns complete lifecycle state', () => {
       lifecycle.transition('starting');
       lifecycle.transition('running');
+      await new Promise(r => setTimeout(r, 1));
       const snap = lifecycle.snapshot();
 
       expect(snap.state).toBe('running');

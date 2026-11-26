@@ -55,7 +55,12 @@ describe("Supervisor — state transitions", () => {
 
   it("transitions to 'stopped' after a clean listener exit", async () => {
     const supervisor = makeSupervisor();
-    await supervisor.run({ start: vi.fn(), stop: vi.fn() });
+    // Both startup and loop calls succeed.
+    const start = vi
+      .fn()
+      .mockResolvedValueOnce(undefined) // startup
+      .mockResolvedValueOnce(undefined); // loop clean exit
+    await supervisor.run({ start, stop: vi.fn() });
     expect(supervisor.state).toBe("stopped");
   });
 
@@ -66,8 +71,9 @@ describe("Supervisor — state transitions", () => {
 
     const start = vi.fn().mockImplementation(async () => {
       attempt++;
-      if (attempt === 1) throw new Error("transient");
-      // On the second attempt, record the state we see (should be "running" again).
+      if (attempt === 1) return; // startup succeeds
+      if (attempt === 2) throw new Error("transient"); // first loop call fails
+      // On the third attempt (after restart), record the state we see (should be "running" again).
       observedStates.push(supervisor.state);
     });
 
@@ -84,7 +90,11 @@ describe("Supervisor — state transitions", () => {
 
   it("transitions to 'failed' when maxRestarts is exceeded", async () => {
     const supervisor = makeSupervisor({ maxRestarts: 2 });
-    const start = vi.fn().mockRejectedValue(new Error("always fails"));
+    // Startup succeeds; all loop calls fail.
+    const start = vi
+      .fn()
+      .mockResolvedValueOnce(undefined) // startup
+      .mockRejectedValue(new Error("always fails")); // loop always fails
 
     await expect(supervisor.run({ start, stop: vi.fn() })).rejects.toThrow();
     expect(supervisor.state).toBe("failed");
@@ -112,8 +122,11 @@ describe("Supervisor — state transitions", () => {
       resolveDelay = r;
     });
 
+    let calls = 0;
     const start = vi.fn().mockImplementation(async () => {
-      throw new Error("transient");
+      calls++;
+      if (calls === 1) return; // startup succeeds
+      throw new Error("transient"); // first loop call fails
     });
 
     // Use originalSleep so the real sleepReject mechanism is preserved.
@@ -157,7 +170,9 @@ describe("Supervisor — maxRestartDelayMs", () => {
     let attempt = 0;
     const start = vi.fn().mockImplementation(async () => {
       attempt++;
-      if (attempt < 5) throw new Error("transient");
+      if (attempt === 1) return; // startup succeeds
+      if (attempt < 6) throw new Error("transient"); // loop iterations 1-4 fail
+      // iteration 5 succeeds → clean exit
     });
 
     // Patch the internal sleep to capture the delay.
@@ -199,8 +214,11 @@ describe("Supervisor — stop() during restart sleep", () => {
       resolveDelay = r;
     });
 
+    let calls = 0;
     const start = vi.fn().mockImplementation(async () => {
-      throw new Error("transient");
+      calls++;
+      if (calls === 1) return; // startup succeeds
+      throw new Error("transient"); // first loop call fails
     });
 
     // Patch the sleep to signal when it's entered.
@@ -232,8 +250,11 @@ describe("Supervisor — stop() during restart sleep", () => {
       resolveDelay = r;
     });
 
+    let calls = 0;
     const start = vi.fn().mockImplementation(async () => {
-      throw new Error("transient");
+      calls++;
+      if (calls === 1) return; // startup succeeds
+      throw new Error("transient"); // first loop call fails
     });
 
     // Use originalSleep so the real sleepReject mechanism is preserved.

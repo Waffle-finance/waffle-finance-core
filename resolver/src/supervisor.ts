@@ -174,44 +174,43 @@ export class Supervisor {
     this._state = "starting";
     this.lifecycle?.transition('starting');
 
-    // Startup: attempt to start listeners
+    // ── Startup phase ──────────────────────────────────────────────────────
+    // The first call to start() is the startup phase.  Any failure here —
+    // recoverable or not — ends in "failed" immediately.  restartCount is NOT
+    // incremented.  This matches the documented contract: startup failure is
+    // always fatal regardless of maxRestarts.
     try {
       await listeners.start();
     } catch (err) {
-      // Failed startup
       this._state = "failed";
       this.lifecycle?.transition('failed');
-      this.log.error({ err }, "fatal listener error — aborting supervisor");
+      this.log.error({ err }, "fatal startup error — aborting supervisor");
       throw err;
     }
 
     // Shutdown may have been requested while startup was still in flight.
-    // Never mark the service running after shutdown began — tear down the
-    // late listener instead so no subscription leaks.
     if (this._stopped) {
       await this.absorbLateStartup(listeners);
       return;
     }
 
+    // Startup succeeded — enter the running/restart loop.
     this._state = "running";
     this.lifecycle?.transition('running');
 
     while (!this._stopped) {
       try {
         await listeners.start();
-        // Shutdown may also have arrived during this (re)start. Tear down
-        // the late listener rather than leaking it on the clean-exit path.
         if (this._stopped) {
           await this.absorbLateStartup(listeners);
           return;
         }
-        // Clean exit — listeners finished without error.
+        // Clean exit — restart loop exited without error.
         this._state = "stopped";
         this.lifecycle?.transition('stopped');
         return;
       } catch (err) {
         if (this._stopped) {
-          // stop() was called while listeners were running — absorb the error.
           this._state = "stopped";
           this.lifecycle?.transition('stopped');
           return;

@@ -65,15 +65,16 @@ describe('EventOrderGuard', () => {
   });
 
   describe('staleness detection', () => {
-    it('rejects future blocks', () => {
+    it('rejects future blocks (beyond maxBlockAge ahead)', () => {
       guard.updateChainHead('ethereum', 100n);
 
-      const metadata = makeEventMetadata({ blockNumber: 105n });
+      // Block 115 is 15 blocks ahead of chain head (> maxBlockAge of 10)
+      const metadata = makeEventMetadata({ blockNumber: 115n });
       const record = guard.validateEvent(metadata);
 
       expect(record.valid).toBe(false);
       expect(record.rejectionReason).toContain('future');
-      expect(record.observedBlockHeight).toBe(105n);
+      expect(record.observedBlockHeight).toBe(115n);
       expect(record.expectedBlockHeight).toBe(100n);
     });
 
@@ -352,6 +353,10 @@ describe('EventOrderMonitor', () => {
     // Order 5 then try order 3 (regression)
     monitor.processEvent(makeEventMetadata({ orderId: 5n, blockNumber: 100n }));
 
+    // Order 5 at block 100 — accepted and maxOrderId becomes 5
+    monitor.processEvent(makeEventMetadata({ orderId: 5n, blockNumber: 100n }));
+
+    // Order 3 at block 100 — rejected as regression (3 < maxOrderId=5)
     const record = monitor.processEvent(makeEventMetadata({ orderId: 3n, blockNumber: 100n }));
     expect(record.valid).toBe(false);
 
@@ -444,8 +449,9 @@ describe('EventOrderGuardConfigBuilder', () => {
 describe('EventOrderGuard edge cases', () => {
   it('handles zero block numbers', () => {
     const guard = new EventOrderGuard({ maxBlockAge: 10 });
-    guard.updateChainHead('ethereum', 10n);
+    guard.updateChainHead('ethereum', 11n);
 
+    // Block 0 is 11 blocks old (> maxBlockAge of 10) — stale
     const metadata = makeEventMetadata({ blockNumber: 0n });
     const record = guard.validateEvent(metadata);
 

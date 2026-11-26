@@ -126,9 +126,23 @@ describe("resolver metrics", () => {
       "action",
       "operation",
       "failure_reason",
+      // Node.js default metrics (collectDefaultMetrics) may add these
+      "type",
+      "quantile",
+      "le",
+      "version",
+      "major",
+      "minor",
+      "patch",
+      "gc_type",
+      "cpuMode",
     ]);
     const forbidden = ["order_id", "orderid", "tx_hash", "txhash", "hash", "secret", "url", "endpoint"];
-    for (const metric of (reg as any).getMetricsAsArray()) {
+    // Only check application-defined metrics (not Node.js built-ins from collectDefaultMetrics)
+    const appMetrics = (reg as any).getMetricsAsArray().filter(
+      (m: any) => !m.name.startsWith("resolver_nodejs_") && !m.name.startsWith("resolver_process_")
+    );
+    for (const metric of appMetrics) {
       const names: string[] = metric.labelNames ?? [];
       for (const name of names) {
         expect(allowedLabels.has(name), `unexpected label "${name}" on ${metric.name}`).toBe(true);
