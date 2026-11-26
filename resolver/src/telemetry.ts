@@ -12,6 +12,12 @@ import {
   retryAttemptsTotal,
   activeOperations,
   resolverRuntimeStateInfo,
+  listenerLastPollSuccessTimestampSeconds,
+  listenerLastProcessedEventTimestampSeconds,
+  listenerProgressAgeSeconds,
+  listenerProgressStaleThresholdSeconds,
+  listenerProgressState,
+  onProgressScrape,
 } from "./metrics.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -85,6 +91,129 @@ export const LISTENER_HEALTH_STATES: readonly ListenerHealthState[] = [
   "stopped",
 ];
 
+// ── Listener progress state (issue #1093) ─────────────────────────────────────
+
+/**
+ * Per-chain progress state. Separates a healthy quiet chain from a listener
+ * that is connected but no longer advancing.
+ *
+ * - `active`   — an event was processed within the progress threshold.
+ * - `idle`     — polls keep succeeding within the threshold, but no recent
+ *                events. The chain is quiet; nothing is wrong.
+ * - `stale`    — no successful poll and no processed event within the
+ *                threshold. The listener has stopped advancing.
+ * - `degraded` — the listener is stopped, or consecutive poll failures have
+ *                reached the failure threshold.
+ *
+ * Precedence: degraded > stale > active > idle.
+ */
+export type ListenerProgressState = "active" | "idle" | "stale" | "degraded";
+
+export const LISTENER_PROGRESS_STATES: readonly ListenerProgressState[] = [
+  "active",
+  "idle",
+  "stale",
+  "degraded",
+];
+
+/**
+ * How a listener observes its chain. Used as the stable `listener` metric
+ * label. Poll listeners emit a heartbeat on every successful poll, so idle
+ * and stale can be told apart; subscription listeners only advance when an
+ * event arrives, so they need a longer threshold.
+ */
+export type ListenerKind = "poll" | "subscription";
+
+export const DEFAULT_LISTENER_KINDS: Readonly<Record<string, ListenerKind>> = {
+  ethereum: "subscription",
+  soroban: "poll",
+  solana: "poll",
+};
+
+/**
+ * Default progress-age thresholds.
+ *
+ * - poll (300 s): Soroban and Solana poll every few seconds, so 300 s is
+ *   many missed polls in a row. That is long enough to ride out a brief RPC
+ *   blip and short enough to catch a stall well before HTLC timelocks
+ *   (hours) are at risk.
+ * - subscription (1800 s): an event subscription has no heartbeat, so a quiet
+ *   contract looks the same as a dead subscription. The longer window keeps
+ *   ordinary quiet periods from paging; tune it per deployment from observed
+ *   event rates.
+ */
+export const DEFAULT_PROGRESS_STALE_AFTER_SECONDS: Readonly<Record<ListenerKind, number>> = {
+  poll: 300,
+  subscription: 1800,
+};
+
+/** Consecutive poll failures at or above this mark a listener degraded. */
+export const DEFAULT_DEGRADED_CONSECUTIVE_FAILURES = 3;
+
+export interface ListenerProgressInput {
+  isActive: boolean;
+  consecutiveFailures: number;
+  secondsSinceLastPoll: number | null;
+  secondsSinceLastEvent: number | null;
+  /** Seconds since the listener started; used as the age before any progress. */
+  secondsSinceStart: number | null;
+  staleAfterSeconds: number;
+  degradedConsecutiveFailureThreshold?: number;
+}
+
+/**
+ * Seconds since the most recent progress (successful poll or processed
+ * event). Before any progress, falls back to time since start so a listener
+ * that never completes a poll still ages. null when nothing is known.
+ */
+export function computeProgressAgeSeconds(
+  input: Pick<ListenerProgressInput, "secondsSinceLastPoll" | "secondsSinceLastEvent" | "secondsSinceStart">,
+): number | null {
+  const candidates = [input.secondsSinceLastPoll, input.secondsSinceLastEvent].filter(
+    (v): v is number => v !== null,
+  );
+  if (candidates.length > 0) return Math.min(...candidates);
+  return input.secondsSinceStart;
+}
+
+/** Pure classification of a listener's progress state. */
+export function classifyListenerProgress(input: ListenerProgressInput): ListenerProgressState {
+  const threshold =
+    input.degradedConsecutiveFailureThreshold ?? DEFAULT_DEGRADED_CONSECUTIVE_FAILURES;
+
+  if (!input.isActive) return "degraded";
+  if (input.consecutiveFailures >= threshold) return "degraded";
+
+  const age = computeProgressAgeSeconds(input);
+  if (age === null || age > input.staleAfterSeconds) return "stale";
+
+  if (input.secondsSinceLastEvent !== null && input.secondsSinceLastEvent <= input.staleAfterSeconds) {
+    return "active";
+  }
+  return "idle";
+}
+
+/**
+ * Read per-chain threshold overrides from the environment:
+ * `RESOLVER_PROGRESS_STALE_AFTER_SECONDS_<CHAIN>` (e.g. `..._ETHEREUM=900`).
+ * Values that are not positive integers are ignored; the effective threshold
+ * is always visible on `resolver_listener_progress_stale_threshold_seconds`.
+ */
+export function progressThresholdsFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): Record<string, number> {
+  const prefix = "RESOLVER_PROGRESS_STALE_AFTER_SECONDS_";
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(env)) {
+    if (!key.startsWith(prefix) || raw === undefined) continue;
+    const chain = key.slice(prefix.length).toLowerCase();
+    if (!/^\d+$/.test(raw.trim())) continue;
+    const seconds = Number(raw.trim());
+    if (chain && seconds > 0) out[chain] = seconds;
+  }
+  return out;
+}
+
 // ── ChainTelemetry (extended for issue #769) ──────────────────────────────────
 
 export interface ChainTelemetry {
@@ -101,6 +230,33 @@ export interface ChainTelemetry {
   consecutiveFailures: number;
   /** Total missed event batches since process start. */
   missedEventBatches: number;
+  // Progress-age fields (issue #1093)
+  /** How the listener observes the chain (stable metric label). */
+  listener: ListenerKind;
+  /** Progress state: active, idle, stale or degraded. */
+  progressState: ListenerProgressState;
+  /** Seconds since the last successful poll or processed event (or since start). */
+  progressAgeSeconds: number | null;
+  /** Threshold after which progressState becomes stale. */
+  progressStaleAfterSeconds: number;
+  /** Seconds since the last successful poll; null for subscription listeners or before the first poll. */
+  secondsSinceLastPoll: number | null;
+  /** Seconds since the last event handed to handlers; null if none yet. */
+  secondsSinceLastProcessedEvent: number | null;
+}
+
+export interface ChainHealthData {
+  chain: string;
+  lastHealthyTickSeconds: number | null;
+  consecutiveFailures: number;
+  missedEventBatches: number;
+  isActive: boolean;
+  // Progress-age inputs (issue #1093). Optional so older callers keep working.
+  listener?: ListenerKind;
+  lastPollSuccessSeconds?: number | null;
+  lastProcessedEventSeconds?: number | null;
+  startedAtSeconds?: number | null;
+  progressStaleAfterSeconds?: number;
 }
 
 export interface ResolverTelemetrySnapshot {
@@ -118,6 +274,8 @@ export interface ResolverTelemetrySnapshot {
   totalMissedEventBatches: number;
   /** Chains with health state != healthy (for quick at-a-glance alerting). */
   unhealthyChains: string[];
+  /** Chains whose progress state is stale or degraded (not advancing). */
+  stalledChains: string[];
 }
 
 export interface ComputeTelemetryInput {
@@ -141,14 +299,8 @@ export interface ComputeTelemetryInput {
   consecutiveRpcErrors?: number;
   /** consecutiveRpcErrors at or above this trips "degraded". Default: 3. */
   consecutiveRpcErrorThreshold?: number;
-  // Extended inputs for issue #769 per-chain health
-  chainHealthData?: Array<{
-    chain: string;
-    lastHealthyTickSeconds: number | null;
-    consecutiveFailures: number;
-    missedEventBatches: number;
-    isActive: boolean;
-  }>;
+  // Extended inputs for issue #769 per-chain health (+ #1093 progress age)
+  chainHealthData?: ChainHealthData[];
 }
 
 // ── Per-chain health state computation ───────────────────────────────────────
@@ -221,7 +373,6 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
 
     const secondsSinceLastEvent =
       lastEventSeconds === null ? null : Math.max(0, nowSeconds - lastEventSeconds);
-    const live = secondsSinceLastEvent !== null && secondsSinceLastEvent <= staleAfterSeconds;
 
     const lastHealthyTickSeconds = health?.lastHealthyTickSeconds ?? null;
     const secondsSinceLastHealthyTick =
@@ -238,6 +389,35 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
       staleAfterSeconds,
     });
 
+    // ── Progress age (issue #1093) ─────────────────────────────────────────
+    const listener = health?.listener ?? DEFAULT_LISTENER_KINDS[chain] ?? "poll";
+    const progressStaleAfterSeconds =
+      health?.progressStaleAfterSeconds ?? DEFAULT_PROGRESS_STALE_AFTER_SECONDS[listener];
+    const ageFrom = (ts: number | null | undefined) =>
+      ts === null || ts === undefined ? null : Math.max(0, nowSeconds - ts);
+    const secondsSinceLastPoll = ageFrom(health?.lastPollSuccessSeconds);
+    // Fall back to the event-timestamp metric when the monitor has no event record.
+    const secondsSinceLastProcessedEvent =
+      ageFrom(health?.lastProcessedEventSeconds) ?? secondsSinceLastEvent;
+    const progressInput = {
+      isActive,
+      consecutiveFailures,
+      secondsSinceLastPoll,
+      secondsSinceLastEvent: secondsSinceLastProcessedEvent,
+      secondsSinceStart: ageFrom(health?.startedAtSeconds),
+      staleAfterSeconds: progressStaleAfterSeconds,
+    };
+    const progressState = classifyListenerProgress(progressInput);
+    const progressAgeSeconds = computeProgressAgeSeconds(progressInput);
+
+    // A chain is live when it has a recent event. When the monitor reports
+    // poll progress for the chain, a quiet chain whose polls keep succeeding
+    // (idle) also counts as live, so quiet periods no longer read as stale.
+    const hasPollProgress =
+      health?.lastPollSuccessSeconds !== null && health?.lastPollSuccessSeconds !== undefined;
+    const eventLive = secondsSinceLastEvent !== null && secondsSinceLastEvent <= staleAfterSeconds;
+    const live = eventLive || (hasPollProgress && progressState === "idle");
+
     return {
       chain,
       secondsSinceLastEvent,
@@ -246,11 +426,20 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
       healthState,
       consecutiveFailures,
       missedEventBatches,
+      listener,
+      progressState,
+      progressAgeSeconds,
+      progressStaleAfterSeconds,
+      secondsSinceLastPoll,
+      secondsSinceLastProcessedEvent,
     };
   });
 
   const totalMissedEventBatches = chains.reduce((sum, c) => sum + c.missedEventBatches, 0);
   const unhealthyChains = chains.filter((c) => c.healthState !== "healthy").map((c) => c.chain);
+  const stalledChains = chains
+    .filter((c) => c.progressState === "stale" || c.progressState === "degraded")
+    .map((c) => c.chain);
 
   const base = {
     supervisorState,
@@ -262,6 +451,7 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
     chains,
     totalMissedEventBatches,
     unhealthyChains,
+    stalledChains,
   };
 
   // ── INACTIVE: supervisor is not running ───────────────────────────────────
@@ -344,19 +534,64 @@ export function computeResolverTelemetry(input: ComputeTelemetryInput): Resolver
  *
  * Thread-safety: Node.js is single-threaded; no locking is needed.
  */
+export interface StalenessMonitorOptions {
+  /** Per-chain progress-age threshold overrides, in seconds. */
+  progressStaleAfterSeconds?: Record<string, number>;
+  /** Per-chain listener kind overrides. */
+  listenerKinds?: Record<string, ListenerKind>;
+}
+
 export class StalenessMonitor {
   private readonly lastHealthyTick = new Map<string, number>();
   private readonly consecutiveFailures = new Map<string, number>();
   private readonly missedBatches = new Map<string, number>();
   private readonly activeState = new Map<string, boolean>();
   private readonly prevHealthState = new Map<string, ListenerHealthState>();
+  // Progress tracking (issue #1093)
+  private readonly lastPollSuccess = new Map<string, number>();
+  private readonly lastProcessedEvent = new Map<string, number>();
+  private readonly startedAt = new Map<string, number>();
+  private readonly listenerKinds = new Map<string, ListenerKind>();
+  private readonly progressThresholds = new Map<string, number>();
+
+  constructor(opts: StalenessMonitorOptions = {}) {
+    for (const [chain, seconds] of Object.entries(opts.progressStaleAfterSeconds ?? {})) {
+      this.progressThresholds.set(chain, seconds);
+    }
+    for (const [chain, kind] of Object.entries(opts.listenerKinds ?? {})) {
+      this.listenerKinds.set(chain, kind);
+    }
+  }
+
+  /** The listener kind used as the `listener` label for `chain`. */
+  listenerKindFor(chain: string): ListenerKind {
+    return this.listenerKinds.get(chain) ?? DEFAULT_LISTENER_KINDS[chain] ?? "poll";
+  }
+
+  /** The effective progress-age threshold for `chain`, in seconds. */
+  progressThresholdFor(chain: string): number {
+    return (
+      this.progressThresholds.get(chain) ??
+      DEFAULT_PROGRESS_STALE_AFTER_SECONDS[this.listenerKindFor(chain)]
+    );
+  }
+
+  /** Override the progress-age threshold for `chain`. */
+  setProgressThreshold(chain: string, seconds: number): void {
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      throw new RangeError(`progress threshold for ${chain} must be a positive number, got ${seconds}`);
+    }
+    this.progressThresholds.set(chain, seconds);
+    this._publishProgress(chain);
+  }
 
   /**
-   * Record a successful poll tick or live event for `chain`.
-   * Resets the consecutive-failure counter and updates the healthy-tick timestamp.
-   * Publishes updated Prometheus metrics.
+   * Record a healthy tick for `chain`: a successful poll (`source="poll"`, the
+   * default) or a live event (`source="event"`). Resets the consecutive-failure
+   * counter, updates the healthy-tick timestamp and the matching progress
+   * timestamp, and publishes updated Prometheus metrics.
    */
-  recordHealthyTick(chain: string): void {
+  recordHealthyTick(chain: string, source: "poll" | "event" = "poll"): void {
     const nowSeconds = Math.floor(Date.now() / 1000);
     this.lastHealthyTick.set(chain, nowSeconds);
     this.consecutiveFailures.set(chain, 0);
@@ -367,6 +602,28 @@ export class StalenessMonitor {
     listenerConsecutiveFailures.set({ chain }, 0);
 
     this._publishHealthState(chain, "healthy");
+
+    if (source === "event") {
+      this._stampProcessedEvent(chain, nowSeconds);
+    } else {
+      this.lastPollSuccess.set(chain, nowSeconds);
+      listenerLastPollSuccessTimestampSeconds.set(
+        { chain, listener: this.listenerKindFor(chain) },
+        nowSeconds,
+      );
+    }
+    this._publishProgress(chain, nowSeconds);
+  }
+
+  /**
+   * Record that an event was handed to the listener's handlers. Poll-based
+   * listeners call this per event and `recordHealthyTick(chain)` once the
+   * poll completes.
+   */
+  recordEventProcessed(chain: string): void {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    this._stampProcessedEvent(chain, nowSeconds);
+    this._publishProgress(chain, nowSeconds);
   }
 
   /**
@@ -384,6 +641,7 @@ export class StalenessMonitor {
     if (next >= 3) {
       this._publishHealthState(chain, "degraded");
     }
+    this._publishProgress(chain);
   }
 
   /**
@@ -405,14 +663,21 @@ export class StalenessMonitor {
   recordStopped(chain: string): void {
     this.activeState.set(chain, false);
     this._publishHealthState(chain, "stopped");
+    this._publishProgress(chain);
   }
 
   /**
-   * Mark a chain listener as started / reactivated.
+   * Mark a chain listener as started / reactivated. `kind` sets the
+   * `listener` label; it defaults to the chain's known listener kind.
    */
-  recordStarted(chain: string): void {
+  recordStarted(chain: string, kind?: ListenerKind): void {
     this.activeState.set(chain, true);
+    if (kind) this.listenerKinds.set(chain, kind);
+    // Progress age counts from start until the first poll or event.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    this.startedAt.set(chain, nowSeconds);
     // Do not automatically mark as healthy — wait for first successful tick.
+    this._publishProgress(chain, nowSeconds);
   }
 
   /**
@@ -436,34 +701,93 @@ export class StalenessMonitor {
       });
       this._publishHealthState(chain, healthState);
     }
+
+    // Progress age must keep counting even when nothing new is recorded.
+    this.refreshProgressGauges(nowSeconds);
   }
 
   /**
    * Snapshot the current per-chain health data for use by the telemetry collector.
    */
-  snapshotChainData(): Array<{
-    chain: string;
-    lastHealthyTickSeconds: number | null;
-    consecutiveFailures: number;
-    missedEventBatches: number;
-    isActive: boolean;
-  }> {
-    const chains = new Set([
-      ...this.lastHealthyTick.keys(),
-      ...this.consecutiveFailures.keys(),
-      ...this.missedBatches.keys(),
-      ...this.activeState.keys(),
-    ]);
-    return Array.from(chains).map((chain) => ({
+  snapshotChainData(): Required<ChainHealthData>[] {
+    return this._knownChains().map((chain) => ({
       chain,
       lastHealthyTickSeconds: this.lastHealthyTick.get(chain) ?? null,
       consecutiveFailures: this.consecutiveFailures.get(chain) ?? 0,
       missedEventBatches: this.missedBatches.get(chain) ?? 0,
       isActive: this.activeState.get(chain) ?? true,
+      listener: this.listenerKindFor(chain),
+      lastPollSuccessSeconds: this.lastPollSuccess.get(chain) ?? null,
+      lastProcessedEventSeconds: this.lastProcessedEvent.get(chain) ?? null,
+      startedAtSeconds: this.startedAt.get(chain) ?? null,
+      progressStaleAfterSeconds: this.progressThresholdFor(chain),
     }));
   }
 
+  /** Recompute progress age/state gauges for every known chain. */
+  refreshProgressGauges(nowSeconds = Math.floor(Date.now() / 1000)): void {
+    for (const chain of this._knownChains()) {
+      this._publishProgress(chain, nowSeconds);
+    }
+  }
+
+  /**
+   * Progress state for `chain` at `nowSeconds` (defaults to the current time).
+   */
+  progressStateFor(chain: string, nowSeconds = Math.floor(Date.now() / 1000)): ListenerProgressState {
+    return classifyListenerProgress(this._progressInput(chain, nowSeconds));
+  }
+
   // ── Private ─────────────────────────────────────────────────────────────────
+
+  private _knownChains(): string[] {
+    return Array.from(
+      new Set([
+        ...this.lastHealthyTick.keys(),
+        ...this.consecutiveFailures.keys(),
+        ...this.missedBatches.keys(),
+        ...this.activeState.keys(),
+        ...this.lastPollSuccess.keys(),
+        ...this.lastProcessedEvent.keys(),
+        ...this.startedAt.keys(),
+      ]),
+    );
+  }
+
+  private _stampProcessedEvent(chain: string, nowSeconds: number): void {
+    this.lastProcessedEvent.set(chain, nowSeconds);
+    listenerLastProcessedEventTimestampSeconds.set(
+      { chain, listener: this.listenerKindFor(chain) },
+      nowSeconds,
+    );
+  }
+
+  private _progressInput(chain: string, nowSeconds: number): ListenerProgressInput {
+    const ageFrom = (ts: number | undefined) =>
+      ts === undefined ? null : Math.max(0, nowSeconds - ts);
+    return {
+      isActive: this.activeState.get(chain) ?? true,
+      consecutiveFailures: this.consecutiveFailures.get(chain) ?? 0,
+      secondsSinceLastPoll: ageFrom(this.lastPollSuccess.get(chain)),
+      secondsSinceLastEvent: ageFrom(this.lastProcessedEvent.get(chain)),
+      secondsSinceStart: ageFrom(this.startedAt.get(chain)),
+      staleAfterSeconds: this.progressThresholdFor(chain),
+    };
+  }
+
+  /** Publish progress age, threshold and enum-style progress state for `chain`. */
+  private _publishProgress(chain: string, nowSeconds = Math.floor(Date.now() / 1000)): void {
+    const labels = { chain, listener: this.listenerKindFor(chain) };
+    const input = this._progressInput(chain, nowSeconds);
+    const state = classifyListenerProgress(input);
+    const age = computeProgressAgeSeconds(input);
+
+    listenerProgressStaleThresholdSeconds.set(labels, input.staleAfterSeconds);
+    if (age !== null) listenerProgressAgeSeconds.set(labels, age);
+    for (const candidate of LISTENER_PROGRESS_STATES) {
+      listenerProgressState.set({ ...labels, state: candidate }, candidate === state ? 1 : 0);
+    }
+  }
 
   /** Publish health state as enum-style gauge and emit a transition counter if the state changed. */
   private _publishHealthState(chain: string, newState: ListenerHealthState): void {
@@ -492,7 +816,12 @@ export class StalenessMonitor {
  * to thread the monitor through every call site. The telemetry collector reads
  * from it via `globalStalenessMonitor.snapshotChainData()`.
  */
-export const globalStalenessMonitor = new StalenessMonitor();
+export const globalStalenessMonitor = new StalenessMonitor({
+  progressStaleAfterSeconds: progressThresholdsFromEnv(),
+});
+
+// Keep progress-age gauges current on every /metrics scrape.
+onProgressScrape(() => globalStalenessMonitor.refreshProgressGauges());
 
 // ── Metrics-backed collection ─────────────────────────────────────────────────
 
@@ -509,6 +838,8 @@ export interface CollectTelemetryDeps {
    * Pass an explicit instance in tests to isolate state.
    */
   stalenessMonitor?: StalenessMonitor;
+  /** Optional logger for state-transition log lines. */
+  log?: Pick<Logger, "info" | "warn" | "error">;
 }
 
 /**

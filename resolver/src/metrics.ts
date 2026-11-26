@@ -172,6 +172,97 @@ export const listenerHealthTransitionsTotal = new Counter({
   registers: [registry],
 });
 
+// ── Per-chain progress age metrics (issue #1093) ──────────────────────────────
+
+let progressScrapeHook: (() => void) | undefined;
+
+/**
+ * Register a callback that refreshes the progress-age gauges right before
+ * each scrape, so the age keeps growing while a listener is stalled even if
+ * nothing calls /telemetry. telemetry.ts registers the global monitor here.
+ */
+export function onProgressScrape(hook: (() => void) | undefined): void {
+  progressScrapeHook = hook;
+}
+//
+// All progress metrics carry the stable labels `chain` (ethereum | soroban |
+// solana) and `listener` (poll | subscription). Neither label carries order-,
+// address- or transaction-specific values, so cardinality is bounded by the
+// number of configured chains.
+
+/**
+ * Unix timestamp of the most recent poll that completed successfully, whether
+ * or not it returned any events. Only poll-based listeners (`listener="poll"`)
+ * emit this; subscription listeners have no poll boundary.
+ */
+export const listenerLastPollSuccessTimestampSeconds = new Gauge({
+  name: "resolver_listener_last_poll_success_timestamp_seconds",
+  help: "Unix timestamp of the most recent successful poll per chain listener.",
+  labelNames: ["chain", "listener"] as const,
+  registers: [registry],
+});
+
+/**
+ * Unix timestamp of the most recent event the listener handed to its handlers.
+ * Distinct from the poll timestamp: a healthy idle chain keeps advancing the
+ * poll timestamp while this one stays put.
+ */
+export const listenerLastProcessedEventTimestampSeconds = new Gauge({
+  name: "resolver_listener_last_processed_event_timestamp_seconds",
+  help: "Unix timestamp of the most recent processed event per chain listener.",
+  labelNames: ["chain", "listener"] as const,
+  registers: [registry],
+});
+
+/**
+ * Seconds since the listener last made progress — the most recent of a
+ * successful poll or a processed event. Before the first progress it counts
+ * from listener start, so a listener that never completes a poll still ages.
+ *
+ * Alert: `resolver_listener_progress_age_seconds > resolver_listener_progress_stale_threshold_seconds`
+ * (see `resolver/ops/resolver-alerts.yml`).
+ */
+export const listenerProgressAgeSeconds = new Gauge({
+  name: "resolver_listener_progress_age_seconds",
+  help: "Seconds since the last successful poll or processed event per chain listener.",
+  labelNames: ["chain", "listener"] as const,
+  registers: [registry],
+  collect() {
+    progressScrapeHook?.();
+  },
+});
+
+/**
+ * The configured progress-age threshold for each chain listener. Exported so
+ * alert rules compare against the deployed configuration instead of a number
+ * duplicated in the rules file.
+ */
+export const listenerProgressStaleThresholdSeconds = new Gauge({
+  name: "resolver_listener_progress_stale_threshold_seconds",
+  help: "Configured progress-age threshold after which a chain listener is considered stale.",
+  labelNames: ["chain", "listener"] as const,
+  registers: [registry],
+});
+
+/**
+ * Progress state per chain listener as an enum-style gauge (exactly one
+ * `state` series is 1 per chain/listener):
+ *
+ *   active   — events processed within the threshold.
+ *   idle     — polls succeed within the threshold but no recent events (a quiet chain).
+ *   stale    — no successful poll or processed event within the threshold.
+ *   degraded — listener stopped or consecutive poll failures at/over threshold.
+ */
+export const listenerProgressState = new Gauge({
+  name: "resolver_listener_progress_state",
+  help: "Progress state per chain listener (1 = current state). States: active, idle, stale, degraded.",
+  labelNames: ["chain", "listener", "state"] as const,
+  registers: [registry],
+  collect() {
+    progressScrapeHook?.();
+  },
+});
+
 // ── Registration / participation metrics ──────────────────────────────────────
 
 export const registrationInfo = new Gauge({

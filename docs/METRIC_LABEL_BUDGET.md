@@ -14,7 +14,7 @@ category. The enforcement script allows only these names:
 
 | Category | Labels |
 | --- | --- |
-| Chain / topology | `chain`, `network_mode`, `route`, `direction` |
+| Chain / topology | `chain`, `listener`, `network_mode`, `route`, `direction` |
 | HTTP / job classification | `method`, `route`, `status_code`, `job`, `type`, `priority`, `name`, `operation`, `query_name` |
 | Outcomes and states | `result`, `outcome`, `decision`, `verdict`, `state`, `from`, `to`, `from_state`, `to_state`, `status`, `mode`, `phase`, `transition`, `trigger`, `recovery_type`, `recovered_to_state`, `checkpoint`, `action`, `mutation`, `path` |
 | Error classification | `reason`, `error_type`, `failure_reason`, `failure_category`, `fault_class`, `conflict_type`, `mismatch_type`, `event`, `event_type` |
