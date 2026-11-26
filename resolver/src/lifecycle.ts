@@ -152,6 +152,8 @@ import {
   lifecycleTransitionsTotal,
 } from "./metrics.js";
 
+const lifecycleTransitionsCounter = lifecycleTransitionsTotal;
+
 // ── ResolverLifecycle Class ───────────────────────────────────────────────────
 
 /**
