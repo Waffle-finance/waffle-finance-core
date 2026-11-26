@@ -2,26 +2,33 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { createRequire } from 'node:module';
-
-const nodeRequire = createRequire(import.meta.url);
-const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
+import { fileURLToPath } from 'node:url';
+import {
+  formatVerificationReport,
+  resolveManifestForBackup,
+  verifyBackupArchiveChecksum,
+  verifyPostgresDatabase,
+  verifySqliteDatabase,
+  type VerificationReport,
+} from './db-backup-verify.js';
 
 interface Args {
   databaseUrl: string;
   from?: string;
+  manifest?: string;
   force: boolean;
   verify: boolean;
 }
 
 function usage(): string {
   return [
-    'Usage: pnpm --filter @wafflefinance/coordinator db:restore -- --from <backup> [--database-url <url>] --force [--no-verify]',
+    'Usage: pnpm --filter @wafflefinance/coordinator db:restore -- --from <backup> [--manifest <path>] [--database-url <url>] --force [--no-verify]',
     '',
     'Safety:',
     '  --force is required because restore can replace or clean database state.',
     '  SQLite restores move the existing DB aside before copying the backup.',
     '  Postgres restores use pg_restore --clean --if-exists.',
+    '  Post-restore verification checks integrity, required tables, schema version, and row counts.',
   ].join('\n');
 }
 
@@ -44,6 +51,10 @@ function parseArgs(argv: string[]): Args {
     }
     if (arg === '--from') {
       args.from = requireValue(argv, ++i, arg);
+      continue;
+    }
+    if (arg === '--manifest') {
+      args.manifest = requireValue(argv, ++i, arg);
       continue;
     }
     if (arg === '--force') {
@@ -89,26 +100,39 @@ function ensureParent(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
 }
 
-function verifySqlite(path: string): void {
-  const db = new DatabaseSync(path, { readOnly: true });
-  try {
-    const row = db.prepare('PRAGMA integrity_check').get() as Record<string, string>;
-    const result = Object.values(row)[0];
-    if (result !== 'ok') {
-      throw new Error(`SQLite integrity_check failed: ${result}`);
-    }
-    db.prepare(
-      'SELECT migration FROM schema_migrations ORDER BY applied_at DESC, migration DESC LIMIT 1'
-    ).get();
-  } finally {
-    db.close();
-  }
+export interface RestoreResult {
+  restored: string;
+  verification?: VerificationReport;
 }
 
-function restoreSqlite(databaseUrl: string, backupPath: string, verify = true): string {
+export function restoreSqlite(
+  databaseUrl: string,
+  backupPath: string,
+  verify = true,
+  explicitManifestPath?: string
+): RestoreResult {
   const source = resolve(backupPath);
   if (!existsSync(source)) throw new Error(`Backup does not exist: ${source}`);
-  if (verify) verifySqlite(source);
+
+  const resolvedManifest = resolveManifestForBackup(
+    source,
+    explicitManifestPath ? resolve(explicitManifestPath) : undefined
+  );
+
+  if (verify) {
+    if (resolvedManifest) {
+      verifyBackupArchiveChecksum(source, resolvedManifest.manifest);
+    }
+    const preReport = verifySqliteDatabase(
+      source,
+      resolvedManifest?.manifest,
+      resolvedManifest?.manifestPath
+    );
+    if (!preReport.ok) {
+      console.error(formatVerificationReport(preReport));
+      throw new Error(`Pre-restore verification failed:\n${preReport.mismatches.join('\n')}`);
+    }
+  }
 
   const target = sqlitePathFromUrl(databaseUrl);
   ensureParent(target);
@@ -120,8 +144,21 @@ function restoreSqlite(databaseUrl: string, backupPath: string, verify = true): 
   }
 
   copyFileSync(source, target);
-  if (verify) verifySqlite(target);
-  return target;
+
+  let verification: VerificationReport | undefined;
+  if (verify) {
+    verification = verifySqliteDatabase(
+      target,
+      resolvedManifest?.manifest,
+      resolvedManifest?.manifestPath
+    );
+    console.log(formatVerificationReport(verification));
+    if (!verification.ok) {
+      throw new Error(`Post-restore verification failed:\n${verification.mismatches.join('\n')}`);
+    }
+  }
+
+  return { restored: target, verification };
 }
 
 function postgresEnvFromUrl(url: string): NodeJS.ProcessEnv {
@@ -151,12 +188,27 @@ function run(command: string, args: string[], env?: NodeJS.ProcessEnv): void {
   }
 }
 
-function restorePostgres(databaseUrl: string, backupPath: string, verify = true): string {
+export async function restorePostgres(
+  databaseUrl: string,
+  backupPath: string,
+  verify = true,
+  explicitManifestPath?: string
+): Promise<RestoreResult> {
   const source = resolve(backupPath);
   if (!existsSync(source)) throw new Error(`Backup does not exist: ${source}`);
 
+  const resolvedManifest = resolveManifestForBackup(
+    source,
+    explicitManifestPath ? resolve(explicitManifestPath) : undefined
+  );
+
   const env = postgresEnvFromUrl(databaseUrl);
-  if (verify) run('pg_restore', ['--list', source], env);
+  if (verify) {
+    if (resolvedManifest) {
+      verifyBackupArchiveChecksum(source, resolvedManifest.manifest);
+    }
+    run('pg_restore', ['--list', source], env);
+  }
   run(
     'pg_restore',
     [
@@ -170,19 +222,41 @@ function restorePostgres(databaseUrl: string, backupPath: string, verify = true)
     ],
     env
   );
-  return env.PGDATABASE ?? '(unknown database)';
+
+  let verification: VerificationReport | undefined;
+  if (verify) {
+    verification = await verifyPostgresDatabase(
+      databaseUrl,
+      resolvedManifest?.manifest,
+      resolvedManifest?.manifestPath
+    );
+    console.log(formatVerificationReport(verification));
+    if (!verification.ok) {
+      throw new Error(`Post-restore verification failed:\n${verification.mismatches.join('\n')}`);
+    }
+  }
+
+  return {
+    restored: env.PGDATABASE ?? '(unknown database)',
+    verification,
+  };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const restored = isPostgresUrl(args.databaseUrl)
-    ? restorePostgres(args.databaseUrl, args.from!, args.verify)
-    : restoreSqlite(args.databaseUrl, args.from!, args.verify);
+  const result = isPostgresUrl(args.databaseUrl)
+    ? await restorePostgres(args.databaseUrl, args.from!, args.verify, args.manifest)
+    : restoreSqlite(args.databaseUrl, args.from!, args.verify, args.manifest);
 
-  console.log(`Restore completed: ${restored}`);
+  console.log(`Restore completed: ${result.restored}`);
 }
 
-main().catch(err => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exitCode = 1;
-});
+const isDirectExecution =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isDirectExecution) {
+  main().catch(err => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  });
+}
