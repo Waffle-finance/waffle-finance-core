@@ -24,6 +24,9 @@ on `GET /listener-health` (default port `9091`, overridden by
 - [Event throughput metrics](#event-throughput-metrics)
 - [Resolver lifecycle metrics](#resolver-lifecycle-metrics)
 - [Claim / refund operation metrics](#claim--refund-operation-metrics)
+- [Work limiting metrics (issue #1096)](#work-limiting-metrics)
+- [Registry eligibility metrics (issue #1097)](#registry-eligibility-metrics)
+- [Signing key rotation metrics (issue #1091)](#signing-key-rotation-metrics)
 - [Health endpoint](#health-endpoint)
 - [Alert threshold summary](#alert-threshold-summary)
 - [Dashboard query examples](#dashboard-query-examples)
@@ -531,6 +534,54 @@ Terminal failures (after all retries exhausted).
 
 In-flight operations. Used by `ResolverTelemetryCollector` to derive
 `commandQueueDepth`.
+
+---
+
+## Work limiting metrics
+
+Emitted by `ResolverWorkLimiter` (`src/work-limiter.ts`). See the README's
+"Work limits and deduplication" section for the policy.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `resolver_work_rejected_total` | Counter | `chain`, `reason` | Work refused. `reason` is `order_budget_exhausted` (the per-order attempt budget for this action is used up) or `queue_full` (backpressure). |
+| `resolver_work_deduplicated_total` | Counter | `chain`, `reason` | Repeated identical events absorbed without running the handler. `reason` is `in_flight` or `recently_completed`. |
+| `resolver_work_deferred_total` | Counter | `chain` | Work queued because the chain's concurrency limit was reached. |
+| `resolver_work_in_flight` | Gauge | `chain` | Handlers currently running. |
+| `resolver_work_queue_depth` | Gauge | `chain` | Handlers waiting for a slot. |
+
+Suggested alerts: any `queue_full` rejections over 5 minutes (the resolver is
+dropping work), or a sustained rise in `order_budget_exhausted` (one order is
+failing over and over).
+
+---
+
+## Registry eligibility metrics
+
+### `resolver_order_eligibility_decisions_total`
+
+| Property | Value |
+|----------|-------|
+| Type | Counter |
+| Labels | `chain`, `action` (`accept`, `claim`, `refund`), `result` |
+
+`result` is `accepted`, or the reason the work was refused:
+`registry_unavailable`, `registry_stale`, `not_active` or `not_accepted`.
+Emitted by `OrderEligibilityGate` (`src/order-eligibility.ts`). A rising
+`not_active` count while `resolver_registration_info` is `0` is expected: the
+resolver is correctly refusing new work.
+
+---
+
+## Signing key rotation metrics
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `resolver_signing_keys` | Gauge | `chain`, `state` (`active`, `retiring`, `revoked`) | Number of keys held in each state. |
+| `resolver_key_rotation_events_total` | Counter | `chain`, `action` (`rotate`, `rollback`, `retire`, `revoke`) | Rotation events. |
+
+Key ids are available on `GET /keys`. They are not metric labels, and key
+material is never exported. See [key-rotation.md](key-rotation.md).
 
 ---
 

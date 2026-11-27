@@ -395,6 +395,68 @@ export const resolverRuntimeStateInfo = new Gauge({
   registers: [registry],
 });
 
+// ── Work limiting / backpressure (issue #1096) ────────────────────────────────
+
+export const workRejectedTotal = new Counter({
+  name: "resolver_work_rejected_total",
+  help: "Event-handler work refused by the work limiter, by chain and reason (order_budget_exhausted, queue_full)",
+  labelNames: ["chain", "reason"] as const,
+  registers: [registry],
+});
+
+export const workDeduplicatedTotal = new Counter({
+  name: "resolver_work_deduplicated_total",
+  help: "Repeated identical events absorbed without running the handler, by chain and reason (in_flight, recently_completed)",
+  labelNames: ["chain", "reason"] as const,
+  registers: [registry],
+});
+
+export const workDeferredTotal = new Counter({
+  name: "resolver_work_deferred_total",
+  help: "Event-handler work queued because the per-chain concurrency limit was reached",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+export const workInFlight = new Gauge({
+  name: "resolver_work_in_flight",
+  help: "Event-handler work currently executing per chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+export const workQueueDepth = new Gauge({
+  name: "resolver_work_queue_depth",
+  help: "Event-handler work waiting for a per-chain concurrency slot",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+// ── Registry eligibility (issue #1097) ────────────────────────────────────────
+
+export const orderEligibilityDecisionsTotal = new Counter({
+  name: "resolver_order_eligibility_decisions_total",
+  help: "Registry-eligibility decisions for order work, by chain, action and result (accepted or a refusal reason)",
+  labelNames: ["chain", "action", "result"] as const,
+  registers: [registry],
+});
+
+// ── Signing key rotation (issue #1091) ────────────────────────────────────────
+
+export const signingKeys = new Gauge({
+  name: "resolver_signing_keys",
+  help: "Signing keys held per chain by rotation state (active, retiring, revoked). Key identifiers are exposed on /keys, never key material.",
+  labelNames: ["chain", "state"] as const,
+  registers: [registry],
+});
+
+export const keyRotationEventsTotal = new Counter({
+  name: "resolver_key_rotation_events_total",
+  help: "Signing key rotation events by chain and action (rotate, rollback, retire, revoke)",
+  labelNames: ["chain", "action"] as const,
+  registers: [registry],
+});
+
 export const resolverMetrics = {
   eventsTotal,
   listenerErrorsTotal,
@@ -422,4 +484,12 @@ export const resolverMetrics = {
   operationFailuresTotal,
   activeOperations,
   resolverRuntimeStateInfo,
+  workRejectedTotal,
+  workDeduplicatedTotal,
+  workDeferredTotal,
+  workInFlight,
+  workQueueDepth,
+  orderEligibilityDecisionsTotal,
+  signingKeys,
+  keyRotationEventsTotal,
 } as const;

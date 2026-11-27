@@ -22,7 +22,11 @@ import {
 import { startResolverHealthServer } from "../health.js";
 import { buildSupportPolicy, chainLabel, logSupportPolicy } from "../support.js";
 import { metricsRouter } from "../routes/metrics.js";
-import { ResolverStatusMonitor, DEFAULT_STATUS_POLL_INTERVAL_MS } from "../registry-status.js";
+import { ResolverStatusMonitor } from "../registry-status.js";
+import { buildKeyRings, KeyRotationError, type ResolverKeyRing } from "../key-rotation.js";
+import { ResolverWorkLimiter, workLimiterOptionsFromEnv } from "../work-limiter.js";
+import { OrderEligibilityGate } from "../order-eligibility.js";
+import { ResolverOrderIntake, type IntakeResult } from "../order-intake.js";
 import {
   startTimeSeconds,
   ordersProcessedTotal,
@@ -106,6 +110,43 @@ export async function runCommand(): Promise<void> {
   }
   logSupportPolicy(policy, log);
 
+  // ── 2c. Signing keys, registry eligibility, work limits ──────────────────
+  //
+  // Key rings (#1091) own which signing key serves which order, so a key can
+  // be rotated with an overlap window instead of a service interruption.
+  // Only key identifiers are ever logged — never key material.
+  let keyRings: Map<string, ResolverKeyRing>;
+  try {
+    keyRings = buildKeyRings(
+      {
+        ethereumPrivateKey: cfg.ethereum.resolverPrivateKey,
+        stellarSecret: cfg.soroban.resolverSecret,
+      },
+      process.env,
+      log
+    );
+  } catch (err) {
+    log.error(
+      { reason: err instanceof KeyRotationError ? err.message : "invalid signing key configuration" },
+      "resolver startup aborted: signing keys could not be loaded"
+    );
+    process.exit(1);
+  }
+
+  // Registry standing (#1097): new orders require an active, fresh registry
+  // status; orders already accepted keep their settlement/refund duties.
+  const statusPollRaw = Number(process.env.RESOLVER_STATUS_POLL_INTERVAL_MS);
+  const registryMonitor = new ResolverStatusMonitor(cfg, log, {
+    intervalMs: Number.isFinite(statusPollRaw) && statusPollRaw > 0 ? statusPollRaw : undefined,
+  });
+  registryMonitor.start();
+  const eligibility = new OrderEligibilityGate({ monitor: registryMonitor, log });
+
+  // Work limiter (#1096): per-order dedup + attempt budget and per-chain
+  // concurrency so replayed events cannot cause unbounded RPC/signing calls.
+  const limiter = new ResolverWorkLimiter({ log, ...workLimiterOptionsFromEnv(process.env) });
+  const intake = new ResolverOrderIntake({ limiter, gate: eligibility, keyRings, log });
+
   // ── 3. Metrics HTTP server ────────────────────────────────────────────────
   const metricsPort = Number(process.env.RESOLVER_METRICS_PORT ?? 3002);
   const healthPort = Number(process.env.RESOLVER_HEALTH_PORT ?? 3003);
@@ -147,7 +188,14 @@ export async function runCommand(): Promise<void> {
   );
 
   const healthServer = startResolverHealthServer(
-    { cfg, supervisor, policy, telemetryChains: observedChains.map(chainLabel) },
+    {
+      cfg,
+      supervisor,
+      policy,
+      telemetryChains: observedChains.map(chainLabel),
+      keyRings,
+      registryMonitor,
+    },
     healthPort
   );
   log.info({ port: healthPort }, "resolver health server listening");
@@ -183,13 +231,35 @@ export async function runCommand(): Promise<void> {
    * handler is skipped (the event will be re-observed from the persisted
    * cursor after restart) instead of starting new work.
    */
-  const tracked = (meta: OperationMeta, fn: () => void): void => {
+  const trackedIntake = (meta: OperationMeta, run: () => Promise<IntakeResult>): void => {
     drain
-      .run(meta, async () => fn())
+      .run(meta, run)
+      .then((result) => {
+        if (result.status !== "processed") {
+          log.debug({ ...meta, result }, "event handler not executed");
+        }
+      })
       .catch((err) => {
         if (err instanceof DrainingError) return;
         log.error({ err, ...meta }, "event handler failed");
       });
+  };
+
+  /** Route an order event through the intake layers (limiter → eligibility → key ring). */
+  const tracked = (meta: OperationMeta & { orderId: string }, fn: () => void): void => {
+    const run = (): Promise<IntakeResult> => {
+      switch (meta.action) {
+        case "order_created":
+          return intake.onOrderCreated(meta.chain, meta.orderId, fn);
+        case "order_claimed":
+          return intake.onSettlement(meta.chain, meta.orderId, "claim", fn);
+        case "order_refunded":
+          return intake.onSettlement(meta.chain, meta.orderId, "refund", fn);
+        default:
+          return Promise.resolve(fn()).then(() => ({ status: "processed" as const }));
+      }
+    };
+    trackedIntake(meta, run);
   };
 
   let shuttingDown = false;
@@ -202,6 +272,7 @@ export async function runCommand(): Promise<void> {
       stopIntake: async () => {
         // Tell the supervisor to stop and cancel any pending restart sleep.
         supervisor.stop();
+        registryMonitor.stop();
 
         // Stop listeners concurrently.  Each stop is independently try-caught
         // so one failure doesn't prevent the other from being cleaned up.

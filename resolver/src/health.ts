@@ -9,6 +9,8 @@ import type { ResolverConfig } from "./config.js";
 import type { Supervisor } from "./supervisor.js";
 import type { ResolverLifecycle } from "./lifecycle.js";
 import { buildSupportPolicy } from "./support.js";
+import type { KeyRingSnapshot } from "./key-rotation.js";
+import type { ResolverStatusMonitor } from "./registry-status.js";
 import {
   ResolverTelemetryCollector,
   computeProgressAgeSeconds,
@@ -35,6 +37,13 @@ export interface ResolverHealthDeps {
    * on every resolver liveness state transition (connected/degraded/stale/inactive).
    */
   log?: Logger;
+  /**
+   * Signing key rings per chain (issue #1091).  Exposed on GET /keys as key
+   * identifiers and rotation state only — never key material.
+   */
+  keyRings?: ReadonlyMap<string, { snapshot(): KeyRingSnapshot }>;
+  /** Registry status monitor; when provided, readiness reflects on-chain standing. */
+  registryMonitor?: Pick<ResolverStatusMonitor, "isReady" | "getStatusSnapshot">;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -99,7 +108,7 @@ function readinessChecks(deps: ResolverHealthDeps, policy: SupportPolicy) {
     effectiveState === "stopping" ||
     effectiveState === "stopped";
 
-  const checks = [
+  const checks: Array<{ name: string; ok: boolean; detail: string; level?: string }> = [
     {
       name: "ethereum_config",
       ok: ethClaim.supported,
@@ -119,10 +128,17 @@ function readinessChecks(deps: ResolverHealthDeps, policy: SupportPolicy) {
     },
   ];
 
-  // Registry status: reserved for future use when a ResolverStatusMonitor is
-  // threaded through ResolverHealthDeps.  Not-ready when the resolver's own
-  // on-chain standing is low_stake / slashed / unbonding / inactive.
-  // Currently omitted — no registry probe is wired up in this deployment.
+  // Registry status: not-ready when the resolver's own on-chain standing is
+  // low_stake / slashed / unbonding / inactive, so orchestration stops routing
+  // new work to it.  In-flight duties are unaffected (see order-eligibility.ts).
+  if (deps.registryMonitor) {
+    const ok = deps.registryMonitor.isReady();
+    const states = deps.registryMonitor
+      .getStatusSnapshot()
+      .map((s) => `${s.chain}=${s.state}${s.stale ? "(stale)" : ""}`)
+      .join(",");
+    checks.push({ name: "registry_status", ok, detail: states || "not_tracked" });
+  }
 
   return { checks, ethIntentional, sorobanIntentional };
 }
@@ -337,6 +353,13 @@ export function createResolverHealthServer(deps: ResolverHealthDeps): Server {
         chains,
         ...servicePayload(startedAt),
       });
+      return;
+    }
+
+    // ── /keys — signing key identifiers and rotation state (issue #1091) ──
+    if (req.url === "/keys") {
+      const chains = [...(deps.keyRings?.values() ?? [])].map((r) => r.snapshot());
+      json(res, 200, { chains, ...servicePayload(startedAt) });
       return;
     }
 

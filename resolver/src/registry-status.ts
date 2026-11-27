@@ -349,6 +349,10 @@ export class ResolverStatusMonitor {
   private readonly sorobanProbe: RegistryProbe;
   private readonly lastState = new Map<RegistryChain, ResolverLifecycleState>();
   private readonly lastUpdatedAt = new Map<RegistryChain, number>();
+  /** Epoch ms of the most recent failed probe per chain. */
+  private readonly lastErrorAt = new Map<RegistryChain, number>();
+  /** Chains whose probe returned null: no registry participation configured. */
+  private readonly untracked = new Set<RegistryChain>();
   private readonly staleAfterMs: number;
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = true;
@@ -431,6 +435,29 @@ export class ResolverStatusMonitor {
     return out;
   }
 
+  /**
+   * Whether this chain has registry participation configured.  Returns
+   * `undefined` until the first probe completes (successfully or with null),
+   * because a probe that has only ever failed tells us nothing either way.
+   */
+  isTracked(chain: RegistryChain): boolean | undefined {
+    if (this.untracked.has(chain)) return false;
+    if (this.lastState.has(chain) || this.lastErrorAt.has(chain)) return true;
+    return undefined;
+  }
+
+  /**
+   * True when the most recent probe for this chain failed (i.e. a failure is
+   * newer than the last successful read).  The cached state is kept for
+   * observability but must not be trusted for decisions that take new work.
+   */
+  lastProbeFailed(chain: RegistryChain): boolean {
+    const err = this.lastErrorAt.get(chain);
+    if (err === undefined) return false;
+    const ok = this.lastUpdatedAt.get(chain);
+    return ok === undefined || err >= ok;
+  }
+
   /** True unless a currently-tracked chain is in a non-ready state. Chains never probed (not configured) don't block readiness. */
   isReady(): boolean {
     for (const state of this.lastState.values()) {
@@ -445,11 +472,16 @@ export class ResolverStatusMonitor {
       info = await probe(this.cfg, this.log);
     } catch (err) {
       this.log.warn({ chain, err }, "failed to fetch resolver registry status");
+      this.lastErrorAt.set(chain, Date.now());
       // Preserve last-known state and its timestamp: a failed refresh must
       // not erase useful data nor reset the freshness clock.
       return;
     }
-    if (info === null) return;
+    if (info === null) {
+      this.untracked.add(chain);
+      return;
+    }
+    this.untracked.delete(chain);
 
     const state = deriveLifecycleState(info);
     const previous = this.lastState.get(chain);
