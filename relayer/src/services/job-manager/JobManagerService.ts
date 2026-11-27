@@ -26,6 +26,23 @@
  *   pending → running → completed | failed
  *   Any state → cancelled  (if cancelJob() is called before execution)
  *
+ * Backpressure
+ * ------------
+ * The pending queue is bounded by `maxQueueDepth`.  When it is full,
+ * `submitJob()` rejects with `QueueFullError` instead of growing the queue
+ * without limit; producers either shed the work or wait on
+ * `whenCapacityAvailable()` before resubmitting.  Retries of jobs that were
+ * already admitted are always re-enqueued, so the queue can exceed the cap by
+ * at most the global concurrency limit (one retry per running job).
+ *
+ * Terminal job records (completed / failed / cancelled) are kept for
+ * introspection up to `maxRetainedJobs`, oldest pruned first, so the registry
+ * does not grow for the life of the process.
+ *
+ * A freed concurrency slot triggers an immediate dispatch instead of waiting
+ * for the next tick, which removes up to `tickIntervalMs` of idle latency per
+ * job under load (see test/load/order-load.test.ts).
+ *
  * Retry
  * -----
  * Jobs with retryCount < maxRetries are re-enqueued at their original priority
@@ -58,11 +75,12 @@ import {
   jobCompletedTotal,
   jobFailedTotal,
   jobCancelledTotal,
+  jobRejectedTotal,
   jobWaitDurationSeconds,
   jobProcessingDurationSeconds,
   jobQueueCapacityUtilization,
 } from './metrics.js';
-import { getLogger } from '../logger.js';
+import { getLogger } from '../../logger.js';
 
 const log = getLogger().child({ service: 'job-manager' });
 
@@ -76,6 +94,38 @@ const log = getLogger().child({ service: 'job-manager' });
  */
 export type JobExecutor = (job: Job) => Promise<unknown>;
 
+/** Default cap on pending (not yet running) jobs. */
+export const DEFAULT_MAX_QUEUE_DEPTH = 1_000;
+/** Default number of terminal job records retained for introspection. */
+export const DEFAULT_MAX_RETAINED_JOBS = 10_000;
+
+export interface JobManagerOptions {
+  limits?: Partial<ConcurrencyLimits>;
+  tickIntervalMs?: number;
+  /** Maximum pending jobs before submitJob() rejects with QueueFullError. */
+  maxQueueDepth?: number;
+  /** Maximum terminal job records kept in the registry. */
+  maxRetainedJobs?: number;
+}
+
+/**
+ * Thrown by submitJob()/submitJobs() when admitting the job(s) would push the
+ * pending queue past `maxQueueDepth`.  Nothing is enqueued when this is thrown.
+ */
+export class QueueFullError extends Error {
+  readonly code = 'JOB_QUEUE_FULL';
+  constructor(
+    public readonly queueDepth: number,
+    public readonly maxQueueDepth: number,
+    public readonly requested = 1,
+  ) {
+    super(
+      `job queue full: ${queueDepth}/${maxQueueDepth} pending, cannot admit ${requested} more`,
+    );
+    this.name = 'QueueFullError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Job Manager Service
 // ---------------------------------------------------------------------------
@@ -88,6 +138,12 @@ export class JobManagerService implements IJobManagerService {
 
   private tickHandle: NodeJS.Timeout | null = null;
   private readonly tickIntervalMs: number;
+  private readonly maxQueueDepth: number;
+  private readonly maxRetainedJobs: number;
+  /** Ids of terminal jobs in completion order, for retention pruning. */
+  private readonly terminalOrder: string[] = [];
+  /** Producers waiting for the queue to drop below maxQueueDepth. */
+  private capacityWaiters: Array<() => void> = [];
   private paused = false;
   private running = false;
 
@@ -101,16 +157,16 @@ export class JobManagerService implements IJobManagerService {
   private totalCompleted = 0;
   private totalFailed = 0;
   private totalCancelled = 0;
+  private totalRejected = 0;
 
-  constructor(options: {
-    limits?: Partial<ConcurrencyLimits>;
-    tickIntervalMs?: number;
-  } = {}) {
+  constructor(options: JobManagerOptions = {}) {
     this.limiter = new ConcurrencyLimiter({
       ...DEFAULT_CONCURRENCY_LIMITS,
       ...options.limits,
     });
     this.tickIntervalMs = options.tickIntervalMs ?? 50;
+    this.maxQueueDepth = Math.max(1, options.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH);
+    this.maxRetainedJobs = Math.max(0, options.maxRetainedJobs ?? DEFAULT_MAX_RETAINED_JOBS);
   }
 
   // --------------------------------------------------------------------------
@@ -162,6 +218,38 @@ export class JobManagerService implements IJobManagerService {
   // --------------------------------------------------------------------------
 
   async submitJob(job: Job): Promise<string> {
+    this.assertCapacity(job.type, 1);
+    return this.admit(job);
+  }
+
+  /**
+   * Resolve once the pending queue is below `maxQueueDepth`.  Producers use
+   * this to wait instead of retrying in a tight loop after QueueFullError.
+   */
+  whenCapacityAvailable(): Promise<void> {
+    if (this.queue.size() < this.maxQueueDepth) return Promise.resolve();
+    return new Promise<void>((resolve) => this.capacityWaiters.push(resolve));
+  }
+
+  /** Configured pending-queue cap. */
+  getMaxQueueDepth(): number {
+    return this.maxQueueDepth;
+  }
+
+  private assertCapacity(type: JobType, requested: number): void {
+    const depth = this.queue.size();
+    if (depth + requested > this.maxQueueDepth) {
+      this.totalRejected += requested;
+      jobRejectedTotal.inc({ type }, requested);
+      log.warn(
+        { type, queueDepth: depth, maxQueueDepth: this.maxQueueDepth, requested },
+        '[job-manager] queue full — rejecting submission',
+      );
+      throw new QueueFullError(depth, this.maxQueueDepth, requested);
+    }
+  }
+
+  private admit(job: Job): string {
     const enriched: Job = {
       ...job,
       status: 'pending' as JobStatus,
@@ -185,13 +273,14 @@ export class JobManagerService implements IJobManagerService {
     return enriched.id;
   }
 
+  /**
+   * Submit a batch atomically with respect to backpressure: either every job
+   * fits under `maxQueueDepth` and all are enqueued, or none are.
+   */
   async submitJobs(jobs: Job[], batchId?: string): Promise<string[]> {
-    const ids: string[] = [];
-    for (const job of jobs) {
-      const tagged: Job = batchId ? { ...job, batchId } : job;
-      ids.push(await this.submitJob(tagged));
-    }
-    return ids;
+    if (jobs.length === 0) return [];
+    this.assertCapacity(jobs[0].type, jobs.length);
+    return jobs.map((job) => this.admit(batchId ? { ...job, batchId } : job));
   }
 
   // --------------------------------------------------------------------------
@@ -214,6 +303,8 @@ export class JobManagerService implements IJobManagerService {
       job.completedAt = Date.now();
       this.totalCancelled++;
       jobCancelledTotal.inc({ type: job.type });
+      this.retainTerminal(job);
+      this.notifyCapacity();
       this.refreshGauges();
       log.info({ jobId: id }, '[job-manager] job cancelled');
     }
@@ -278,6 +369,11 @@ export class JobManagerService implements IJobManagerService {
     this.limiter.updateLimits(limits);
   }
 
+  /** Total submissions rejected by backpressure since construction. */
+  getRejectedCount(): number {
+    return this.totalRejected;
+  }
+
   getStats(): JobManagerStats {
     const byPriority: Record<JobPriority, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
     const byType: Record<JobType, number> = {
@@ -323,8 +419,10 @@ export class JobManagerService implements IJobManagerService {
         job.status = 'cancelled';
         job.completedAt = Date.now();
         this.totalCancelled++;
+        this.retainTerminal(job);
       }
     }
+    this.notifyCapacity();
     this.refreshGauges();
     log.warn('[job-manager] queue cleared');
   }
@@ -361,6 +459,7 @@ export class JobManagerService implements IJobManagerService {
     }
 
     if (dispatched > 0) {
+      this.notifyCapacity();
       this.refreshGauges();
     }
   }
@@ -400,6 +499,9 @@ export class JobManagerService implements IJobManagerService {
     } finally {
       this.limiter.release(job.type, job.priority);
       this.refreshGauges();
+      // Hand the freed slot to the next queued job right away rather than
+      // leaving it idle until the next scheduler tick.
+      if (this.running) this.tick();
     }
   }
 
@@ -415,6 +517,7 @@ export class JobManagerService implements IJobManagerService {
     job.completedAt = Date.now();
     this.totalCompleted++;
     jobCompletedTotal.inc({ type: job.type });
+    this.retainTerminal(job);
 
     log.debug(
       { jobId: job.id, type: job.type, processMs },
@@ -447,6 +550,7 @@ export class JobManagerService implements IJobManagerService {
     job.completedAt = Date.now();
     this.totalFailed++;
     jobFailedTotal.inc({ type: job.type });
+    this.retainTerminal(job);
 
     log.error(
       { jobId: job.id, type: job.type, error: errorMessage },
@@ -478,6 +582,31 @@ export class JobManagerService implements IJobManagerService {
   // --------------------------------------------------------------------------
   // Helpers
   // --------------------------------------------------------------------------
+
+  /**
+   * Wake producers blocked in whenCapacityAvailable(), FIFO, one per free
+   * queue slot.  Waking everyone would cause a thundering herd where most
+   * producers immediately hit QueueFullError again.
+   */
+  private notifyCapacity(): void {
+    const free = this.maxQueueDepth - this.queue.size();
+    if (free <= 0 || this.capacityWaiters.length === 0) return;
+    const wake = this.capacityWaiters.splice(0, free);
+    for (const resolve of wake) resolve();
+  }
+
+  /** Track a terminal job and prune the oldest beyond maxRetainedJobs. */
+  private retainTerminal(job: Job): void {
+    this.terminalOrder.push(job.id);
+    while (this.terminalOrder.length > this.maxRetainedJobs) {
+      const oldest = this.terminalOrder.shift()!;
+      const record = this.registry.get(oldest);
+      // A re-submitted id may be live again; only prune terminal records.
+      if (record && record.status !== 'pending' && record.status !== 'running') {
+        this.registry.delete(oldest);
+      }
+    }
+  }
 
   private recordSample(arr: number[], value: number): void {
     arr.push(value);

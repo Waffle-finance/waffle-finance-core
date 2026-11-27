@@ -11,6 +11,14 @@ import { getLogger } from "../logger.js";
 import { EthereumListener } from "../listeners/ethereum.js";
 import { SorobanListener } from "../listeners/soroban.js";
 import { Supervisor, FatalError } from "../supervisor.js";
+import {
+  DrainCoordinator,
+  DrainingError,
+  ShutdownOrchestrator,
+  createFileAmbiguousTxSink,
+  resolveDrainTimeoutMs,
+  type OperationMeta,
+} from "../shutdown-drain.js";
 import { startResolverHealthServer } from "../health.js";
 import { buildSupportPolicy, chainLabel, logSupportPolicy } from "../support.js";
 import { metricsRouter } from "../routes/metrics.js";
@@ -40,6 +48,16 @@ const CHAIN_SOROBAN = chainLabel("stellar");
  * blocking the process indefinitely on SIGTERM.
  */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
+
+/**
+ * How long in-flight operations get to finish once shutdown begins.  Clamped
+ * below SHUTDOWN_TIMEOUT_MS so the drain report is always emitted.
+ * Override with RESOLVER_SHUTDOWN_DRAIN_MS.
+ */
+const DRAIN_TIMEOUT_MS = resolveDrainTimeoutMs(
+  process.env.RESOLVER_SHUTDOWN_DRAIN_MS,
+  SHUTDOWN_TIMEOUT_MS
+);
 
 export async function runCommand(): Promise<void> {
   // ── 1. Configuration ──────────────────────────────────────────────────────
@@ -134,30 +152,101 @@ export async function runCommand(): Promise<void> {
   );
   log.info({ port: healthPort }, "resolver health server listening");
 
-  // ── 5. Signal handlers ───────────────────────────────────────────────────
+  // ── 5. Drain coordination and signal handlers ───────────────────────────
   //
-  // All termination signals funnel through a single `shutdown()` function that:
-  //   a) signals the supervisor to stop (cancels any restart sleep immediately),
-  //   b) stops both listeners and awaits their cleanup,
-  //   c) closes HTTP servers,
+  // Every event handler runs through the DrainCoordinator so shutdown knows
+  // what is in flight.  Handlers that broadcast transactions must call
+  // `op.recordTx(hash)` right after submission; if shutdown cuts the
+  // confirmation wait short, the hash is logged (and journaled to
+  // RESOLVER_AMBIGUOUS_TX_LOG when set) for reconciliation on restart.
+  //
+  // All termination signals funnel through a ShutdownOrchestrator that:
+  //   a) stops intake: refuses new operations, signals the supervisor to stop
+  //      (cancelling any restart sleep) and stops both listeners,
+  //   b) drains in-flight operations for up to DRAIN_TIMEOUT_MS, reporting
+  //      any submitted-but-unconfirmed transaction as ambiguous,
+  //   c) only then closes HTTP servers / clients,
   //   d) flushes async log transport,
   //   e) force-exits after SHUTDOWN_TIMEOUT_MS to prevent hangs.
   //
-  // The guard flag ensures re-entrant signal delivery (e.g. double Ctrl-C)
-  // doesn't start a second teardown race.
+  // Repeated signals (e.g. double Ctrl-C) share the first shutdown sequence.
+
+  const ambiguousTxLogPath = process.env.RESOLVER_AMBIGUOUS_TX_LOG;
+  const drain = new DrainCoordinator({
+    log,
+    drainTimeoutMs: DRAIN_TIMEOUT_MS,
+    sink: ambiguousTxLogPath ? createFileAmbiguousTxSink(ambiguousTxLogPath) : undefined,
+  });
+
+  /**
+   * Run an event handler as a tracked operation.  Once draining has begun the
+   * handler is skipped (the event will be re-observed from the persisted
+   * cursor after restart) instead of starting new work.
+   */
+  const tracked = (meta: OperationMeta, fn: () => void): void => {
+    drain
+      .run(meta, async () => fn())
+      .catch((err) => {
+        if (err instanceof DrainingError) return;
+        log.error({ err, ...meta }, "event handler failed");
+      });
+  };
 
   let shuttingDown = false;
   /** Holds the promise returned by supervisor.run() so shutdown can await it. */
   let supervisorRunPromise: Promise<void> | undefined;
 
+  const orchestrator = new ShutdownOrchestrator(
+    drain,
+    {
+      stopIntake: async () => {
+        // Tell the supervisor to stop and cancel any pending restart sleep.
+        supervisor.stop();
+
+        // Stop listeners concurrently.  Each stop is independently try-caught
+        // so one failure doesn't prevent the other from being cleaned up.
+        await Promise.allSettled([
+          eth.stop().catch((err) => log.warn({ err }, "error stopping Ethereum listener")),
+          Promise.resolve().then(() => {
+            try {
+              stellar.stop();
+            } catch (err) {
+              log.warn({ err }, "error stopping Soroban listener");
+            }
+          }),
+        ]);
+
+        // Await the supervisor's run loop — it resolves promptly now that it
+        // is stopped and the listeners have been told to stop.
+        if (supervisorRunPromise) {
+          try {
+            await supervisorRunPromise;
+          } catch {
+            // The supervisor may reject if it was in a failed state; ignore
+            // here since we're already shutting down intentionally.
+          }
+        }
+      },
+      closeClients: async () => {
+        activeListeners.set({ chain: "http" }, 0);
+        await Promise.allSettled([
+          new Promise<void>((resolve) => healthServer.close(() => resolve())),
+          new Promise<void>((resolve) => metricsServer.close(() => resolve())),
+        ]);
+      },
+    },
+    log
+  );
+
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) {
-      log.warn({ signal }, "shutdown already in progress — ignoring duplicate signal");
+      // Repeated signal: the orchestrator logs and shares the first sequence.
+      void orchestrator.shutdown(signal);
       return;
     }
     shuttingDown = true;
 
-    log.info({ signal }, "resolver shutting down");
+    log.info({ signal, drainTimeoutMs: DRAIN_TIMEOUT_MS }, "resolver shutting down");
 
     // Arm a hard timeout so we never hang indefinitely.
     const forceExitTimer = setTimeout(() => {
@@ -170,41 +259,14 @@ export async function runCommand(): Promise<void> {
     // Don't let this timer keep the event loop alive longer than needed.
     forceExitTimer.unref?.();
 
-    // Tell the supervisor to stop and cancel any pending restart sleep.
-    supervisor.stop();
+    const { report } = await orchestrator.shutdown(signal);
 
-    // Stop listeners concurrently.  Each stop is independently try-caught so
-    // one failure doesn't prevent the other from being cleaned up.
-    activeListeners.set({ chain: "http" }, 0);
-    await Promise.allSettled([
-      eth.stop().catch((err) => log.warn({ err }, "error stopping Ethereum listener")),
-      Promise.resolve().then(() => {
-        try {
-          stellar.stop();
-        } catch (err) {
-          log.warn({ err }, "error stopping Soroban listener");
-        }
-      }),
-    ]);
-
-    // Await the supervisor's run loop — it will resolve promptly now that
-    // `stopped` is true and the listeners have been told to stop.
-    if (supervisorRunPromise) {
-      try {
-        await supervisorRunPromise;
-      } catch {
-        // The supervisor may reject if it was in a failed state; ignore here
-        // since we're already shutting down intentionally.
-      }
-    }
-
-    // Close HTTP servers.
-    await Promise.allSettled([
-      new Promise<void>((resolve) => healthServer.close(() => resolve())),
-      new Promise<void>((resolve) => metricsServer.close(() => resolve())),
-    ]);
-
-    log.info({ signal }, "resolver stopped cleanly");
+    log.info(
+      { signal, ambiguous: report.ambiguous.length, timedOut: report.timedOut },
+      report.ambiguous.length > 0
+        ? "resolver stopped with ambiguous transactions pending reconciliation"
+        : "resolver stopped cleanly"
+    );
 
     // Flush pino's async transport so the last log lines land before exit.
     await log.flush?.();
@@ -262,50 +324,74 @@ export async function runCommand(): Promise<void> {
     async start(): Promise<void> {
       if (ethObserve.supported) {
         await eth.start({
-          onOrderCreated: (e) => {
-            log.info(
-              { orderId: e.orderId.toString(), hashlock: e.hashlock, amount: e.amount.toString() },
-              "ETH order created"
-            );
-            ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_created" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
-          },
-          onOrderClaimed: (e) => {
-            log.info({ orderId: e.orderId.toString(), preimagePrefix: preimagePrefix(e.preimage) }, "ETH order claimed");
-            ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_claimed" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
-          },
-          onOrderRefunded: (e) => {
-            log.info({ orderId: e.orderId.toString() }, "ETH order refunded");
-            ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_refunded" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
-          },
+          onOrderCreated: (e) =>
+            tracked(
+              { chain: CHAIN_ETH, action: "order_created", orderId: e.orderId.toString() },
+              () => {
+                log.info(
+                  { orderId: e.orderId.toString(), hashlock: e.hashlock, amount: e.amount.toString() },
+                  "ETH order created"
+                );
+                ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_created" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
+              }
+            ),
+          onOrderClaimed: (e) =>
+            tracked(
+              { chain: CHAIN_ETH, action: "order_claimed", orderId: e.orderId.toString() },
+              () => {
+                log.info({ orderId: e.orderId.toString(), preimagePrefix: preimagePrefix(e.preimage) }, "ETH order claimed");
+                ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_claimed" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
+              }
+            ),
+          onOrderRefunded: (e) =>
+            tracked(
+              { chain: CHAIN_ETH, action: "order_refunded", orderId: e.orderId.toString() },
+              () => {
+                log.info({ orderId: e.orderId.toString() }, "ETH order refunded");
+                ordersProcessedTotal.inc({ chain: CHAIN_ETH, action: "order_refunded" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_ETH }, Math.floor(Date.now() / 1000));
+              }
+            ),
         });
       }
 
       if (sorobanObserve.supported) {
         await stellar.start({
-          onOrderCreated: (e) => {
-            log.info(
-              { orderId: e.orderId, hashlock: e.hashlock, ledger: e.ledger },
-              "Soroban order created"
-            );
-            ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_created" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
-          },
-          onOrderClaimed: (e) => {
-            log.info(
-              { orderId: e.orderId, preimage: e.preimage, ledger: e.ledger },
-              "Soroban order claimed"
-            );
-            ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_claimed" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
-          },
-          onOrderRefunded: (e) => {
-            log.info({ orderId: e.orderId, ledger: e.ledger }, "Soroban order refunded");
-            ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_refunded" });
-            listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
-          },
+          onOrderCreated: (e) =>
+            tracked(
+              { chain: CHAIN_SOROBAN, action: "order_created", orderId: String(e.orderId) },
+              () => {
+                log.info(
+                  { orderId: e.orderId, hashlock: e.hashlock, ledger: e.ledger },
+                  "Soroban order created"
+                );
+                ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_created" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
+              }
+            ),
+          onOrderClaimed: (e) =>
+            tracked(
+              { chain: CHAIN_SOROBAN, action: "order_claimed", orderId: String(e.orderId) },
+              () => {
+                log.info(
+                  { orderId: e.orderId, preimage: e.preimage, ledger: e.ledger },
+                  "Soroban order claimed"
+                );
+                ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_claimed" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
+              }
+            ),
+          onOrderRefunded: (e) =>
+            tracked(
+              { chain: CHAIN_SOROBAN, action: "order_refunded", orderId: String(e.orderId) },
+              () => {
+                log.info({ orderId: e.orderId, ledger: e.ledger }, "Soroban order refunded");
+                ordersProcessedTotal.inc({ chain: CHAIN_SOROBAN, action: "order_refunded" });
+                listenerLastEventTimestampSeconds.set({ chain: CHAIN_SOROBAN }, Math.floor(Date.now() / 1000));
+              }
+            ),
           onUnknownEvent: ({ topics, ledger, txHash }) => {
             log.debug(
               { topicCount: topics.length, ledger, txHash },

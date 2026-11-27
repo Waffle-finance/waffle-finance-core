@@ -13,6 +13,7 @@
     "test:smoke": "vitest run test/smoke",
     "test:smoke:watch": "vitest test/smoke",
     "test:idempotency": "vitest run test/idempotency",
+    "test:load": "vitest run test/load",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },

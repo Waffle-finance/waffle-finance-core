@@ -13,6 +13,12 @@ export * from './IJobManagerService.js';
 export { PriorityQueue } from './PriorityQueue.js';
 export { ConcurrencyLimiter } from './ConcurrencyLimiter.js';
 export { ThreadPoolExecutor } from './ThreadPoolExecutor.js';
-export { JobManagerService, globalJobManager } from './JobManagerService.js';
-export type { JobExecutor } from './JobManagerService.js';
+export {
+  JobManagerService,
+  globalJobManager,
+  QueueFullError,
+  DEFAULT_MAX_QUEUE_DEPTH,
+  DEFAULT_MAX_RETAINED_JOBS,
+} from './JobManagerService.js';
+export type { JobExecutor, JobManagerOptions } from './JobManagerService.js';
 export * from './metrics.js';

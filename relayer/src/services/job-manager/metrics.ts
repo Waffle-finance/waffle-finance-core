@@ -85,6 +85,16 @@ export const jobCancelledTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Total jobs rejected at submission because the queue was full (backpressure).
+ */
+export const jobRejectedTotal = new Counter({
+  name: 'relayer_job_rejected_total',
+  help: 'Total jobs rejected at submission because the queue was at maxQueueDepth',
+  labelNames: ['type'] as const,
+  registers: [registry],
+});
+
 // ---------------------------------------------------------------------------
 // Latency histograms
 // ---------------------------------------------------------------------------
@@ -125,6 +135,7 @@ export const jobManagerMetrics = {
   completedTotal:      jobCompletedTotal,
   failedTotal:         jobFailedTotal,
   cancelledTotal:      jobCancelledTotal,
+  rejectedTotal:       jobRejectedTotal,
   waitDuration:        jobWaitDurationSeconds,
   processingDuration:  jobProcessingDurationSeconds,
 } as const;
