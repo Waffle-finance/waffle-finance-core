@@ -36,11 +36,38 @@ described below for whichever chain(s) are configured.
 | `RESOLVER_METRICS_PORT` | Prometheus `/metrics` port (default `3002`). |
 | `RESOLVER_HEALTH_PORT` | `/healthz` `/readyz` `/health` port (default `3003`). |
 | `RESOLVER_STATUS_POLL_INTERVAL_MS` | How often the registration/stake status monitor polls each configured registry (default `60000`). |
+| `RESOLVER_SHUTDOWN_DRAIN_MS` | How long in-flight operations get to finish after `SIGTERM`/`SIGINT`/`SIGHUP` (default `10000`, clamped below the 15 s hard shutdown timeout). |
+| `RESOLVER_AMBIGUOUS_TX_LOG` | Optional path to a JSON-lines journal of transactions that were submitted but not confirmed when shutdown finished. |
 
 A resolver without a signing key/secret for a chain runs **observe-only** on
 that chain: it still watches events and exposes metrics, but never attempts a
 claim/refund there, and the status monitor described below skips it (there is
 no on-chain identity to check).
+
+## Graceful shutdown and draining
+
+On a termination signal the resolver shuts down in a fixed order
+(`src/shutdown-drain.ts`):
+
+1. **Stop intake.** New operations are refused immediately, the supervisor
+   is stopped and listeners are torn down. Events that arrive from here on
+   are not processed; they are seen again from the persisted cursor after
+   restart.
+2. **Drain.** Operations already running get up to `RESOLVER_SHUTDOWN_DRAIN_MS`
+   to finish.
+3. **Report.** If a transaction was submitted but not confirmed by the
+   deadline (or its confirmation wait failed during the drain), it is logged
+   as *ambiguous*, with chain, action, order id and tx hash, and appended to
+   `RESOLVER_AMBIGUOUS_TX_LOG` if that is set. Check each hash on-chain
+   before retrying the order. Operations that had not submitted anything are
+   logged as *abandoned* and can be retried.
+4. **Close clients.** HTTP servers and clients are closed only after the
+   drain finishes.
+
+If a second signal arrives during shutdown, it is ignored and the first
+shutdown sequence keeps running. Code that broadcasts a transaction must run
+inside `DrainCoordinator.run()` and call `op.recordTx(hash)` as soon as the
+transaction is submitted.
 
 ## Local development keys (test identities only)
 

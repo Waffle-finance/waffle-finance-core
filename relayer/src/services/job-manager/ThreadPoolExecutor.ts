@@ -4,7 +4,7 @@
  */
 
 import type { IThreadPoolExecutor } from './IJobManagerService.js';
-import { getLogger } from '../logger.js';
+import { getLogger } from '../../logger.js';
 
 const logger = getLogger().child({ component: 'thread-pool' });
 

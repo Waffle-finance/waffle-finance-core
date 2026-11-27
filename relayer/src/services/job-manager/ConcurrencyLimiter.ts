@@ -10,7 +10,7 @@ import type {
   IConcurrencyLimiter,
 } from './IJobManagerService.js';
 import { DEFAULT_CONCURRENCY_LIMITS } from './IJobManagerService.js';
-import { getLogger } from '../logger.js';
+import { getLogger } from '../../logger.js';
 
 const logger = getLogger().child({ component: 'concurrency-limiter' });
 

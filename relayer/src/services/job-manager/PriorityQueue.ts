@@ -113,7 +113,8 @@ export class PriorityQueue<T extends Job> implements IPriorityQueue<T> {
    */
   clear(): void {
     for (let p = 0; p <= 3; p++) {
-      this.queues.get(p as JobPriority)?.length = 0;
+      const queue = this.queues.get(p as JobPriority);
+      if (queue) queue.length = 0;
     }
     this.sizeCount = 0;
   }
