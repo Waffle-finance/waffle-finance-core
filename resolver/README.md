@@ -38,6 +38,13 @@ described below for whichever chain(s) are configured.
 | `RESOLVER_STATUS_POLL_INTERVAL_MS` | How often the registration/stake status monitor polls each configured registry (default `60000`). |
 | `RESOLVER_SHUTDOWN_DRAIN_MS` | How long in-flight operations get to finish after `SIGTERM`/`SIGINT`/`SIGHUP` (default `10000`, clamped below the 15 s hard shutdown timeout). |
 | `RESOLVER_AMBIGUOUS_TX_LOG` | Optional path to a JSON-lines journal of transactions that were submitted but not confirmed when shutdown finished. |
+| `RESOLVER_ETH_PRIVATE_KEY_NEXT` / `RESOLVER_STELLAR_SECRET_NEXT` | Replacement signing key. When set, the resolver starts mid-rotation: new orders use the NEXT key, orders already in flight keep the current one. See [docs/key-rotation.md](docs/key-rotation.md). |
+| `RESOLVER_KEY_OVERLAP_MS` | Minimum time the previous key keeps serving its in-flight orders after a rotation (default `86400000`, 24 h). |
+| `RESOLVER_MAX_CONCURRENT_PER_CHAIN` | Event handlers allowed to run at once per chain (default `4`). |
+| `RESOLVER_MAX_QUEUED_PER_CHAIN` | Handlers allowed to wait for a slot per chain before new work is rejected (default `256`). |
+| `RESOLVER_MAX_ATTEMPTS_PER_ORDER` | Handler runs allowed per order and action within the attempt window (default `5`). |
+| `RESOLVER_ORDER_ATTEMPT_WINDOW_MS` | Sliding window for the per-order attempt budget (default `60000`). |
+| `RESOLVER_DEDUP_TTL_MS` | How long a successfully handled event absorbs identical replays (default `30000`). |
 
 A resolver without a signing key/secret for a chain runs **observe-only** on
 that chain: it still watches events and exposes metrics, but never attempts a
@@ -68,6 +75,34 @@ If a second signal arrives during shutdown, it is ignored and the first
 shutdown sequence keeps running. Code that broadcasts a transaction must run
 inside `DrainCoordinator.run()` and call `op.recordTx(hash)` as soon as the
 transaction is submitted.
+
+## Work limits and deduplication
+
+Listeners can deliver the same event more than once: Ethereum subscriptions
+re-deliver logs after reconnects, Soroban polling re-reads a page from the
+persisted cursor after a failed tick, and supervisor restarts replay from the
+cursor. `retry.ts` bounds each RPC *call*, but nothing bounded how often one
+order's handler ran. Every event handler now runs through a
+`ResolverWorkLimiter` (`src/work-limiter.ts`):
+
+- **Per-order deduplication.** Work is keyed by chain, action and order id.
+  A copy of work that is already running, or that succeeded within
+  `RESOLVER_DEDUP_TTL_MS`, is absorbed without calling RPC or signing.
+  Failures are not remembered, so a real retry still runs.
+- **Per-order attempt budget.** At most `RESOLVER_MAX_ATTEMPTS_PER_ORDER`
+  runs per order and action in any `RESOLVER_ORDER_ATTEMPT_WINDOW_MS`. Each
+  action has its own budget, so replayed `order_created` events can never use
+  up the budget of a time-sensitive claim or refund.
+- **Per-chain concurrency.** Up to `RESOLVER_MAX_CONCURRENT_PER_CHAIN` handlers
+  run per chain. Extra work waits in a queue of up to
+  `RESOLVER_MAX_QUEUED_PER_CHAIN` entries and is rejected after that. Claims
+  and refunds move ahead of queued new-order work. Each chain has its own
+  slots, so a backlog on one chain never holds up another.
+
+Rejected, deduplicated and deferred work is counted in
+`resolver_work_rejected_total`, `resolver_work_deduplicated_total` and
+`resolver_work_deferred_total`. Current load is in `resolver_work_in_flight` and
+`resolver_work_queue_depth`.
 
 ## Local development keys (test identities only)
 
@@ -179,3 +214,36 @@ started and stopped alongside the rest of the daemon in `src/commands/run.ts`.
 A probe failure (RPC error, timeout) is logged at `warn` and the previously
 known state is kept — it never throws out of the poll loop, and never resets
 a resolver from `active` to `unregistered` just because one poll failed.
+
+### Registry failure policy: new work vs in-flight orders
+
+Registry standing controls whether the resolver takes **new** work. It never
+makes the resolver walk away from an order it already accepted, because
+abandoning an accepted order is what puts user funds at risk.
+`OrderEligibilityGate` (`src/order-eligibility.ts`) applies the policy to every
+order event:
+
+| What the registry says about this chain | New order | Claim for an accepted order | Refund for an accepted order |
+|---|---|---|---|
+| No registry configured (probe returns nothing) | accept | run | run |
+| `active`, recently read, last probe succeeded | accept | run | run |
+| `inactive` / `low_stake` / `slashed` / `unbonding` / `unregistered` | **refuse** | run | run |
+| Never read, or the most recent probe failed | **refuse** | run | run |
+| Last good read older than twice the poll interval (stale) | **refuse** | run | run |
+
+- A claim for an order this resolver never accepted counts as new work and
+  is refused under the same conditions. If the registry is unreachable, the
+  resolver cannot show it may complete the order, so it does not start.
+- A refund for an order this resolver never accepted is refused, because it
+  has nothing to return.
+- Any doubt (unknown, stale or failed probe) refuses new work. The cached
+  state is still reported, but it is not used to take on work.
+- An order refused while the resolver is ineligible is not remembered as
+  handled. If the event is seen again after the resolver becomes `active`,
+  the order is processed.
+
+Decisions are counted in
+`resolver_order_eligibility_decisions_total{chain,action,result}`.
+Integration tests that cover each row are in
+`test/registry-eligibility.integration.test.ts`, and the fixtures are in
+`test/fixtures/registry.ts`.
